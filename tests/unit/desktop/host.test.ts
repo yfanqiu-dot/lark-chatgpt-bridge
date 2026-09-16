@@ -53,3 +53,32 @@ it('ignores stale socket replies and does not invalidate a replacement when the 
   r.request(current,{id:10,method:'config/batchWrite'});r.response(old,{id:10,result:{}});now+=15_000;
   expect(r.canLease()).toBe(false);
 });
+
+it('accepts a warm desktop that reads existing configuration without writing it',()=>{
+  let now=0;const r=new DesktopReadiness(()=>{},()=>now),c={};
+  r.request(c,{id:1,method:'initialize',params:{clientInfo:{name:'Codex Desktop'}}});r.response(c,{id:1,result:{}});
+  r.request(c,{id:2,method:'project/list'});r.response(c,{id:2,result:{data:[]}});
+  r.request(c,{id:3,method:'config/read'});r.response(c,{id:3,result:{config:{}}});
+  now=15_000;expect(r.canLease()).toBe(true);
+});
+
+it('requires fresh configuration after failed plugin install instead of remaining stuck forever',()=>{
+  let now=0;const r=new DesktopReadiness(()=>{},()=>now),c={};initialize(r,c);now=15_000;
+  expect(r.canLease()).toBe(true);
+  r.request(c,{id:4,method:'config/read'});
+  r.request(c,{id:5,method:'plugin/install'});now+=20_000;
+  r.response(c,{id:5,error:{code:-32600,message:'plugin missing'}});
+  r.response(c,{id:4,result:{config:{}}});expect(r.canLease()).toBe(false);
+  r.request(c,{id:6,method:'config/read'});r.response(c,{id:6,result:{config:{}}});
+  now+=14_999;expect(r.canLease()).toBe(false);now++;expect(r.canLease()).toBe(true);
+  expect(r.snapshot().configurationFailures).toBe(1);
+});
+
+it('does not lease while another configuration mutation is still in flight',()=>{
+  let now=0;const r=new DesktopReadiness(()=>{},()=>now),c={};initialize(r,c);
+  r.request(c,{id:4,method:'config/batchWrite'});r.request(c,{id:5,method:'plugin/install'});
+  r.response(c,{id:4,result:{}});r.request(c,{id:6,method:'config/read'});r.response(c,{id:6,result:{}});
+  now=60_000;expect(r.canLease()).toBe(false);expect(r.snapshot().pendingConfiguration).toEqual(['plugin/install']);
+  r.response(c,{id:5,result:{}});expect(r.canLease()).toBe(false);
+  r.request(c,{id:7,method:'config/read'});r.response(c,{id:7,result:{}});now+=15_000;expect(r.canLease()).toBe(true);
+});

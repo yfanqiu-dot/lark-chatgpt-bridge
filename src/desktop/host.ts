@@ -106,12 +106,15 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     });
     desktop=spawn(cfg.desktopExe,[],{env:{...env,CODEX_APP_SERVER_WS_URL:cfg.endpoint},cwd:cfg.projectRoot,stdio:'ignore'});
     let desktopError:Error|undefined;desktop.on('error',e=>{desktopError=e;});
-    let verifiedOnce=false;const startedAt=Date.now();
+    let verifiedOnce=false,lastReadiness='';const startedAt=Date.now();
     while(!stopping && server.exitCode===null && desktop.exitCode===null) {
       try { await readFile(`${cfg.connectionFile}.stop`,'utf8');stopping=true;break; }
       catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
       if(appServer.error() || desktopError)throw appServer.error()??desktopError;
-      if(!verifiedOnce && Date.now()-startedAt>120_000)throw new Error('Desktop did not finish shared initialization within 120 seconds');
+      const snapshot=readiness.snapshot();
+      const summary=JSON.stringify({...snapshot,quietForMs:Math.min(snapshot.quietForMs,15000)});
+      if(!verifiedOnce && summary!==lastReadiness){console.log('Desktop readiness:',summary);lastReadiness=summary;}
+      if(!verifiedOnce && Date.now()-startedAt>120_000)throw new Error(`Desktop did not finish shared initialization within 120 seconds: ${summary}`);
       if(readiness.canLease()) {
         const revision=readiness.revision;
         try {
