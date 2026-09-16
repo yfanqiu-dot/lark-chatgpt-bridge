@@ -40,6 +40,14 @@ npx --yes pnpm@10.33.0 build
 
 ## 启动和回退
 
+关闭桌面之前，先独立验证后台启动参数和实际就绪状态：
+
+```powershell
+node bin/lark-chatgpt-host.mjs C:/bridge/host.json --check-server
+```
+
+此检查会短暂启动本机测试后台，读取 `/readyz` 后停止该子进程，不接管桌面、不执行模型轮次或连接飞书。通过后才安排完整切换。WebSocket 客户端地址可带末尾 `/`，启动器传给 CLI 的 `--listen` 会使用不带路径的 `ws://IP:PORT`。
+
 先结束桌面中的运行，再关闭普通 Codex 桌面。在独立 PowerShell 中操作；不要从将被关闭的桌面对话中直接启动生命周期切换。
 
 ```powershell
@@ -61,6 +69,8 @@ node bin/lark-chatgpt-bridge.mjs C:/bridge/bridge.json --run
 ```powershell
 node bin/lark-chatgpt-host.mjs C:/bridge/host.json --stop
 ```
+
+外部协调程序也可先调用 `node bin/lark-chatgpt-bridge.mjs C:/bridge/bridge.json --stop` 请求 bridge 正常退出，再停止 host；该停止入口不要求桌面仍在线。
 
 启动器结束自己创建的桌面与后台进程，确认退出后请求普通桌面启动；不删除历史。看到请求恢复日志后还需确认普通桌面实际打开。强制结束启动器或电脑断电不保证自动恢复，属于后续故障演练范围。
 

@@ -13,6 +13,34 @@ import { DesktopReadiness } from './readiness';
 export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string }
 const exec = promisify(execFile);
 const sleep = (ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
+// The CLI accepts a socket address, while WebSocket clients accept a URL ending in '/'.
+export function appServerArgs(endpoint: string): string[] {
+  const address = new URL(loopbackEndpoint(endpoint));
+  return ['-c','features.code_mode_host=true','app-server','--listen',`ws://${address.host}`,'-c','plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true'];
+}
+function launchAppServer(cfg: HostConfig, env: NodeJS.ProcessEnv) {
+  const child=spawn(cfg.codexBinary,appServerArgs(cfg.backendEndpoint),{env,cwd:cfg.projectRoot,windowsHide:true,stdio:['ignore','ignore','pipe']});
+  let startupError: Error | undefined, startupStderr='';
+  const collect=(data: Buffer)=>{startupStderr=(startupStderr+data.toString()).slice(-4000);};
+  child.stderr!.on('data',collect);
+  child.on('error',e=>{startupError=e;});
+  return {child, async ready() {
+    try {
+      for(let i=0;i<50;i++) {
+        if(startupError)throw startupError;
+        if(child.exitCode!==null || child.signalCode!==null)throw new Error(`Owned App Server exited before readiness (code ${child.exitCode}, signal ${child.signalCode}): ${startupStderr.trim()}`);
+        try {const response=await fetch(`http://${new URL(cfg.backendEndpoint).host}/readyz`,{signal:AbortSignal.timeout(1000)});if(response.ok)return;}catch{}
+        await sleep(200);
+      }
+      throw new Error('Shared server did not become ready');
+    } finally { child.stderr!.removeListener('data',collect);child.stderr!.resume();startupStderr=''; }
+  }, error:()=>startupError};
+}
+export async function checkAppServer(cfg: HostConfig): Promise<void> {
+  const server=launchAppServer(cfg,cleanDesktopEnvironment(process.env));
+  try {await server.ready();}
+  finally {if(!await stopOwnedChild(server.child))throw new Error('App Server preflight child did not exit');}
+}
 async function stopOwnedChild(child?: ReturnType<typeof spawn>): Promise<boolean> {
   if(!child || child.exitCode!==null || child.signalCode!==null || !child.pid)return true;
   return new Promise(resolve=>{
@@ -42,26 +70,19 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   const release=await lockfile.lock(cfg.connectionFile,{realpath:false,retries:0});
   const backendUrl=new URL(cfg.backendEndpoint),proxyUrl=new URL(cfg.endpoint);
   const children = new Set<WebSocket>();
-  let stopping=false, ready=false;
+  let stopping=false;
   let leaseWrites: Promise<void> = Promise.resolve();
   const invalidate = () => { leaseWrites = leaseWrites.then(() => rm(cfg.connectionFile,{force:true})); void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; }); };
   const readiness=new DesktopReadiness(invalidate);
   let proxy: WebSocketServer | undefined;
   let desktop: ReturnType<typeof spawn> | undefined;
-  const server=spawn(cfg.codexBinary,['-c','features.code_mode_host=true','app-server','--listen',cfg.backendEndpoint,'-c','plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true'],{env,cwd:cfg.projectRoot,windowsHide:true,stdio:'ignore'});
-  let serverError: Error | undefined;server.on('error',e=>{serverError=e;});
+  const appServer=launchAppServer(cfg,env),server=appServer.child;
   const pluginDir=join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools');
   const stop=()=>{stopping=true;};process.once('SIGINT',stop);process.once('SIGTERM',stop);
   try {
     invalidate(); await leaseWrites;
     await rm(`${cfg.connectionFile}.stop`,{force:true});
-    for(let i=0;i<50;i++) {
-      if(serverError)throw serverError;
-      if(server.exitCode!==null || server.signalCode!==null)throw new Error('Owned App Server exited before readiness');
-      try { const r=await fetch(`http://${backendUrl.host}/readyz`,{signal:AbortSignal.timeout(1000)});if(r.ok){ready=true;break;} }catch{}
-      await sleep(200);
-    }
-    if(!ready)throw new Error('Shared server did not become ready');
+    await appServer.ready();
     proxy=new WebSocketServer({host:proxyUrl.hostname.replace(/[\[\]]/g,''),port:Number(proxyUrl.port),maxPayload:8*1024*1024});
     await new Promise<void>((resolve,reject)=>{proxy!.once('listening',resolve);proxy!.once('error',reject);});
     proxy.on('connection',down=>{
@@ -89,7 +110,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     while(!stopping && server.exitCode===null && desktop.exitCode===null) {
       try { await readFile(`${cfg.connectionFile}.stop`,'utf8');stopping=true;break; }
       catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
-      if(serverError || desktopError)throw serverError??desktopError;
+      if(appServer.error() || desktopError)throw appServer.error()??desktopError;
       if(!verifiedOnce && Date.now()-startedAt>120_000)throw new Error('Desktop did not finish shared initialization within 120 seconds');
       if(readiness.canLease()) {
         const revision=readiness.revision;
@@ -132,7 +153,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
 
 async function main() {
   const [path,mode]=process.argv.slice(2);
-  if(!path || !['--check','--check-tools','--start','--stop'].includes(mode??''))throw new Error('Usage: lark-chatgpt-host <host.json> --check|--check-tools <desktopPid>|--start|--stop');
+  if(!path || !['--check','--check-server','--check-tools','--start','--stop'].includes(mode??''))throw new Error('Usage: lark-chatgpt-host <host.json> --check|--check-server|--check-tools <desktopPid>|--start|--stop');
   const cfg=await validateHostConfig(JSON.parse(await readFile(path,'utf8')));
   if(mode==='--stop'){
     if(!await lockfile.check(cfg.connectionFile,{realpath:false}))throw new Error('No running host owns this configuration');
@@ -140,6 +161,10 @@ async function main() {
     console.log('Stop requested; wait for the host to confirm ordinary startup.');return;
   }
   if(mode==='--check'){console.log('Pinned desktop and Codex binary verified; nothing started.');return;}
+  if(mode==='--check-server'){
+    await checkAppServer(cfg);
+    console.log('App Server readiness verified; probe process stopped. Desktop unchanged.');return;
+  }
   if(mode==='--check-tools'){
     const pid=Number(process.argv[4]);if(!Number.isInteger(pid)||pid<=0)throw new Error('Expected the current desktop process ID');
     const candidates=await desktopPipes(pid,cfg.desktopExe);

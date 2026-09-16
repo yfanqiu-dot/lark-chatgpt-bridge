@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import lockfile from 'proper-lockfile';
@@ -9,11 +9,17 @@ import { DesktopLedger } from './ledger';
 import { DesktopController } from './controller';
 import { resolveAppPaths } from '../config/app-paths';
 import { acquireAppRuntimeLock } from '../runtime/locks';
+import { writeFileAtomic } from '../platform/atomic-write';
+import { approvalCard, resolvedCard } from './cards';
 
 async function main(): Promise<void> {
   const [configPath, mode] = process.argv.slice(2);
-  if (!configPath || !['--check', '--run'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-bridge <config.json> --check|--run (Node.js >=22)');
+  if (!configPath || !['--check', '--run', '--stop'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-bridge <config.json> --check|--run|--stop (Node.js >=22)');
   const config = parseDesktopConfig(JSON.parse(await readFile(configPath, 'utf8')));
+  if (mode === '--stop') {
+    if (!await lockfile.check(config.stateFile, { realpath: false })) throw new Error('No running bridge owns this state file');
+    await writeFileAtomic(`${config.stateFile}.stop`, 'Stop this bridge gracefully'); return;
+  }
   const backend = new DesktopBackend(config);
   // No Feishu connection or secret required for the desktop-only preflight.
   await backend.preflight();
@@ -34,18 +40,14 @@ async function main(): Promise<void> {
   const controller = new DesktopController(config, new DesktopLedger(config.stateFile, binding), backend, {
     send: async (chatId, text, replyTo, replyInThread) => (await channel.send(chatId, { markdown: text }, { replyTo, replyInThread })).messageId,
     approval: async (chatId, a, replyTo, replyInThread) => {
-      const card = { config: { wide_screen_mode: true }, header: { title: { tag: 'plain_text', content: 'Codex 操作等待审批' }, template: 'orange' }, elements: [
-        { tag: 'div', text: { tag: 'plain_text', content: a.description } },
-        { tag: 'note', elements: [{ tag: 'plain_text', content: `审批编号：${a.token}。仅任务所有者可处理。` }] },
-        ...(a.decisions.length ? [{ tag: 'action', actions: a.decisions.map(decision => ({ tag: 'button', text: { tag: 'plain_text', content: ({ accept: '同意本次', decline: '拒绝', cancel: '取消任务' } as Record<string, string>)[decision] }, value: { desktopApproval: a.token, decision } })) }] : []),
-      ] };
+      const card = approvalCard(a);
       const result = await channel.send(chatId, { card }, { replyTo, replyInThread });
       if (!result.messageId) throw new Error('Approval card receipt missing');
       cards.set(a.token, result.messageId);
     },
     resolved: async token => {
       const messageId = cards.get(token); if (!messageId) return;
-      await channel.updateCard(messageId, { elements: [{ tag: 'div', text: { tag: 'plain_text', content: '此审批已结束或原连接失效。如仍需审批，请以最新卡片为准。' } }] });
+      await channel.updateCard(messageId, resolvedCard());
       cards.delete(token);
     },
   });
@@ -73,13 +75,19 @@ async function main(): Promise<void> {
     error: e => console.error('Feishu channel error:', e.message),
   });
   let shutdownPromise: Promise<void> | undefined;
+  let stopWatcher: ReturnType<typeof setInterval> | undefined;
   const shutdown = () => shutdownPromise ??= (async () => {
-    try { await controller.shutdown(); } finally { try { await channel.disconnect(); } finally { await release(); } }
+    clearInterval(stopWatcher);
+    try { await controller.shutdown(); } finally { try { await channel.disconnect(); } finally { await rm(`${config.stateFile}.stop`, { force: true }); await release(); } }
   })();
   const onSignal = () => { void shutdown().catch(e => { console.error(String(e)); process.exitCode = 1; }); };
   try {
+    await rm(`${config.stateFile}.stop`, { force: true });
     await channel.connect(); await controller.start(); readyResolve();
     process.once('SIGINT', onSignal); process.once('SIGTERM', onSignal);
+    stopWatcher = setInterval(() => { void readFile(`${config.stateFile}.stop`).then(shutdown).catch(e => {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') { console.error('Bridge shutdown failed:', String(e)); process.exitCode = 1; }
+    }); }, 1000);
     console.log(`Desktop bridge ready for ${config.chatId}`);
   } catch (e) { readyReject(e); await shutdown(); throw e; }
 }
