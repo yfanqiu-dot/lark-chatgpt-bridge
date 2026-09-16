@@ -1,0 +1,161 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DesktopBackend, UncertainExecution, type BackendHooks, type RpcTransport } from '../../../src/desktop/backend';
+import { DesktopController, type ReplyPort, type InboundMessage } from '../../../src/desktop/controller';
+import { DesktopLedger, type Binding } from '../../../src/desktop/ledger';
+import { parseDesktopConfig, type DesktopConfig } from '../../../src/desktop/config';
+import { loopbackEndpoint, type RpcMessage } from '../../../src/desktop/rpc';
+
+let dir: string;
+beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'desktop-p1-')); });
+afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+const config = (): DesktopConfig => ({ appId: 'cli_test', appSecretEnv: 'LARK_APP_SECRET', chatId: 'oc_test', ownerOpenId: 'ou_owner', projectId: 'project', projectRoot: dir, threadId: 'thread', endpoint: 'ws://127.0.0.1:9000/', stateFile: join(dir,'ledger.json'), connectionFile: join(dir,'connection.json'), requireMention: true, maxQueue: 20 });
+const binding = (): Binding => { const c = config(); return { appId: c.appId, chatId: c.chatId, ownerOpenId: c.ownerOpenId, projectId: c.projectId, projectRoot: c.projectRoot, threadId: c.threadId }; };
+class FakeRpc implements RpcTransport {
+  connected = false;
+  calls: Array<{ method: string; params: any }> = [];
+  responses: any[] = [];
+  listeners: Array<(m: RpcMessage) => void> = [];
+  terminal = 'completed'; approval = false; dropStart = false; wrongThread = false; pageItems = true; desktopActive = false;
+  extraRequest?: RpcMessage;
+  connectCount = 0;
+  async connect() { this.connected = true; this.connectCount++; }
+  close() { this.connected = false; }
+  onMessage(fn: (m: RpcMessage) => void) { this.listeners.push(fn); return () => {}; }
+  emit(m: RpcMessage) { this.listeners.forEach(fn => fn(m)); }
+  respond(id: string | number, result: unknown) { this.responses.push({ id, result }); this.emit({ method: 'serverRequest/resolved', params: { threadId:'thread', requestId:id } }); this.terminal = (result as any).decision === 'cancel' ? 'interrupted' : 'completed'; }
+  async call<T = any>(method: string, params?: any): Promise<T> {
+    this.calls.push({ method, params });
+    let result: any;
+    const thread = { id: this.wrongThread ? 'other' : 'thread', projectId:'project', cwd:dir, status:{ type:this.desktopActive?'active':'idle' } };
+    switch (method) {
+      case 'project/list': result = { data: params.cursor ? [{ id:'project', roots:[{path:dir}] }] : [], nextCursor: params.cursor ? null : 'projects2' }; break;
+      case 'thread/read': case 'thread/resume': result = { thread }; break;
+      case 'turn/start':
+        if (this.dropStart) { this.connected = false; throw new Error('Response lost'); }
+        if (this.extraRequest) { this.terminal='inProgress';this.emit(this.extraRequest); }
+        if (this.approval) {
+          this.terminal = 'inProgress';
+          this.emit({ id:42, method:'item/commandExecution/requestApproval', params: { threadId:'thread', turnId:'turn', command:'Write-Output test', availableDecisions:['accept','cancel'] } });
+          this.emit({ id:43, method:'item/commandExecution/requestApproval', params: { threadId:'other', turnId:'turn', command:'OTHER', availableDecisions:['accept'] } });
+        }
+        result = { turn:{id:'turn'} }; break;
+      case 'thread/turns/list': result = { data: params.cursor ? [{id:'turn',status:this.terminal}] : [{id:'unrelated',status:'completed'}], nextCursor: params.cursor ? null : 'turns2' }; break;
+      case 'thread/items/list': result = params.cursor || !this.pageItems ? {data:[{turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'actual final'}}]} : {data:[{turnId:'turn',item:{type:'agentMessage',phase:'commentary',text:'not final'}}],nextCursor:'items2'}; break;
+      case 'turn/interrupt': this.terminal = 'interrupted'; result = {}; break;
+      case 'turn/steer': result = {}; break;
+      default: throw new Error(method);
+    }
+    return result;
+  }
+}
+const hooks = (): BackendHooks => ({ submitting:async()=>{},started:async()=>{},approval:async()=>{},resolved:async()=>{},state:async()=>{} });
+const backend = (rpc: FakeRpc) => new DesktopBackend(config(), {rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
+const incoming = (id: string): InboundMessage => ({messageId:id,chatId:'oc_test',senderId:'ou_owner',content:'hello',mentionedBot:true,replyInThread:true});
+function replies(): ReplyPort & { sent: string[] } { return {sent:[],async send(_c,text){this.sent.push(text);return 'receipt'+this.sent.length;},async approval(){},async resolved(){}}; }
+
+describe('desktop boundaries and history', () => {
+  it('rejects remote endpoints, credentials, and incomplete bindings', () => {
+    for (const url of ['ws://example.com:9','wss://127.0.0.1:9','ws://user@127.0.0.1:9','ws://127.0.0.1:9/x']) expect(()=>loopbackEndpoint(url)).toThrow();
+    expect(()=>parseDesktopConfig({...config(),ownerOpenId:''})).toThrow();
+  });
+  it('validates project pagination, blocks wrong task before resume', async()=>{
+    const rpc=new FakeRpc();rpc.wrongThread=true;
+    await expect(backend(rpc).preflight()).rejects.toThrow('mismatch');
+    expect(rpc.calls.some(c=>c.method==='thread/resume')).toBe(false);
+  });
+  it('reads final answer across turn and item pages without mixing commentary',async()=>{
+    const rpc=new FakeRpc();const r=await backend(rpc).execute('question',hooks());
+    expect(r).toEqual({turnId:'turn',status:'completed',text:'actual final'});
+    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+    expect(rpc.calls.find(c=>c.method==='turn/start')?.params).not.toHaveProperty('approvalPolicy');
+  });
+  it('does not resubmit when start response is lost',async()=>{
+    const rpc=new FakeRpc();rpc.dropStart=true;
+    await expect(backend(rpc).execute('question',hooks())).rejects.toBeInstanceOf(UncertainExecution);
+    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+  });
+  it('resumes known turns without starting another turn',async()=>{
+    const rpc=new FakeRpc();await backend(rpc).execute('ignored',hooks(),'turn');
+    expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
+  });
+  it('matches approval by thread and turn, rejects duplicates, waits for resolved',async()=>{
+    const rpc=new FakeRpc();rpc.approval=true;const b=backend(rpc);const h=hooks();const tokens:string[]=[];const resolved:string[]=[];
+    h.approval=async a=>{tokens.push(a.token);await b.decide(a.token,'accept');await expect(b.decide(a.token,'accept')).rejects.toThrow();};
+    h.resolved=async t=>{resolved.push(t);};
+    await b.execute('approval',h);
+    expect(tokens).toHaveLength(1);expect(resolved).toEqual(tokens);expect(rpc.responses).toEqual([{id:42,result:{decision:'accept'}}]);
+    await expect(b.decide(tokens[0]!,'accept')).rejects.toThrow();
+  });
+  it('stops only the known turn and does not terminate the shared backend',async()=>{
+    const rpc=new FakeRpc();rpc.approval=true;const b=backend(rpc);const h=hooks();h.approval=async()=>{await b.stop();};
+    expect((await b.execute('stop',h)).status).toBe('interrupted');
+    expect(rpc.calls.find(c=>c.method==='turn/interrupt')?.params).toEqual({threadId:'thread',turnId:'turn'});
+  });
+  it('cancels a queued request without changing or interrupting the desktop-owned turn',async()=>{
+    const rpc=new FakeRpc();rpc.desktopActive=true;const b=backend(rpc),h=hooks();
+    h.state=async()=>{await b.stop();};
+    expect((await b.execute('queued',h)).status).toBe('interrupted');
+    expect(rpc.calls.some(c=>['turn/start','turn/interrupt','thread/resume'].includes(c.method))).toBe(false);
+  });
+  it('steers only the exact active turn',async()=>{
+    const rpc=new FakeRpc();rpc.approval=true;const b=backend(rpc),h=hooks();
+    h.approval=async()=>{await b.steer('new instructions');await b.stop();};await b.execute('run',h);
+    expect(rpc.calls.find(c=>c.method==='turn/steer')?.params).toEqual({threadId:'thread',expectedTurnId:'turn',input:[{type:'text',text:'new instructions'}]});
+  });
+  it('never exposes accept on a file approval whose concrete changes are missing',async()=>{
+    const rpc=new FakeRpc();rpc.extraRequest={id:99,method:'item/fileChange/requestApproval',params:{threadId:'thread',turnId:'turn',itemId:'missing'}};
+    const b=backend(rpc),h=hooks();h.approval=async a=>{expect(a.decisions).toEqual(['decline','cancel']);await expect(b.decide(a.token,'accept')).rejects.toThrow();await b.decide(a.token,'cancel');};
+    expect((await b.execute('file',h)).status).toBe('interrupted');
+  });
+  it('routes special permission requests to the desktop without inventing a grant',async()=>{
+    const rpc=new FakeRpc();rpc.extraRequest={id:99,method:'item/permissions/requestApproval',params:{threadId:'thread',turnId:'turn',itemId:'item'}};
+    const b=backend(rpc),h=hooks();h.approval=async a=>{expect(a.decisions).toEqual([]);expect(a.description).toContain('桌面');await b.stop();};
+    await b.execute('permissions',h);expect(rpc.responses).toHaveLength(0);
+  });
+});
+describe('durable single-group controller',()=>{
+  it('deduplicates message IDs and serially executes three rounds',async()=>{
+    const rpc=new FakeRpc();const out=replies();const store=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),store,backend(rpc),out);await c.start();
+    await Promise.all(['a','a','b','c'].map(id=>c.receive(incoming(id))));await c.idle();
+    expect(rpc.calls.filter(x=>x.method==='turn/start')).toHaveLength(3);expect(store.all()).toHaveLength(3);expect(out.sent).toHaveLength(3);
+    const saved=JSON.parse(await readFile(config().stateFile,'utf8'));expect(saved.messages.every((x:any)=>x.receipt)).toBe(true);
+  });
+  it('ignores another group, another sender, bots and missing mention',async()=>{
+    const rpc=new FakeRpc();const store=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),store,backend(rpc),replies());await c.start();
+    for(const patch of [{chatId:'oc_other'},{senderId:'ou_other'},{isBot:true},{mentionedBot:false}])await c.receive({...incoming('a'),...patch});
+    expect(store.all()).toHaveLength(0);expect(rpc.calls).toHaveLength(0);
+    await expect(c.decideFromCard('oc_other','ou_owner','token','accept')).rejects.toThrow('无权');
+  });
+  it('marks in-flight persisted submissions uncertain and blocks queued work after restart',async()=>{
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();await store.add({messageId:'old',prompt:'old',replyInThread:false,state:'submitting'});
+    const rpc=new FakeRpc();const reloaded=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),reloaded,backend(rpc),replies());await c.start();await c.receive(incoming('new'));await c.idle();
+    expect(reloaded.get('old')?.state).toBe('uncertain');expect(reloaded.get('new')?.state).toBe('queued');expect(rpc.calls).toHaveLength(0);
+  });
+  it('persists final result on delivery loss and never reruns the model for /result',async()=>{
+    const rpc=new FakeRpc();const out=replies();out.send=async()=>{throw new Error('receipt lost');};const store=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),store,backend(rpc),out);await c.start();await c.receive(incoming('a'));await c.idle();
+    expect(store.get('a')).toMatchObject({state:'completed',result:'actual final',deliveryAttempted:true});
+    await c.receive({...incoming('b'),content:'/result'});await c.idle();expect(rpc.calls.filter(x=>x.method==='turn/start')).toHaveLength(1);
+  });
+  it('refuses loading a ledger for a different project/chat binding',async()=>{
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();
+    await expect(new DesktopLedger(config().stateFile,{...binding(),chatId:'oc_elsewhere'}).load()).rejects.toThrow('mismatch');
+  });
+  it('delivers a final result saved before shutdown without another model call',async()=>{
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();
+    await store.add({messageId:'saved',prompt:'question',replyInThread:true,state:'completed',result:'saved final'});
+    const rpc=new FakeRpc(),out=replies();
+    const c=new DesktopController(config(),new DesktopLedger(config().stateFile,binding()),backend(rpc),out);
+    await c.start();await c.idle();expect(out.sent).toEqual(['saved final']);expect(rpc.calls).toHaveLength(0);
+  });
+  it('reconciles a known turn and delivers its newly confirmed final result once',async()=>{
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();
+    await store.add({messageId:'old',prompt:'question',replyInThread:true,state:'uncertain',turnId:'turn',result:'uncertain',receipt:'previous',deliveryAttempted:true});
+    const rpc=new FakeRpc(),out=replies();const c=new DesktopController(config(),store,backend(rpc),out);
+    await c.start();await c.receive({...incoming('command'),content:'/reconcile'});await c.idle();
+    expect(store.get('old')).toMatchObject({state:'completed',result:'actual final'});
+    expect(out.sent.filter(x=>x==='actual final')).toHaveLength(1);expect(rpc.calls.some(x=>x.method==='turn/start')).toBe(false);
+  });
+});

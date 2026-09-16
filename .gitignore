@@ -22,3 +22,8 @@ web/dist/
 scripts/
 CHANGELOG.md
 tests-smoke/
+
+# Desktop bridge local identity, connection leases and validation logs
+.p1-local/
+.feishu-bridge/
+*.local.json

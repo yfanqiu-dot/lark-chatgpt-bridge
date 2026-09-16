@@ -1,4 +1,6 @@
-# lark-channel-bridge
+# lark-chatgpt-bridge
+
+> 本二开仓库新增 Codex 桌面后端：[P1 运行说明与当前验证状态](README.desktop.md)。下文保留上游 CLI 使用说明。
 
 把飞书 / Lark 消息和本地 Claude Code 或 Codex CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
 

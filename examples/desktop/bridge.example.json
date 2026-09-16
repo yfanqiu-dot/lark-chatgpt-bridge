@@ -1,0 +1,13 @@
+{
+  "appId": "cli_REPLACE",
+  "appSecretEnv": "LARK_APP_SECRET",
+  "chatId": "oc_REPLACE",
+  "ownerOpenId": "ou_REPLACE",
+  "projectId": "NATIVE_APP_SERVER_PROJECT_ID",
+  "projectRoot": "D:/projects/my-project",
+  "threadId": "EXISTING_DESKTOP_THREAD_ID",
+  "endpoint": "ws://127.0.0.1:19431/",
+  "connectionFile": "C:/bridge/state/desktop-connection.json",
+  "stateFile": "C:/bridge/state/single-group-ledger.json",
+  "requireMention": true
+}

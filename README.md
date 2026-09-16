@@ -1,4 +1,6 @@
-# lark-channel-bridge
+# lark-chatgpt-bridge
+
+> This fork adds a Codex desktop backend: [P1 setup and current validation status](README.desktop.md). The original CLI documentation follows below.
 
 A lightweight bot that bridges Feishu / Lark messenger with your local Claude Code or Codex CLI. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
 

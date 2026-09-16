@@ -1,0 +1,10 @@
+{
+  "codexBinary": "C:/Users/YOUR_USER/AppData/Local/OpenAI/Codex/bin/VERIFIED_BUILD/codex.exe",
+  "codexSha256": "REPLACE_WITH_VERIFIED_SHA256",
+  "desktopExe": "C:/Program Files/WindowsApps/OpenAI.Codex_26.908.9136.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe",
+  "desktopVersion": "26.908.9136.0",
+  "projectRoot": "D:/projects/my-project",
+  "endpoint": "ws://127.0.0.1:19431/",
+  "backendEndpoint": "ws://127.0.0.1:19432/",
+  "connectionFile": "C:/bridge/state/desktop-connection.json"
+}

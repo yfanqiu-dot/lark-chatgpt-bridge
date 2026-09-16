@@ -1,5 +1,6 @@
 {
   "name": "lark-channel-bridge",
+  "private": true,
   "version": "0.7.1",
   "description": "Bridge Feishu/Lark messenger with local CLI coding agents",
   "type": "module",
@@ -10,13 +11,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zarazhangrui/feishu-claude-code-bridge.git"
+    "url": "git+https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/zarazhangrui/feishu-claude-code-bridge/issues"
+    "url": "https://github.com/yfanqiu-dot/lark-chatgpt-bridge/issues"
   },
-  "homepage": "https://github.com/zarazhangrui/feishu-claude-code-bridge#readme",
+  "homepage": "https://github.com/yfanqiu-dot/lark-chatgpt-bridge#readme",
   "bin": {
+    "lark-chatgpt-host": "./bin/lark-chatgpt-host.mjs",
+    "lark-chatgpt-bridge": "./bin/lark-chatgpt-bridge.mjs",
     "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
   },
   "exports": {
@@ -40,6 +43,8 @@
     "pretest": "pnpm build:web",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit --passWithNoTests",
+    "test:desktop": "vitest run tests/unit/desktop",
+    "test:p0": "node --test experiments/codex-desktop/connection.test.mjs",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
     "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
@@ -54,7 +59,8 @@
     "cross-spawn": "^7.0.6",
     "graceful-fs": "^4.2.11",
     "proper-lockfile": "^4.1.2",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@radix-ui/react-dialog": "^1.1.19",
@@ -73,6 +79,7 @@
     "@types/qrcode-terminal": "^0.12.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

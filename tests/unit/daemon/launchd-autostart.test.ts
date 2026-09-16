@@ -9,6 +9,12 @@ vi.mock('node:child_process', async (importOriginal) => ({
   spawnSync: mocks.spawnSync,
 }));
 
+// A simulated macOS launchctl target needs a macOS UID even on Windows hosts.
+vi.mock('node:os', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:os')>();
+  return { ...original, userInfo: () => ({ ...original.userInfo(), uid: 501 }) };
+});
+
 const { getServiceAdapter } = await import('../../../src/daemon/service-adapter');
 const { launchAgentLabel } = await import('../../../src/daemon/paths');
 

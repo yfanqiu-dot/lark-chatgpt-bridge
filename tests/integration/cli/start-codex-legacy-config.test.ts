@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -6,6 +6,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { createRootConfig, saveRootConfig } from '../../../src/config/profile-store';
 import { createRuntimeAgent } from '../../../src/cli/commands/start';
 import { resolveProfileRuntime } from '../../../src/runtime/profile-runtime';
+import { writeVersionExecutable } from '../../helpers/fake-executable';
 
 const { loadRootConfig } = await import('../../../src/config/profile-store');
 
@@ -74,21 +75,7 @@ async function createLegacyCodexConfig(options: {
     mkdir(workspace, { recursive: true }),
     mkdir(binDir, { recursive: true }),
   ]);
-  const codex = join(binDir, 'codex');
-  await writeFile(
-    codex,
-    [
-      '#!/bin/sh',
-      'if [ "$1" = "--version" ]; then',
-      '  echo "codex-cli 999.0.0"',
-      '  exit 0',
-      'fi',
-      'exit 0',
-      '',
-    ].join('\n'),
-    'utf8',
-  );
-  await chmod(codex, 0o755);
+  const codex = await writeVersionExecutable(binDir, 'codex', 'codex-cli 999.0.0');
 
   const secrets = {
     providers: {
