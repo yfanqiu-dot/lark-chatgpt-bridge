@@ -4,6 +4,24 @@
 
 ## 9月22日接续状态
 
+### 17:55—18:06 真实联调进展（验收继续中）
+
+本次运行已通过共享桌面、任务内 MCP connected 和真实 `list_projects` 调用，随后启动指定测试群监听。此前“真实桌面任务核验”失败已在当前版本复测通过。修复提交为 `c501641`。
+
+| 项目 | 当前证据与结论 |
+|---|---|
+| 飞书第一、第二轮 | 本人两条真实群消息分别得到“已记住”和正确校验词；两组 messageId → turnId → reply receipt 均保存，并经飞书 bot 读取及桌面 `read_thread` 双向核实。通过。 |
+| 桌面接续 | 从原生桌面 `send_message_to_thread` 向同一专用任务更新校验词，原生桌面确认该轮 completed。桌面入口接续通过；仍待本人从飞书第三轮读取新词，才关闭跨入口往返验收。 |
+| 真实后端重连 | `DesktopBackend` 提交后主动关闭自己的 WebSocket，再连接原后台、恢复原 turnId 并取得正确最终输出；两次连接、两次 resume、仅一次 turn/start。通过；不是整进程重启或崩溃恢复。 |
+| 真实后端追加/停止 | `turn/steer` 携带正确 expectedTurnId，随后 `turn/interrupt` 只停止该轮，最终 interrupted。当前开发任务继续运行。底层通过；尚不等于本人群内 `/steer`、`/stop` 全链路已验收。 |
+| 重复消息 | 对真实已完成消息账本的隔离副本重放两条原 messageId：零模型调用、零消息发送，记录不变。通过离线真实数据重放；未伪造平台回调或用户消息。 |
+| 尚待本人操作 | 第三轮查询新校验词、`/status`、群内追加/停止及审批卡片同意/拒绝/取消、桌面决定后的卡片关闭。 |
+| 恢复普通桌面 | 本轮仍在 30 分钟共享窗口中，尚未恢复。窗口截至本地时间 18:25 左右；恢复结果需另核实，不提前标通过。 |
+
+P1 **仍未关闭**。未启动 P2；没有发送 user 身份消息，也未操作其他群或创建任务。后续提示已由机器人发到原测试群。
+
+本机证据（均在 `.p1-local/` 忽略目录）：`acceptance-state.json`、`shared-smoke-result.json`、`group-ledger.json`、`feishu-acceptance-messages.json`、`desktop-continuation-evidence.json`、`task-acceptance-snapshot.json`、`acceptance-reconnect-result.json`、`acceptance-stop-result.json`、`acceptance-dedup-result.json`、`acceptance-events.jsonl`。这些记录含测试任务标识，不上传 Git。
+
 ### 09:44 现场失败与后续修复
 
 本次共享桌面、44 项工具目录和任务完成判定均通过；真实工具核验轮次正常结束，但没有执行 `list_projects`。桌面日志明确记录 `codex_app` 启动失败：缺少 `CODEX_APP_TOOLS_PIPE_PATH`。普通桌面及旧 bridge 已恢复，新飞书监听未启动。
