@@ -42,7 +42,7 @@ class FakeRpc implements RpcTransport {
           this.emit({ id:43, method:'item/commandExecution/requestApproval', params: { threadId:'other', turnId:'turn', command:'OTHER', availableDecisions:['accept'] } });
         }
         result = { turn:{id:'turn'} }; break;
-      case 'thread/turns/list': result = { data: params.cursor ? [{id:'turn',status:this.terminal}] : [{id:'unrelated',status:'completed'}], nextCursor: params.cursor ? null : 'turns2' }; break;
+      case 'thread/turns/list': result = { data: params.cursor ? [{id:'turn',status:this.terminal,completedAt:this.terminal==='inProgress'?null:1}] : [{id:'unrelated',status:'completed',completedAt:1}], nextCursor: params.cursor ? null : 'turns2' }; break;
       case 'thread/items/list': result = params.cursor || !this.pageItems ? {data:[{turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'actual final'}}]} : {data:[{turnId:'turn',item:{type:'agentMessage',phase:'commentary',text:'not final'}}],nextCursor:'items2'}; break;
       case 'turn/interrupt': this.terminal = 'interrupted'; result = {}; break;
       case 'turn/steer': result = {}; break;

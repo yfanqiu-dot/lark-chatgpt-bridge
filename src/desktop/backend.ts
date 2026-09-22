@@ -34,6 +34,7 @@ export class DesktopBackend {
   private rpc?: RpcTransport;
   private inbox: RpcMessage[] = [];
   private activeTurn?: string;
+  private completedTurn?: any;
   private busy = false;
   private stopping = false;
   private disconnected = false;
@@ -88,7 +89,7 @@ export class DesktopBackend {
   async preflight(): Promise<void> { if (this.busy) throw new Error('Desktop turn already active'); try { await this.connect(false); } finally { this.rpc?.close(); } }
   async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
-    this.busy = true; this.stopping = false; this.disconnected = false; this.activeTurn = resumeTurnId;
+    this.busy = true; this.stopping = false; this.disconnected = false; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
     let submitted = Boolean(resumeTurnId);
     try {
       await this.connect(Boolean(resumeTurnId));
@@ -114,6 +115,7 @@ export class DesktopBackend {
         await hooks.started(this.activeTurn!);
       }
       let failures = 0;
+      let unresolvedIdleReads = 0;
       let lastStatus = '';
       while (true) {
         try {
@@ -124,20 +126,26 @@ export class DesktopBackend {
             await this.connect();
           }
           await this.processMessages(hooks);
-          const turn = await this.readTurn(this.activeTurn!);
-          if (!turn) throw new Error('Expected turn is absent from paginated history');
-          if (['completed', 'interrupted', 'failed'].includes(turn.status)) {
+          const historyTurn = await this.readTurn(this.activeTurn!);
+          await this.processMessages(hooks);
+          // Paginated history may normalize an unfinished rollout as interrupted.
+          // Live completion wins; history needs a persisted completion timestamp.
+          const turn = this.completedTurn ?? (historyTurn?.completedAt != null ? historyTurn : undefined);
+          if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
             const items = await this.readItems(this.activeTurn!);
             const text = items.filter((i: any) => i.type === 'agentMessage' && i.phase === 'final_answer').map((i: any) => i.text).join('\n\n');
             return { turnId: this.activeTurn!, status: turn.status, text: text || turn.error?.message || (turn.status === 'interrupted' ? '任务已停止。' : '该轮次已结束，没有最终文本。') };
           }
           const read = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
+          if (read.thread.status?.type === 'active') unresolvedIdleReads = 0;
+          else if (++unresolvedIdleReads >= 3) throw new UncertainExecution(`原任务 ${this.activeTurn} 没有实时完成事件或可靠的结束时间，需核对；未重新提交。`);
           const status = read.thread.status?.activeFlags?.includes('waitingOnApproval') ? '等待审批' : '正在执行';
           if (status !== lastStatus) { lastStatus = status; await hooks.state(status); }
           if (this.stopping) await this.interruptKnownTurn();
           failures = 0;
           await delay(this.options.pollMs ?? 1000);
         } catch (e) {
+          if(e instanceof UncertainExecution)throw e;
           this.rpc?.close();
           if (++failures >= 3) throw new UncertainExecution(`连接恢复失败，原任务 ${this.activeTurn} 待核对：${String(e)}`);
           await delay(this.options.reconnectDelayMs ?? 2000);
@@ -148,14 +156,16 @@ export class DesktopBackend {
       throw e;
     } finally {
       for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
-      this.approvals.clear(); this.rpc?.close(); this.activeTurn = undefined; this.busy = false;
+      this.approvals.clear(); this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.busy = false;
     }
   }
   private async processMessages(hooks: BackendHooks): Promise<void> {
     for (const m of this.inbox.splice(0)) {
       const p = m.params;
       if (p?.threadId !== this.config.threadId) continue;
-      if (m.method === 'serverRequest/resolved') {
+      if (m.method === 'turn/completed' && p.turn?.id === this.activeTurn && ['completed','interrupted','failed'].includes(p.turn.status)) {
+        this.completedTurn = p.turn;
+      } else if (m.method === 'serverRequest/resolved') {
         for (const a of this.approvals.values()) if (a.requestId === p.requestId) { this.approvals.delete(a.token); await hooks.resolved(a.token); }
       } else if (m.id !== undefined && p.turnId === this.activeTurn) {
         if ([...this.approvals.values()].some(a => a.requestId === m.id)) continue;
@@ -198,7 +208,7 @@ export class DesktopBackend {
   }
   private async interruptKnownTurn(): Promise<void> {
     try { await this.rpc!.call('turn/interrupt', { threadId: this.config.threadId, turnId: this.activeTurn }); }
-    catch (e) { const turn = await this.readTurn(this.activeTurn!); if (!turn || !['completed','interrupted','failed'].includes(turn.status)) throw e; }
+    catch (e) { const turn = this.completedTurn ?? await this.readTurn(this.activeTurn!); if (!turn || (turn !== this.completedTurn && turn.completedAt == null) || !['completed','interrupted','failed'].includes(turn.status)) throw e; }
   }
   private async readTurn(turnId: string): Promise<any> {
     let cursor: string | undefined; const seen = new Set<string>();

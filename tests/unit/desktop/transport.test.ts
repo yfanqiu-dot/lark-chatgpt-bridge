@@ -72,7 +72,7 @@ it('reconnects to a known turn and returns its final output without submitting a
     if(m.method==='turn/start'){starts++;return {turn:{id:'turn'}};}
     if(m.method==='thread/turns/list'){
       if(++reads===1){s.terminate();return;}
-      return {data:[{id:'turn',status:'completed'}]};
+      return {data:[{id:'turn',status:'completed',completedAt:1}]};
     }
     return baseline(m);
   });
@@ -87,7 +87,7 @@ it('invalidates disconnected approval cards and handles server replay with a new
   serve((m,s)=>{
     if(m.method==='thread/resume' && ++resumes===2)s.send(JSON.stringify(request));
     if(m.method==='turn/start'){starts++;s.send(JSON.stringify(request));return {turn:{id:'turn'}};}
-    if(m.method==='thread/turns/list')return {data:[{id:'turn',status:terminal?'completed':'inProgress'}]};
+    if(m.method==='thread/turns/list')return {data:[{id:'turn',status:terminal?'completed':'inProgress',completedAt:terminal?1:null}]};
     if(m.id==='approval' && m.result){terminal=true;s.send(JSON.stringify({method:'serverRequest/resolved',params:{threadId:'t',requestId:'approval'}}));}
     return baseline(m);
   });
@@ -101,4 +101,35 @@ it('invalidates disconnected approval cards and handles server replay with a new
   h.resolved=async token=>{resolved.push(token);};
   expect((await b.execute('approve',h)).status).toBe('completed');
   expect(tokens).toHaveLength(2);expect(new Set(tokens).size).toBe(2);expect(resolved).toEqual(tokens);expect(starts).toBe(1);
+});
+
+it('waits for the matching live completion when persisted history reports an undated interruption',async()=>{
+  let starts=0,reads=0,finished=false;
+  serve((m,s)=>{
+    if(m.method==='turn/start'){starts++;return {turn:{id:'turn',status:'inProgress'}};}
+    if(m.method==='thread/turns/list'){
+      reads++;
+      s.send(JSON.stringify({method:'turn/completed',params:{threadId:'other',turn:{id:'turn',status:'failed'}}}));
+      s.send(JSON.stringify({method:'turn/completed',params:{threadId:'t',turn:{id:'other',status:'failed'}}}));
+      if(reads===3){finished=true;s.send(JSON.stringify({method:'turn/completed',params:{threadId:'t',turn:{id:'turn',status:'completed'}}}));}
+      return {data:[{id:'turn',status:'interrupted',completedAt:null}]};
+    }
+    if(m.method==='thread/read')return {thread:{id:'t',projectId:'p',cwd:dir,status:{type:starts&&!finished?'active':'idle'}}};
+    return baseline(m);
+  });
+  const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
+  expect(await b.execute('one',hooks())).toEqual({turnId:'turn',status:'completed',text:'结果'});
+  expect(starts).toBe(1);expect(reads).toBe(3);
+});
+
+it('does not call an undated inactive history entry a confirmed stop or resubmit it',async()=>{
+  let starts=0;
+  serve(m=>{
+    if(m.method==='turn/start'){starts++;return {turn:{id:'turn'}};}
+    if(m.method==='thread/turns/list')return {data:[{id:'turn',status:'interrupted',completedAt:null}]};
+    return baseline(m);
+  });
+  const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
+  await expect(b.execute('one',hooks())).rejects.toBeInstanceOf(UncertainExecution);
+  expect(starts).toBe(1);
 });
