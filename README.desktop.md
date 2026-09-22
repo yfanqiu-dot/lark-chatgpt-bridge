@@ -33,6 +33,7 @@ npx --yes pnpm@10.33.0 build
 - `desktopExe`、`desktopVersion` 指向对应 WindowsApps 安装包。
 - `endpoint` 是桌面和 bridge 共用地址；`backendEndpoint` 是启动器内部后台地址，两者必须不同且仅监听回环地址。
 - `connectionFile` 是启动器维护的临时证明，禁止手工填写旧 PID/管道。
+- `toolBindings` 明确列出本次接入的已有 `threadId` / 原生 `projectId`。启动器先核对保存的项目和路径，再在这些任务的首次 `thread/resume` 前加入已验证的桌面工具连接配置，避免桌面自动恢复抢先加载无工具的任务。其他任务不改写，不修改全局配置或任务审批策略。
 
 `bridge.json` 中填写实际 `chatId`、本人 `ownerOpenId`、原生 App Server `projectId`、`projectRoot` 和已有 `threadId`。原生项目 ID 与桌面工具返回的旧项目 ID 不能混用。`connectionFile`/`endpoint` 要与 host 相同；`stateFile` 必须独立保存，运行后不可换群继续沿用同一账本。`model` 可省略以沿用对话配置。
 
@@ -63,6 +64,8 @@ node bin/lark-chatgpt-bridge.mjs C:/bridge/bridge.json --run
 ```
 
 `--check` 只读核对项目/对话及临时连接证明，不连接飞书、不执行模型轮次。`--run` 才开始消费飞书事件。**同一机器人只能有一个消息消费者**；开始测试前先确认旧 bridge 已停止消费，并让新旧实例使用相同 `LARK_CHANNEL_HOME`。程序复用上游应用锁，但无法阻止其他电脑、旧版无锁消费者或另一个配置目录的实例。
+
+每次提交新轮次前还会检查该任务实际运行的 `codex_app` MCP 状态及 `list_projects` 工具。仅目录可读、缓存目录存在或工具启动失败都不能放行；失败时不提交模型请求。
 
 停止时先在 bridge 终端按 Ctrl+C，等待它停止自己发起的轮次并断开飞书，再执行：
 

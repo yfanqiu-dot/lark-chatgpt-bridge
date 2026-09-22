@@ -36,6 +36,7 @@ function serve(handler:Handler) {
   }));
 }
 function baseline(m:any) {
+  if(m.method==='mcpServerStatus/list')return {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]};
   if(m.method==='project/list')return {data:[{id:'p',roots:[{path:dir}]}]};
   if(['thread/read','thread/resume'].includes(m.method))return {thread:{id:'t',projectId:'p',cwd:dir,status:{type:'idle'}}};
   if(m.method==='thread/items/list')return {data:[{turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'结果'}}]};
@@ -63,6 +64,31 @@ it('does not repeat a real wire submission whose response was lost',async()=>{
   const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
   await expect(b.execute('one',hooks())).rejects.toBeInstanceOf(UncertainExecution);
   expect(starts).toBe(1);
+});
+
+it('does not submit a model turn when the task MCP runtime failed despite a readable catalog',async()=>{
+  let starts=0;
+  serve(m=>{if(m.method==='turn/start'){starts++;return {};}
+    if(m.method==='mcpServerStatus/list')return {data:[{name:'codex_app',runtimeStatus:'failed',tools:{list_projects:{name:'list_projects'}}}]};
+    return baseline(m);});
+  const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({})});
+  await expect(b.execute('one',hooks())).rejects.toThrow('not connected');expect(starts).toBe(0);
+});
+
+it('checks paginated task-scoped MCP state and waits for startup before submitting',async()=>{
+  let checks=0,starts=0;
+  serve(m=>{
+    if(m.method==='mcpServerStatus/list'){
+      expect(m.params.threadId).toBe('t');
+      if(!m.params.cursor)return {data:[],nextCursor:'next'};
+      return {data:[{name:'codex_app',runtimeStatus:++checks===1?'starting':'connected',tools:{list_projects:{name:'list_projects'}}}]};
+    }
+    if(m.method==='turn/start'){starts++;return {turn:{id:'turn'}};}
+    if(m.method==='thread/turns/list')return {data:[{id:'turn',status:'completed',completedAt:1}]};
+    return baseline(m);
+  });
+  const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({}),pollMs:1});
+  expect((await b.execute('one',hooks())).status).toBe('completed');expect(checks).toBe(2);expect(starts).toBe(1);
 });
 
 it('reconnects to a known turn and returns its final output without submitting again',async()=>{

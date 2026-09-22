@@ -1,16 +1,17 @@
 import { spawn, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath, mkdir, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import lockfile from 'proper-lockfile';
 import { writeFileAtomic } from '../platform/atomic-write';
-import { loopbackEndpoint } from './rpc';
+import { DesktopRpc, loopbackEndpoint } from './rpc';
+import { desktopToolOverrides, prepareResumeTools } from './resume-tools';
 import { cleanDesktopEnvironment, desktopPipes, desktopToolCatalog } from './windows-tools';
 import { DesktopReadiness } from './readiness';
 
-export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string }
+export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; toolBindings?: Array<{threadId: string; projectId: string | null}> }
 const exec = promisify(execFile);
 const sleep = (ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
 // The CLI accepts a socket address, while WebSocket clients accept a URL ending in '/'.
@@ -57,6 +58,7 @@ export async function validateHostConfig(raw: HostConfig): Promise<HostConfig> {
   if(!/^[a-f0-9]{64}$/i.test(cfg.codexSha256)||createHash('sha256').update(await readFile(cfg.codexBinary)).digest('hex')!==cfg.codexSha256.toLowerCase())throw new Error('Codex binary hash differs from verified version');
   const match=/[\\/]OpenAI\.Codex_([0-9.]+)_x64__2p2nqsd0c76g0[\\/]app[\\/]ChatGPT\.exe$/i.exec(cfg.desktopExe);
   if(!match || match[1]!==cfg.desktopVersion)throw new Error('Installed desktop version differs from configured version');
+  if(cfg.toolBindings !== undefined && (!Array.isArray(cfg.toolBindings) || cfg.toolBindings.length>10 || cfg.toolBindings.some(b=>!b || typeof b.threadId!=='string' || !/^[\w-]+$/.test(b.threadId) || (b.projectId!==null && (typeof b.projectId!=='string' || !/^[\w-]+$/.test(b.projectId)))) || new Set(cfg.toolBindings.map(b=>b.threadId)).size!==cfg.toolBindings.length))throw new Error('Invalid tool bindings');
   return cfg;
 }
 
@@ -78,24 +80,60 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   let desktop: ReturnType<typeof spawn> | undefined;
   const appServer=launchAppServer(cfg,env),server=appServer.child;
   const pluginDir=join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools');
+  const toolThreads=new Set((cfg.toolBindings??[]).map(b=>b.threadId));
+  let earlyTools: Promise<Record<string, unknown>> | undefined;
+  let earlyToolsAt=0;
+  const resumeConfig=()=>{
+    if(Date.now()-earlyToolsAt>10_000)earlyTools=undefined;
+    if(!earlyTools)earlyToolsAt=Date.now();
+    return earlyTools??= (async()=>{
+    if(!desktop?.pid || stopping)throw new Error('Owned desktop is unavailable');
+    const candidates=await desktopPipes(desktop.pid,cfg.desktopExe);
+    const matches=[];
+    for(const candidate of candidates){try{if((await desktopToolCatalog(pluginDir,candidate.pipe)).includes('list_projects'))matches.push(candidate);}catch{}}
+    if(stopping || desktop.exitCode!==null || matches.length!==1)throw new Error('Owned desktop tool pipe is not ready for task resume');
+    const definition=JSON.parse(await readFile(join(pluginDir,'.mcp.json'),'utf8')).mcpServers.codex_app;
+    console.log('Verified desktop tools before first bound task resume.');
+    return desktopToolOverrides({...definition,command:process.execPath,args:[join(pluginDir,'server.mjs')],cwd:cfg.projectRoot},matches[0]!.pipe);
+  })().catch(e=>{earlyTools=undefined;throw e;});
+  };
   const stop=()=>{stopping=true;};process.once('SIGINT',stop);process.once('SIGTERM',stop);
   try {
     invalidate(); await leaseWrites;
     await rm(`${cfg.connectionFile}.stop`,{force:true});
     await appServer.ready();
+    // Validate saved task identity before changing any native desktop resume.
+    if(toolThreads.size){
+      const check=new DesktopRpc(cfg.backendEndpoint);
+      try {await check.connect();for(const binding of cfg.toolBindings!){
+        const {thread}=await check.call('thread/read',{threadId:binding.threadId,includeTurns:false});
+        if(thread.id!==binding.threadId || thread.projectId!==binding.projectId || resolve(await realpath(thread.cwd))!==resolve(cfg.projectRoot))throw new Error('Host tool binding does not match saved task/project/root');
+      }} finally {check.close();}
+    }
     proxy=new WebSocketServer({host:proxyUrl.hostname.replace(/[\[\]]/g,''),port:Number(proxyUrl.port),maxPayload:8*1024*1024});
     await new Promise<void>((resolve,reject)=>{proxy!.once('listening',resolve);proxy!.once('error',reject);});
     proxy.on('connection',down=>{
       const up=new WebSocket(cfg.backendEndpoint);children.add(down);children.add(up);
-      const queue:Array<{data:Buffer;binary:boolean}>=[];let queueBytes=0;
+      const queue:Array<{data:Buffer;binary:boolean}>=[];let queueBytes=0,inFlightBytes=0;
+      let forwarding=Promise.resolve();
       down.on('message',(data,binary)=>{
         const buffer=Buffer.from(data as Buffer);
-        try {
-          readiness.request(down,JSON.parse(buffer.toString()));
-        }catch{}
-        if(up.readyState===WebSocket.OPEN)up.send(buffer,{binary});else {queueBytes+=buffer.length;if(queueBytes>8*1024*1024){down.close();return;}queue.push({data:buffer,binary});}
+        inFlightBytes+=buffer.length;
+        if(inFlightBytes+queueBytes>8*1024*1024){down.close();return;}
+        // Preserve request order while the first task waits for verified wiring.
+        forwarding=forwarding.then(async()=>{
+          if(down.readyState!==WebSocket.OPEN)return;
+          let prepared=buffer;
+          let message;try{message=JSON.parse(buffer.toString());}catch{}
+          if(message){
+            try{prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,toolThreads,resumeConfig)));}
+            catch{if(message.id!==undefined)down.send(JSON.stringify({id:message.id,error:{code:-32603,message:'Desktop tool wiring unavailable; task was not resumed'}}));return;}
+            readiness.request(down,message);
+          }
+          if(up.readyState===WebSocket.OPEN)up.send(prepared,{binary});else {queueBytes+=prepared.length;if(queueBytes>8*1024*1024){down.close();return;}queue.push({data:prepared,binary});}
+        }).catch(()=>down.close()).finally(()=>{inFlightBytes-=buffer.length;});
       });
-      up.on('open',()=>{for(const m of queue)up.send(m.data,{binary:m.binary});queue.length=0;});
+      up.on('open',()=>{for(const m of queue)up.send(m.data,{binary:m.binary});queue.length=0;queueBytes=0;});
       up.on('message',(data,binary)=>{
         try{readiness.response(down,JSON.parse(data.toString()));}catch{}
         if(down.readyState===WebSocket.OPEN)down.send(data,{binary});

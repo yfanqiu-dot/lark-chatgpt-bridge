@@ -20,6 +20,9 @@ it('pins binary hash and desktop version instead of trusting the CLI version str
   const cfg:HostConfig={codexBinary:join(dir,'codex.exe'),codexSha256:createHash('sha256').update('binary').digest('hex'),desktopExe:join(dir,'OpenAI.Codex_26.908.9136.0_x64__2p2nqsd0c76g0','app','ChatGPT.exe'),desktopVersion:'26.908.9136.0',projectRoot:dir,endpoint:'ws://127.0.0.1:19431',backendEndpoint:'ws://127.0.0.1:19432',connectionFile:join(dir,'lease.json')};
   await mkdir(dirname(cfg.desktopExe),{recursive:true});await writeFile(cfg.codexBinary,'binary','utf8');await writeFile(cfg.desktopExe,'desktop','utf8');
   expect((await validateHostConfig(cfg)).endpoint).toBe('ws://127.0.0.1:19431/');
+  await expect(validateHostConfig({...cfg,toolBindings:[{threadId:'t',projectId:null}]})).resolves.toMatchObject({toolBindings:[{threadId:'t',projectId:null}]});
+  await expect(validateHostConfig({...cfg,toolBindings:[{threadId:'t'} as any]})).rejects.toThrow('bindings');
+  await expect(validateHostConfig({...cfg,toolBindings:[{threadId:'t',projectId:'p'},{threadId:'t',projectId:'p'}]})).rejects.toThrow('bindings');
   await expect(validateHostConfig({...cfg,desktopVersion:'old'})).rejects.toThrow('version');
   await expect(validateHostConfig({...cfg,backendEndpoint:cfg.endpoint})).rejects.toThrow('differ');
   await writeFile(cfg.codexBinary,'upgraded','utf8');

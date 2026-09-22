@@ -6,5 +6,6 @@
   "projectRoot": "D:/projects/my-project",
   "endpoint": "ws://127.0.0.1:19431/",
   "backendEndpoint": "ws://127.0.0.1:19432/",
-  "connectionFile": "C:/bridge/state/desktop-connection.json"
+  "connectionFile": "C:/bridge/state/desktop-connection.json",
+  "toolBindings": [{"threadId": "EXISTING_THREAD_ID", "projectId": "NATIVE_PROJECT_ID"}]
 }

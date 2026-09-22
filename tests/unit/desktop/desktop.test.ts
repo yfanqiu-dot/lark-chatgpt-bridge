@@ -33,6 +33,7 @@ class FakeRpc implements RpcTransport {
     switch (method) {
       case 'project/list': result = { data: params.cursor ? [{ id:'project', roots:[{path:dir}] }] : [], nextCursor: params.cursor ? null : 'projects2' }; break;
       case 'thread/read': case 'thread/resume': result = { thread }; break;
+      case 'mcpServerStatus/list': result = {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]}; break;
       case 'turn/start':
         if (this.dropStart) { this.connected = false; throw new Error('Response lost'); }
         if (this.extraRequest) { this.terminal='inProgress';this.emit(this.extraRequest); }
@@ -57,6 +58,13 @@ const incoming = (id: string): InboundMessage => ({messageId:id,chatId:'oc_test'
 function replies(): ReplyPort & { sent: string[] } { return {sent:[],async send(_c,text){this.sent.push(text);return 'receipt'+this.sent.length;},async approval(){},async resolved(){}}; }
 
 describe('desktop boundaries and history', () => {
+  it('checks idle task runtime without starting a model turn and refuses an active desktop task',async()=>{
+    const rpc=new FakeRpc();await backend(rpc).preflightTools();
+    expect(rpc.calls.some(c=>c.method==='mcpServerStatus/list')).toBe(true);expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
+    const active=new FakeRpc();active.desktopActive=true;
+    await expect(backend(active).preflightTools()).rejects.toThrow('active');
+    expect(active.calls.some(c=>c.method==='thread/resume')).toBe(false);
+  });
   it('rejects remote endpoints, credentials, and incomplete bindings', () => {
     for (const url of ['ws://example.com:9','wss://127.0.0.1:9','ws://user@127.0.0.1:9','ws://127.0.0.1:9/x']) expect(()=>loopbackEndpoint(url)).toThrow();
     expect(()=>parseDesktopConfig({...config(),ownerOpenId:''})).toThrow();

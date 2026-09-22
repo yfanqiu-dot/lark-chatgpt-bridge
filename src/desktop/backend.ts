@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DesktopRpc, RpcError, type RpcMessage } from './rpc';
 import type { DesktopConfig } from './config';
+import { desktopToolOverrides } from './resume-tools';
 
 export interface Approval { token: string; requestId: string | number; threadId: string; turnId: string; method: string; description: string; decisions: string[]; submitted?: boolean }
 export interface TurnResult { turnId: string; status: 'completed' | 'interrupted' | 'failed'; text: string }
@@ -81,12 +82,37 @@ export class DesktopBackend {
     try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
     if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
     if (!m.mcpServer?.command || !m.mcpServer?.cwd) throw new Error('Missing installed MCP definition');
-    return {
-      'plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled': false,
-      'mcp_servers.codex_app': { ...m.mcpServer, enabled: true, env: { ...m.mcpServer.env, CODEX_APP_TOOLS_PIPE_PATH: m.pipe } },
-    };
+    return desktopToolOverrides(m.mcpServer,m.pipe);
   }
   async preflight(): Promise<void> { if (this.busy) throw new Error('Desktop turn already active'); try { await this.connect(false); } finally { this.rpc?.close(); } }
+  /** Explicit runtime check: resume only the verified idle task; never start a turn. */
+  async preflightTools(): Promise<void> {
+    if(this.busy)throw new Error('Desktop turn already active');
+    try {
+      await this.connect(false);
+      const read=await this.rpc!.call('thread/read',{threadId:this.config.threadId,includeTurns:false});
+      if(read.thread.status?.type==='active')throw new Error('Desktop task is active; tool preflight deferred');
+      await this.resumeThread(await(this.options.toolConfig?.()??this.readToolConfig()),await realpath(this.config.projectRoot));
+      await this.verifyRuntimeTools();
+    } finally {this.rpc?.close();}
+  }
+  private async verifyRuntimeTools(): Promise<void> {
+    let cursor: string | undefined; const seen=new Set<string>();const until=Date.now()+15_000;
+    do {
+      const page=await this.rpc!.call('mcpServerStatus/list',{threadId:this.config.threadId,detail:'full',...(cursor?{cursor}:{})});
+      if(!Array.isArray(page.data))throw new Error('Invalid task MCP status page');
+      const server=page.data.find((s:any)=>s.name==='codex_app');
+      if(server){
+        if(['starting','notStarted'].includes(server.runtimeStatus) && Date.now()<until){cursor=undefined;seen.clear();await delay(this.options.pollMs??500);continue;}
+        if(server.runtimeStatus!=='connected' || server.toolsError || !Object.values(server.tools??{}).some((t:any)=>t?.name==='list_projects'))throw new Error(`Task desktop tools are not connected (${server.runtimeStatus??'unknown'}); no turn submitted`);
+        return;
+      }
+      cursor=page.nextCursor??undefined;
+      if(cursor && seen.has(cursor))throw new Error('Repeated MCP status cursor');if(cursor)seen.add(cursor);
+      if(!cursor)break;
+    }while(true);
+    throw new Error('Task desktop tool server is missing; no turn submitted');
+  }
   async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
     this.busy = true; this.stopping = false; this.disconnected = false; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
@@ -103,6 +129,7 @@ export class DesktopBackend {
         }
         if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
         await this.resumeThread(await (this.options.toolConfig?.() ?? this.readToolConfig()), await realpath(this.config.projectRoot));
+        await this.verifyRuntimeTools();
         await hooks.submitting(); submitted = true;
         const result = await this.rpc!.call('turn/start', {
           threadId: this.config.threadId,
