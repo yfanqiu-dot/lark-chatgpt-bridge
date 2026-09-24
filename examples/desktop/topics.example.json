@@ -1,0 +1,30 @@
+{
+  "appId": "cli_YOUR_APP_ID",
+  "appSecretEnv": "LARK_APP_SECRET",
+  "ownerOpenId": "ou_YOUR_OPEN_ID",
+  "entryChatId": "oc_TOPIC_ENTRY_GROUP",
+  "endpoint": "ws://127.0.0.1:19431/",
+  "connectionFile": "C:/bridge/state/desktop-connection.json",
+  "registryFile": "C:/bridge/state/topics.json",
+  "stateDir": "C:/bridge/state/topic-ledgers",
+  "requireMention": true,
+  "maxQueue": 20,
+  "projects": [
+    {
+      "key": "main",
+      "projectId": "NATIVE_PROJECT_ID",
+      "projectRoot": "D:/projects/my-project"
+    },
+    {
+      "key": "another",
+      "projectId": "ANOTHER_NATIVE_PROJECT_ID",
+      "projectRoot": "D:/projects/another-project"
+    }
+  ],
+  "existing": {
+    "chatId": "oc_EXISTING_P1_GROUP",
+    "projectKey": "main",
+    "threadId": "EXISTING_P1_THREAD_ID",
+    "stateFile": "C:/bridge/state/existing-p1-ledger.json"
+  }
+}

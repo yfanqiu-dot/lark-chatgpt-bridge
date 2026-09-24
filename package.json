@@ -20,6 +20,7 @@
   "bin": {
     "lark-chatgpt-host": "./bin/lark-chatgpt-host.mjs",
     "lark-chatgpt-bridge": "./bin/lark-chatgpt-bridge.mjs",
+    "lark-chatgpt-topics": "./bin/lark-chatgpt-topics.mjs",
     "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
   },
   "exports": {

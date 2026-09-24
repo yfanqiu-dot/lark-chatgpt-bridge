@@ -11,7 +11,7 @@ import { desktopToolOverrides, prepareResumeTools } from './resume-tools';
 import { cleanDesktopEnvironment, desktopPipes, desktopToolCatalog } from './windows-tools';
 import { DesktopReadiness } from './readiness';
 
-export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; toolBindings?: Array<{threadId: string; projectId: string | null}> }
+export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; toolBindings?: Array<{threadId: string; projectId: string | null}>; topicRegistryFile?: string; topicProjects?: Array<{projectId: string; projectRoot: string}> }
 const exec = promisify(execFile);
 const sleep = (ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
 // The CLI accepts a socket address, while WebSocket clients accept a URL ending in '/'.
@@ -59,7 +59,26 @@ export async function validateHostConfig(raw: HostConfig): Promise<HostConfig> {
   const match=/[\\/]OpenAI\.Codex_([0-9.]+)_x64__2p2nqsd0c76g0[\\/]app[\\/]ChatGPT\.exe$/i.exec(cfg.desktopExe);
   if(!match || match[1]!==cfg.desktopVersion)throw new Error('Installed desktop version differs from configured version');
   if(cfg.toolBindings !== undefined && (!Array.isArray(cfg.toolBindings) || cfg.toolBindings.length>10 || cfg.toolBindings.some(b=>!b || typeof b.threadId!=='string' || !/^[\w-]+$/.test(b.threadId) || (b.projectId!==null && (typeof b.projectId!=='string' || !/^[\w-]+$/.test(b.projectId)))) || new Set(cfg.toolBindings.map(b=>b.threadId)).size!==cfg.toolBindings.length))throw new Error('Invalid tool bindings');
+  if(cfg.topicRegistryFile !== undefined && (!isAbsolute(cfg.topicRegistryFile) || !Array.isArray(cfg.topicProjects) || !cfg.topicProjects.length || cfg.topicProjects.some(p=>!p || typeof p.projectId!=='string' || !p.projectId || typeof p.projectRoot!=='string' || !isAbsolute(p.projectRoot))))throw new Error('Invalid topic registry or project allowlist');
+  if(cfg.topicRegistryFile === undefined && cfg.topicProjects !== undefined)throw new Error('Topic projects require a registry file');
+  if(cfg.topicProjects)cfg.topicProjects=await Promise.all(cfg.topicProjects.map(async p=>({...p,projectRoot:await realpath(p.projectRoot)})));
   return cfg;
+}
+
+/** Only a saved topic in the host allowlist may receive desktop tool wiring. */
+export async function registeredTopicBinding(cfg: HostConfig, threadId: string, readThread: (id: string) => Promise<any>): Promise<boolean> {
+  if(!cfg.topicRegistryFile || !cfg.topicProjects)return false;
+  let saved: any;
+  try{saved=JSON.parse(await readFile(cfg.topicRegistryFile,'utf8'));}
+  catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return false;throw e;}
+  if(saved.version!==1 || !Array.isArray(saved.topics))throw new Error('Malformed topic registry for host');
+  const row=saved.topics.find((r:any)=>r?.threadId===threadId && ['thread_ready','chat_creating','chat_ready','active'].includes(r.stage));
+  if(!row)return false;
+  const allowed=cfg.topicProjects.find(p=>p.projectId===row.projectId && resolve(p.projectRoot)===resolve(row.projectRoot));
+  if(!allowed)throw new Error('Topic project is not allowed by host');
+  const thread=await readThread(threadId);
+  if(thread?.id!==threadId || thread.projectId!==allowed.projectId || resolve(await realpath(thread.cwd))!==resolve(allowed.projectRoot))throw new Error('Topic task identity changed');
+  return true;
 }
 
 /** Owns only its child server/desktop. Start with the ordinary desktop closed. */
@@ -126,7 +145,17 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
           let prepared=buffer;
           let message;try{message=JSON.parse(buffer.toString());}catch{}
           if(message){
-            try{prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,toolThreads,resumeConfig)));}
+            try{
+              const targets=new Set(toolThreads);
+              if(message.method==='thread/resume' && !targets.has(message.params?.threadId)){
+                const matches=await registeredTopicBinding(cfg,message.params?.threadId,async id=>{
+                  const check=new DesktopRpc(cfg.backendEndpoint);
+                  try{await check.connect();return (await check.call('thread/read',{threadId:id,includeTurns:false})).thread;}finally{check.close();}
+                });
+                if(matches)targets.add(message.params.threadId);
+              }
+              prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,targets,resumeConfig)));
+            }
             catch{if(message.id!==undefined)down.send(JSON.stringify({id:message.id,error:{code:-32603,message:'Desktop tool wiring unavailable; task was not resumed'}}));return;}
             readiness.request(down,message);
           }

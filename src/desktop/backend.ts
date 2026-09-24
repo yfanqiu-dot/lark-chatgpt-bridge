@@ -30,6 +30,16 @@ export interface BackendOptions {
 export class UncertainExecution extends Error {}
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+export async function readDesktopToolConfig(config: Pick<DesktopConfig, 'connectionFile' | 'endpoint'>): Promise<Record<string, unknown>> {
+  const m = JSON.parse(await readFile(config.connectionFile, 'utf8'));
+  if (m.endpoint !== config.endpoint || m.version !== 1 || Date.now() - m.verifiedAt > 60_000 || m.verifiedAt > Date.now() + 1000 || !Number.isFinite(m.verifiedAt)) throw new Error('Desktop connection lease expired or mismatched');
+  if (!Number.isInteger(m.desktopPid) || m.desktopPid <= 0 || m.pipeServerPid !== m.desktopPid || !m.toolNames?.includes('list_projects')) throw new Error('Desktop tool endpoint not verified');
+  try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
+  if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
+  if (!m.mcpServer?.command || !m.mcpServer?.cwd) throw new Error('Missing installed MCP definition');
+  return desktopToolOverrides(m.mcpServer,m.pipe);
+}
+
 /** Desktop and bridge use one server; this class never spawns or kills that server. */
 export class DesktopBackend {
   private rpc?: RpcTransport;
@@ -76,13 +86,7 @@ export class DesktopBackend {
     if (!thread || thread.id !== this.config.threadId || thread.projectId !== this.config.projectId || resolve(thread.cwd) !== resolve(root)) throw new Error('Desktop thread/project/cwd mismatch');
   }
   private async readToolConfig(): Promise<Record<string, unknown>> {
-    const m = JSON.parse(await readFile(this.config.connectionFile, 'utf8'));
-    if (m.endpoint !== this.config.endpoint || m.version !== 1 || Date.now() - m.verifiedAt > 60_000 || m.verifiedAt > Date.now() + 1000 || !Number.isFinite(m.verifiedAt)) throw new Error('Desktop connection lease expired or mismatched');
-    if (!Number.isInteger(m.desktopPid) || m.desktopPid <= 0 || m.pipeServerPid !== m.desktopPid || !m.toolNames?.includes('list_projects')) throw new Error('Desktop tool endpoint not verified');
-    try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
-    if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
-    if (!m.mcpServer?.command || !m.mcpServer?.cwd) throw new Error('Missing installed MCP definition');
-    return desktopToolOverrides(m.mcpServer,m.pipe);
+    return readDesktopToolConfig(this.config);
   }
   async preflight(): Promise<void> { if (this.busy) throw new Error('Desktop turn already active'); try { await this.connect(false); } finally { this.rpc?.close(); } }
   /** Explicit runtime check: resume only the verified idle task; never start a turn. */

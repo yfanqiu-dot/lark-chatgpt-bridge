@@ -2,7 +2,7 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig([
   {
-    entry: { cli: 'src/cli/index.ts', desktop: 'src/desktop/main.ts', 'desktop-host': 'src/desktop/host-main.ts' },
+    entry: { cli: 'src/cli/index.ts', desktop: 'src/desktop/main.ts', 'desktop-host': 'src/desktop/host-main.ts', 'desktop-topics': 'src/desktop/topics-main.ts' },
     outDir: 'dist',
     format: ['esm'],
     target: 'node20',
