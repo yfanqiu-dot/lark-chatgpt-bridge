@@ -120,14 +120,14 @@ it('names a new native task on its creation connection after journaling the ID',
       if(named)result={thread:{id:'new-task',projectId:'p-alpha',cwd:dir}};
       else error={code:-32600,message:'thread not loaded'};
     }
-    if(m.method==='thread/turns/list')result={data:[{status:'completed',completedAt:1}]};
+    if(m.method==='thread/turns/list')result={data:[{id:'init-turn',status:'completed',completedAt:1}]};
     socket.send(JSON.stringify(error?{id:m.id,error}:{id:m.id,result}));
   }));
   try{
     const resources=new CodexTopicResources(c);
     const id=await resources.createThread(c.projects[0]!,'资料',async value=>{savedId=value;});
     await resources.verifyThread(c.projects[0]!,id);
-    expect(id).toBe('new-task');expect(methods).toEqual(['initialize','thread/start','thread/name/set','turn/start','thread/read','initialize','thread/read','thread/turns/list']);
+    expect(id).toBe('new-task');expect(methods).toEqual(['initialize','thread/start','thread/name/set','turn/start','thread/turns/list','initialize','thread/read','thread/turns/list']);
   }finally{for(const socket of server.clients)socket.terminate();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
@@ -208,7 +208,7 @@ describe('P2 Feishu bot resource adapter', () => {
       const data=url.includes('/tenant_access_token/')?{tenant_access_token:'token',expire:7200}
         :url.endsWith('/im/v1/chats?user_id_type=open_id')?{chat_id:'oc_created'}
         :url.includes('/members?')?{items:[{member_id:'ou_owner'}]}
-        :{chat_id:'oc_created'};
+        :{chat_mode:'group',chat_type:'private',chat_status:'normal',owner_id:'ou_owner'};
       return new Response(JSON.stringify({code:0,msg:'success',data,...(url.includes('/tenant_access_token/')?data:{})}),{status:200});
     };
     const port=new FeishuTopicResources(config(),'private-secret',fetcher as typeof fetch);

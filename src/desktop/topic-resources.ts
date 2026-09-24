@@ -44,12 +44,15 @@ export class CodexTopicResources implements Pick<TopicResources, 'verifyProject'
       // then name it and start a harmless first turn on the same connection.
       await saveId(id);
       await rpc.call('thread/name/set', { threadId: id, name: title });
-      await rpc.call('turn/start', { threadId: id, input: [{ type: 'text', text: TOPIC_BOOTSTRAP_PROMPT }] });
+      const started: { turn?: { id?: string } } = await rpc.call('turn/start', { threadId: id, input: [{ type: 'text', text: TOPIC_BOOTSTRAP_PROMPT }] });
+      const turnId = started.turn?.id;
+      if (!turnId) throw new Error('Desktop topic initialization turn ID missing; reconcile the saved task');
       const until = Date.now() + 90_000;
       while (Date.now() < until) {
-        const read: { thread?: { id?: string; status?: { type?: string } } } = await rpc.call('thread/read', { threadId: id, includeTurns: false });
-        if (read.thread?.id !== id) throw new Error('Bootstrapped desktop task identity changed');
-        if (read.thread.status?.type !== 'active') return id;
+        const page: { data?: Array<{ id?: string; status?: string; completedAt?: unknown }> } = await rpc.call('thread/turns/list', { threadId: id, limit: 10, itemsView: 'notLoaded' });
+        const turn = page.data?.find(item => item.id === turnId);
+        if (turn?.status === 'completed' && turn.completedAt != null) return id;
+        if (turn && ['failed','interrupted','cancelled'].includes(turn.status ?? '')) throw new Error(`Desktop topic initialization ended as ${turn.status}; reconcile the saved task`);
         await new Promise(resolve => setTimeout(resolve, 500));
       }
       throw new Error('Desktop topic initialization is still running; reconcile the saved task before retrying');
@@ -105,7 +108,8 @@ export class FeishuTopicResources implements Pick<TopicResources, 'createChat' |
   async verifyChat(chatId: string, ownerOpenId: string): Promise<void> {
     const data = await this.request('GET', `/im/v1/chats/${encodeURIComponent(chatId)}?user_id_type=open_id`);
     const chat = data?.chat ?? data;
-    if (chat?.chat_id !== chatId) throw new Error('Feishu chat identity mismatch');
+    // Feishu's chat/get response omits chat_id; the ID is the successful lookup key.
+    if (!chat || (chat.chat_id && chat.chat_id !== chatId) || chat.chat_mode !== 'group' || chat.chat_type !== 'private' || chat.chat_status !== 'normal' || chat.owner_id !== ownerOpenId) throw new Error('Feishu chat identity mismatch');
     let cursor: string | undefined; const seen = new Set<string>();
     do {
       const query = new URLSearchParams({ member_id_type: 'open_id', page_size: '100', ...(cursor ? { page_token: cursor } : {}) });
