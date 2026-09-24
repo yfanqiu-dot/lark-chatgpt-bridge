@@ -39,7 +39,7 @@ export function parseTopicConfig(raw: unknown): TopicConfig {
   return config;
 }
 
-export type TopicStage = 'planned' | 'thread_creating' | 'thread_ready' | 'chat_creating' | 'chat_ready' | 'active';
+export type TopicStage = 'planned' | 'thread_creating' | 'thread_initializing' | 'thread_ready' | 'chat_creating' | 'chat_ready' | 'active';
 export interface TopicRecord {
   requestId: string; title: string; projectKey: string; projectId: string; projectRoot: string;
   stage: TopicStage; threadId?: string; chatId?: string; createdAt: string; updatedAt: string; noticeAttempted?: boolean; noticeReceipt?: string;
@@ -56,8 +56,8 @@ export class TopicRegistry {
       if (saved.version !== 1 || !Array.isArray(saved.topics)) throw new Error('Topic registry version mismatch');
       const requests = new Set<string>(), chats = new Set<string>(), threads = new Set<string>();
       for (const row of saved.topics as TopicRecord[]) {
-        if (!row || typeof row.requestId !== 'string' || requests.has(row.requestId) || !['planned','thread_creating','thread_ready','chat_creating','chat_ready','active'].includes(row.stage) || typeof row.title !== 'string' || !row.title || typeof row.projectKey !== 'string' || !row.projectKey || typeof row.projectId !== 'string' || !row.projectId || typeof row.projectRoot !== 'string' || !isAbsolute(row.projectRoot)) throw new Error('Malformed topic registry');
-        if (['thread_ready','chat_creating','chat_ready','active'].includes(row.stage) && !row.threadId) throw new Error('Topic task ID is missing');
+        if (!row || typeof row.requestId !== 'string' || requests.has(row.requestId) || !['planned','thread_creating','thread_initializing','thread_ready','chat_creating','chat_ready','active'].includes(row.stage) || typeof row.title !== 'string' || !row.title || typeof row.projectKey !== 'string' || !row.projectKey || typeof row.projectId !== 'string' || !row.projectId || typeof row.projectRoot !== 'string' || !isAbsolute(row.projectRoot)) throw new Error('Malformed topic registry');
+        if (['thread_initializing','thread_ready','chat_creating','chat_ready','active'].includes(row.stage) && !row.threadId) throw new Error('Topic task ID is missing');
         if (['chat_ready','active'].includes(row.stage) && !row.chatId) throw new Error('Topic chat ID is missing');
         if (row.chatId && (chats.has(row.chatId) || !/^oc_[a-zA-Z0-9]+$/.test(row.chatId))) throw new Error('Duplicate or invalid chat binding');
         if (row.threadId && threads.has(row.threadId)) throw new Error('Duplicate desktop task binding');

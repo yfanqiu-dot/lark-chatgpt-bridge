@@ -12,6 +12,8 @@ Host 的 `topicRegistryFile` 要与 P2 的 `registryFile` 相同，`topicProject
 
 项目根目录下的 `.lark-chatgpt-bridge/index.md` 和 `topics/<chatId>.md` 保存可读索引与已持久化的原生对话文字。该目录自带 `.gitignore`，避免将私人群内容意外提交。新绑定激活时同步一次，运行期间每分钟刷新；未完成轮次、工具明细和附件不会写入 Markdown，桌面原生历史仍是准据。
 
+Codex 空任务在创建连接关闭后可能没有可恢复的对话历史。P2 因此先以 `thread_initializing` 记录新任务 ID，再在同一连接命名并完成一轮明确标记为 QIU bridge 初始化的简短对话，核对持久化历史后才建飞书群。该初始化轮次可在桌面历史中看到，但不会作为用户消息导出到项目 Markdown 记录。若初始化结果不明，需先核实该任务已有完成轮次，再用离线修复入口续办，不重建同一任务。
+
 ## 使用与恢复
 
 在共享 host 已启动、旧 bridge 已暂停的受控窗口：

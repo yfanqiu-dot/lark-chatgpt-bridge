@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TopicRegistry, parseCreateTopic, parseTopicConfig, type TopicConfig, type TopicProject } from '../../../src/desktop/topics';
@@ -9,7 +9,8 @@ import type { InboundMessage } from '../../../src/desktop/controller';
 import { TopicArchive } from '../../../src/desktop/topic-archive';
 import { registeredTopicBinding, type HostConfig } from '../../../src/desktop/host';
 import type { DesktopRpc } from '../../../src/desktop/rpc';
-import { FeishuTopicResources } from '../../../src/desktop/topic-resources';
+import { CodexTopicResources, FeishuTopicResources, TOPIC_BOOTSTRAP_PROMPT } from '../../../src/desktop/topic-resources';
+import { WebSocketServer } from 'ws';
 
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'desktop-p2-')); });
@@ -24,7 +25,7 @@ function resources() {
   const calls: string[] = []; let failChatVerification = false; let unknownChatResult = false;
   const port: TopicResources = {
     async verifyProject(project: TopicProject) { calls.push(`project:${project.key}`); },
-    async createThread(project: TopicProject) { calls.push(`thread:${project.key}`); return `thread-${calls.filter(c=>c.startsWith('thread:')).length}`; },
+    async createThread(project: TopicProject, _title, saveId) { calls.push(`thread:${project.key}`); const id=`thread-${calls.filter(c=>c.startsWith('thread:')).length}`; await saveId(id); calls.push(`persist:${id}`); return id; },
     async verifyThread(_project, id) { calls.push(`verify-thread:${id}`); },
     async nameThread(id, title) { calls.push(`name:${id}:${title}`); },
     async createChat(title) { calls.push(`chat:${title}`); if (unknownChatResult) throw new Error('Connection dropped'); return `oc_new${calls.filter(c=>c.startsWith('chat:')).length}`; },
@@ -51,6 +52,7 @@ describe('P2 topic creation journal', () => {
     expect(store.byChat(a.chatId!)?.threadId).toBe(a.threadId);
     expect(store.byChat(c.chatId!)?.projectId).toBe('p-beta');
     const disk=JSON.parse(await readFile(config().registryFile,'utf8'));expect(disk.topics).toHaveLength(3);
+    expect(r.calls.indexOf('persist:thread-1')).toBeLessThan(r.calls.indexOf('verify-thread:thread-1'));
   });
   it('deduplicates concurrent delivery and a restart without creating another resource', async () => {
     const store=new TopicRegistry(config().registryFile);await store.load();const r=resources();const maker=new TopicProvisioner(config(),store,r.port);
@@ -85,6 +87,48 @@ describe('P2 topic creation journal', () => {
     await maker.attachKnownThread('m1','recovered-thread');
     expect((await maker.create('m1','alpha','资料')).threadId).toBe('recovered-thread');
   });
+  it('never creates a group when task initialization has an unknown outcome', async () => {
+    const store=new TopicRegistry(config().registryFile);await store.load();const r=resources();
+    r.port.createThread=async (_project,_title,saveId)=>{await saveId('thread-saved');throw new Error('Initialization connection lost');};
+    const maker=new TopicProvisioner(config(),store,r.port);
+    await expect(maker.create('m1','alpha','资料')).rejects.toThrow('Initialization connection lost');
+    expect(store.byRequest('m1')).toMatchObject({stage:'thread_initializing',threadId:'thread-saved'});
+    await expect(maker.create('m1','alpha','资料')).rejects.toThrow('不会重试');
+    expect(r.calls.filter(call=>call.startsWith('chat:'))).toHaveLength(0);
+    await maker.attachKnownThread('m1','thread-saved');
+    expect((await maker.create('m1','alpha','资料')).stage).toBe('active');
+  });
+});
+
+it('names a new native task on its creation connection after journaling the ID', async () => {
+  const server=new WebSocketServer({host:'127.0.0.1',port:0});
+  await new Promise<void>(resolve=>server.once('listening',resolve));
+  const c=config();c.endpoint=`ws://127.0.0.1:${(server.address() as {port:number}).port}/`;
+  await writeFile(c.connectionFile,JSON.stringify({version:1,endpoint:c.endpoint,verifiedAt:Date.now(),desktopPid:process.pid,pipeServerPid:process.pid,
+    toolNames:['list_projects'],pipe:'\\\\.\\pipe\\codex-browser-use-test',mcpServer:{command:process.execPath,cwd:dir}}),'utf8');
+  let named=false,savedId:string|undefined;const methods:string[]=[];
+  server.on('connection',socket=>socket.on('message',data=>{
+    const m=JSON.parse(data.toString());if(m.id===undefined)return;
+    methods.push(m.method);
+    let result:any={};let error:any;
+    if(m.method==='thread/start')result={thread:{id:'new-task',projectId:'p-alpha',cwd:dir}};
+    if(m.method==='thread/name/set'){
+      expect(savedId).toBe('new-task');expect(m.params.name).toBe('资料');named=true;
+    }
+    if(m.method==='turn/start'){expect(named).toBe(true);result={turn:{id:'init-turn'}};}
+    if(m.method==='thread/read'){
+      if(named)result={thread:{id:'new-task',projectId:'p-alpha',cwd:dir}};
+      else error={code:-32600,message:'thread not loaded'};
+    }
+    if(m.method==='thread/turns/list')result={data:[{status:'completed',completedAt:1}]};
+    socket.send(JSON.stringify(error?{id:m.id,error}:{id:m.id,result}));
+  }));
+  try{
+    const resources=new CodexTopicResources(c);
+    const id=await resources.createThread(c.projects[0]!,'资料',async value=>{savedId=value;});
+    await resources.verifyThread(c.projects[0]!,id);
+    expect(id).toBe('new-task');expect(methods).toEqual(['initialize','thread/start','thread/name/set','turn/start','thread/read','initialize','thread/read','thread/turns/list']);
+  }finally{for(const socket of server.clients)socket.terminate();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
 describe('P2 group routing', () => {
@@ -136,7 +180,11 @@ describe('P2 host binding and local records', () => {
     const calls:string[]=[];
     const rpc={async connect(){},close(){},async call(method:string,params:any){calls.push(method);
       if(method==='thread/read')return{thread:{id:row.threadId,projectId:'p-alpha',cwd:dir}};
-      if(method==='thread/turns/list')return{data:[{id:'turn1',status:'completed',completedAt:1}]};
+      if(method==='thread/turns/list')return{data:[{id:'turn1',status:'completed',completedAt:2},{id:'init',status:'completed',completedAt:1}]};
+      if(method==='thread/items/list' && params.turnId==='init')return{data:[
+        {turnId:'init',item:{type:'userMessage',content:[{type:'text',text:TOPIC_BOOTSTRAP_PROMPT}]}},
+        {turnId:'init',item:{type:'agentMessage',phase:'final_answer',text:'话题已就绪'}},
+      ]};
       if(method==='thread/items/list')return{data:[
         {turnId:'turn1',item:{type:'userMessage',content:[{type:'text',text:'整理资料'}]}},
         {turnId:'turn1',item:{type:'agentMessage',phase:'commentary',text:'internal progress'}},
@@ -146,9 +194,9 @@ describe('P2 host binding and local records', () => {
     await new TopicArchive(c,store,()=>rpc).sync(row);
     const text=await readFile(join(dir,'.lark-chatgpt-bridge','topics',`${row.chatId}.md`),'utf8');
     const index=await readFile(join(dir,'.lark-chatgpt-bridge','index.md'),'utf8');
-    expect(text).toContain('整理资料');expect(text).toContain('已整理');expect(text).not.toContain('internal progress');
+    expect(text).toContain('整理资料');expect(text).toContain('已整理');expect(text).not.toContain('internal progress');expect(text).not.toContain(TOPIC_BOOTSTRAP_PROMPT);
     expect(index).toContain(row.threadId!);expect(index).toContain(row.chatId!);
-    expect(calls).toEqual(['thread/read','thread/turns/list','thread/items/list']);
+    expect(calls).toEqual(['thread/read','thread/turns/list','thread/items/list','thread/items/list']);
   });
 });
 

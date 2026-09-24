@@ -9,6 +9,8 @@ async function withRpc<T>(endpoint: string, use: (rpc: DesktopRpc) => Promise<T>
   try { await rpc.connect(); return await use(rpc); } finally { rpc.close(); }
 }
 
+export const TOPIC_BOOTSTRAP_PROMPT = '[QIU bridge 初始化] 新话题已创建。请只回复“话题已就绪”，不要调用工具或修改文件；等待用户在飞书群中的下一条指令。';
+
 export class CodexTopicResources implements Pick<TopicResources, 'verifyProject' | 'createThread' | 'verifyThread' | 'nameThread'> {
   constructor(readonly config: TopicConfig) {}
   async verifyProject(project: TopicProject): Promise<void> {
@@ -30,15 +32,27 @@ export class CodexTopicResources implements Pick<TopicResources, 'verifyProject'
       throw new Error('Desktop project is not available');
     });
   }
-  async createThread(project: TopicProject, _title: string): Promise<string> {
+  async createThread(project: TopicProject, title: string, saveId: (threadId: string) => Promise<void>): Promise<string> {
     const root = await realpath(project.projectRoot);
     const config = await readDesktopToolConfig(this.config);
     return withRpc(this.config.endpoint, async rpc => {
       const result = await rpc.call('thread/start', { cwd: root, projectId: project.projectId, config });
       const id = result.thread?.id;
       if (typeof id !== 'string' || !id) throw new Error('Desktop task ID missing from thread/start');
-      // Save the returned ID before any further verification or title mutation.
-      return id;
+      assertProjectThread(result.thread, project, root);
+      // An empty task is not durable when this connection closes. Save its ID,
+      // then name it and start a harmless first turn on the same connection.
+      await saveId(id);
+      await rpc.call('thread/name/set', { threadId: id, name: title });
+      await rpc.call('turn/start', { threadId: id, input: [{ type: 'text', text: TOPIC_BOOTSTRAP_PROMPT }] });
+      const until = Date.now() + 90_000;
+      while (Date.now() < until) {
+        const read: { thread?: { id?: string; status?: { type?: string } } } = await rpc.call('thread/read', { threadId: id, includeTurns: false });
+        if (read.thread?.id !== id) throw new Error('Bootstrapped desktop task identity changed');
+        if (read.thread.status?.type !== 'active') return id;
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      throw new Error('Desktop topic initialization is still running; reconcile the saved task before retrying');
     });
   }
   async verifyThread(project: TopicProject, threadId: string): Promise<void> {
@@ -47,6 +61,8 @@ export class CodexTopicResources implements Pick<TopicResources, 'verifyProject'
       const result = await rpc.call('thread/read', { threadId, includeTurns: false });
       assertProjectThread(result.thread, project, root);
       if (result.thread.id !== threadId) throw new Error('Desktop task ID mismatch');
+      const turns: { data?: Array<{ status?: string; completedAt?: unknown }> } = await rpc.call('thread/turns/list', { threadId, limit: 5, itemsView: 'notLoaded' });
+      if (!turns.data?.some(turn => turn.status === 'completed' && turn.completedAt != null)) throw new Error('Desktop task has no durable completed turn');
     });
   }
   async nameThread(threadId: string, title: string): Promise<void> {
@@ -107,7 +123,7 @@ export function topicResources(config: TopicConfig, secret: string): TopicResour
   const codex = new CodexTopicResources(config);
   const feishu = new FeishuTopicResources(config, secret);
   return {
-    verifyProject: project => codex.verifyProject(project), createThread: (project, title) => codex.createThread(project, title),
+    verifyProject: project => codex.verifyProject(project), createThread: (project, title, saveId) => codex.createThread(project, title, saveId),
     verifyThread: (project, id) => codex.verifyThread(project, id), nameThread: (id, title) => codex.nameThread(id, title),
     createChat: (title, owner) => feishu.createChat(title, owner), verifyChat: (id, owner) => feishu.verifyChat(id, owner),
   };

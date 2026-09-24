@@ -5,7 +5,7 @@ import { TopicRegistry } from './topics';
 
 export interface TopicResources {
   verifyProject(project: TopicProject): Promise<void>;
-  createThread(project: TopicProject, title: string): Promise<string>;
+  createThread(project: TopicProject, title: string, saveId: (threadId: string) => Promise<void>): Promise<string>;
   verifyThread(project: TopicProject, threadId: string): Promise<void>;
   nameThread(threadId: string, title: string): Promise<void>;
   createChat(title: string, ownerOpenId: string): Promise<string>;
@@ -23,7 +23,7 @@ export class TopicProvisioner {
   }
   async attachKnownThread(requestId: string, threadId: string): Promise<TopicRecord> {
     const row = this.registry.byRequest(requestId);
-    if (!row || row.stage !== 'thread_creating' || !/^[\w-]+$/.test(threadId)) throw new Error('No thread creation awaiting reconciliation');
+    if (!row || !['thread_creating','thread_initializing'].includes(row.stage) || !/^[\w-]+$/.test(threadId) || (row.threadId && row.threadId !== threadId)) throw new Error('No thread creation awaiting reconciliation');
     const project = this.config.projects.find(p => p.key === row.projectKey);
     if (!project || project.projectId !== row.projectId || resolve(project.projectRoot) !== resolve(row.projectRoot)) throw new Error('Saved project binding changed');
     await this.resources.verifyThread(project, threadId);
@@ -50,12 +50,16 @@ export class TopicProvisioner {
       const now = new Date().toISOString();
       row = await this.registry.add({ requestId, title, projectKey, projectId: project.projectId, projectRoot: project.projectRoot, stage: 'planned', createdAt: now, updatedAt: now });
     }
-    if (row.stage === 'thread_creating' || row.stage === 'chat_creating') throw new Error(`创建结果待人工核对（${row.stage}）；不会重试可能已成功的创建调用`);
+    if (row.stage === 'thread_creating' || row.stage === 'thread_initializing' || row.stage === 'chat_creating') throw new Error(`创建结果待人工核对（${row.stage}）；不会重试可能已成功的创建调用`);
     if (row.stage === 'planned') {
       row = await this.registry.advance(requestId, 'thread_creating');
-      const threadId = await this.resources.createThread(project, title);
+      const threadId = await this.resources.createThread(project, title, async id => {
+        if (!id) throw new Error('Desktop task ID missing; creation must be reconciled');
+        row = await this.registry.advance(requestId, 'thread_initializing', { threadId: id });
+      });
       if (!threadId) throw new Error('Desktop task ID missing; creation must be reconciled');
-      row = await this.registry.advance(requestId, 'thread_ready', { threadId });
+      if (row.stage !== 'thread_initializing' || row.threadId !== threadId) throw new Error('Desktop task ID was not saved before connection close');
+      row = await this.registry.advance(requestId, 'thread_ready');
     }
     if (!row.threadId) throw new Error('Topic has no saved desktop task ID');
     await this.resources.verifyThread(project, row.threadId);

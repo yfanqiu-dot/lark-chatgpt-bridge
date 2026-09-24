@@ -5,6 +5,7 @@ import { DesktopRpc } from './rpc';
 import type { TopicConfig, TopicRecord } from './topics';
 import { TopicRegistry } from './topics';
 import { assertProjectThread } from './topic-provisioner';
+import { TOPIC_BOOTSTRAP_PROMPT } from './topic-resources';
 
 function itemText(item: any): string {
   if (typeof item.text === 'string') return item.text;
@@ -57,6 +58,7 @@ export class TopicArchive {
           if (itemCursor) seenItems.add(itemCursor);
         } while (itemCursor);
         const user = items.filter(i => i.type === 'userMessage').map(itemText).filter(Boolean).join('\n\n');
+        if (user === TOPIC_BOOTSTRAP_PROMPT) continue;
         const answer = items.filter(i => i.type === 'agentMessage' && i.phase === 'final_answer').map(itemText).filter(Boolean).join('\n\n');
         lines.push(`## 轮次 ${turn.id}`, '', `状态：${turn.status ?? 'unknown'}`, '');
         if (user) lines.push('**用户**', '', quote(user), '');
