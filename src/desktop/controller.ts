@@ -48,7 +48,7 @@ export class DesktopController {
       case '/status': return `项目：${this.config.projectRoot}\n对话：${this.config.threadId}\n状态：${this.status}\n排队：${this.ledger.all().filter(r => r.state === 'queued').length}\n待核对：${this.ledger.all().filter(r => r.state === 'uncertain').length}\n审批：${this.backend.pendingApprovals().map(a => `${a.token}${a.submitted ? '（等待服务端确认）' : ''}`).join(', ') || '无'}`;
       case '/stop':
         if (!this.activeMessage) return '当前没有飞书发起的运行；桌面其他工作不受影响。';
-        await this.backend.stop(); return '已请求停止当前运行，等待服务端确认；排队中的请求仍保留。';
+        await this.backend.stop(); return '已请求停止当前对话轮次，等待服务端确认；排队中的请求仍保留。已经启动的外部命令可能继续运行。';
       case '/steer':
         if (!args.length) return '用法：/steer 追加指令';
         await this.backend.steer(args.join(' ')); return '追加指令已提交到当前运行。';

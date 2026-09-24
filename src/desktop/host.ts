@@ -151,7 +151,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
       if(appServer.error() || desktopError)throw appServer.error()??desktopError;
       const snapshot=readiness.snapshot();
       const summary=JSON.stringify({...snapshot,quietForMs:Math.min(snapshot.quietForMs,15000)});
-      if(!verifiedOnce && summary!==lastReadiness){console.log('Desktop readiness:',summary);lastReadiness=summary;}
+      if(summary!==lastReadiness){console.log('Desktop readiness:',summary);lastReadiness=summary;}
       if(!verifiedOnce && Date.now()-startedAt>120_000)throw new Error(`Desktop did not finish shared initialization within 120 seconds: ${summary}`);
       if(readiness.canLease()) {
         const revision=readiness.revision;

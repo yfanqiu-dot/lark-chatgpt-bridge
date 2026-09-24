@@ -85,3 +85,16 @@ it('does not lease while another configuration mutation is still in flight',()=>
   r.response(c,{id:5,result:{}});expect(r.canLease()).toBe(false);
   r.request(c,{id:7,method:'config/read'});r.response(c,{id:7,result:{}});now+=15_000;expect(r.canLease()).toBe(true);
 });
+
+it('renews readiness after successful background feature enablement without requiring an unrelated desktop read',()=>{
+  let now=0;const r=new DesktopReadiness(()=>{},()=>now),c={};initialize(r,c);now=15_000;
+  expect(r.canLease()).toBe(true);
+  r.request(c,{id:4,method:'experimentalFeature/enablement/set'});
+  expect(r.canLease()).toBe(false);
+  r.response(c,{id:4,result:{}});
+  now+=14_999;expect(r.canLease()).toBe(false);
+  now++;expect(r.canLease()).toBe(true);
+  r.request(c,{id:5,method:'experimentalFeature/enablement/set'});
+  r.response(c,{id:5,error:{code:1,message:'update failed'}});
+  now+=60_000;expect(r.canLease()).toBe(false);
+});

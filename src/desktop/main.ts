@@ -11,6 +11,7 @@ import { resolveAppPaths } from '../config/app-paths';
 import { acquireAppRuntimeLock } from '../runtime/locks';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { approvalCard, resolvedCard } from './cards';
+import { desktopInbound } from './inbound';
 
 async function main(): Promise<void> {
   const [configPath, mode] = process.argv.slice(2);
@@ -58,12 +59,8 @@ async function main(): Promise<void> {
   channel.on({
     message: async msg => {
       try { await ready; } catch { return; }
-      if (msg.resources.length || msg.rawContentType !== 'text') return;
-      let content = msg.content;
-      for (const mention of msg.mentions.filter(m => m.isBot || m.openId === channel.botIdentity?.openId)) {
-        content = content.replace(mention.key, '').replace(`@${mention.name}`, '');
-      }
-      await controller.receive({ messageId: msg.messageId, chatId: msg.chatId, senderId: msg.senderId, content, mentionedBot: msg.mentionedBot, isBot: msg.senderIsBot || msg.senderId === channel.botIdentity?.openId, replyInThread: Boolean(msg.threadId || msg.chatMode === 'topic') }).catch(e => console.error('Desktop intake failed:', String(e)));
+      const inbound=desktopInbound(msg,channel.botIdentity?.openId);
+      if(inbound)await controller.receive(inbound).catch(e => console.error('Desktop intake failed:', String(e)));
     },
     cardAction: async evt => {
       try { await ready; } catch { return; }

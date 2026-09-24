@@ -161,7 +161,7 @@ export class DesktopBackend {
           if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
             const items = await this.readItems(this.activeTurn!);
             const text = items.filter((i: any) => i.type === 'agentMessage' && i.phase === 'final_answer').map((i: any) => i.text).join('\n\n');
-            return { turnId: this.activeTurn!, status: turn.status, text: text || turn.error?.message || (turn.status === 'interrupted' ? '任务已停止。' : '该轮次已结束，没有最终文本。') };
+            return { turnId: this.activeTurn!, status: turn.status, text: text || turn.error?.message || (turn.status === 'interrupted' ? '当前对话轮次已停止；已经启动的外部命令可能继续运行。' : '该轮次已结束，没有最终文本。') };
           }
           const read = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
           if (read.thread.status?.type === 'active') unresolvedIdleReads = 0;

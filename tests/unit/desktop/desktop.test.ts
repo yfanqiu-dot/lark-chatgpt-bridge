@@ -7,6 +7,7 @@ import { DesktopController, type ReplyPort, type InboundMessage } from '../../..
 import { DesktopLedger, type Binding } from '../../../src/desktop/ledger';
 import { parseDesktopConfig, type DesktopConfig } from '../../../src/desktop/config';
 import { loopbackEndpoint, type RpcMessage } from '../../../src/desktop/rpc';
+import { desktopInbound } from '../../../src/desktop/inbound';
 
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'desktop-p1-')); });
@@ -125,6 +126,18 @@ describe('desktop boundaries and history', () => {
   });
 });
 describe('durable single-group controller',()=>{
+  it('accepts a formatted Feishu text message through the real intake mapping and deduplicates it',async()=>{
+    // Regression: the first real 09/23 calibration question was a `post` envelope.
+    const inbound=desktopInbound({messageId:'post-question',chatId:'oc_test',senderId:'ou_owner',content:'@QIU 现在的校验词是什么？',rawContentType:'post',resources:[],mentionedBot:true,mentions:[{key:'@_user_1',name:'QIU',openId:'ou_bot'}]},'ou_bot');
+    expect(inbound?.content.trim()).toBe('现在的校验词是什么？');
+    const rpc=new FakeRpc(),store=new DesktopLedger(config().stateFile,binding());
+    const c=new DesktopController(config(),store,backend(rpc),replies());await c.start();
+    await c.receive(inbound!);await c.receive(inbound!);await c.idle();
+    expect(rpc.calls.filter(r=>r.method==='turn/start')).toHaveLength(1);
+    expect(store.all()[0]?.prompt).toBe('现在的校验词是什么？');
+    expect(desktopInbound({...inbound!,resources:[{type:'image'}],mentions:[],rawContentType:'post'})).toBeUndefined();
+    expect(desktopInbound({...inbound!,resources:[],mentions:[],rawContentType:'interactive'})).toBeUndefined();
+  });
   it('deduplicates message IDs and serially executes three rounds',async()=>{
     const rpc=new FakeRpc();const out=replies();const store=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),store,backend(rpc),out);await c.start();
     await Promise.all(['a','a','b','c'].map(id=>c.receive(incoming(id))));await c.idle();
