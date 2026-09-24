@@ -34,7 +34,7 @@ export class CodexTopicResources implements Pick<TopicResources, 'verifyProject'
   }
   async createThread(project: TopicProject, title: string, saveId: (threadId: string) => Promise<void>): Promise<string> {
     const root = await realpath(project.projectRoot);
-    const config = await readDesktopToolConfig(this.config);
+    const config = await readDesktopToolConfig(this.config, 45_000);
     return withRpc(this.config.endpoint, async rpc => {
       const result = await rpc.call('thread/start', { cwd: root, projectId: project.projectId, config });
       const id = result.thread?.id;

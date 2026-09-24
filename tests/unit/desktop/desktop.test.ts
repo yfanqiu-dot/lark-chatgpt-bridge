@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DesktopBackend, UncertainExecution, type BackendHooks, type RpcTransport } from '../../../src/desktop/backend';
+import { DesktopBackend, UncertainExecution, readDesktopToolConfig, type BackendHooks, type RpcTransport } from '../../../src/desktop/backend';
 import { DesktopController, type ReplyPort, type InboundMessage } from '../../../src/desktop/controller';
 import { DesktopLedger, type Binding } from '../../../src/desktop/ledger';
 import { parseDesktopConfig, type DesktopConfig } from '../../../src/desktop/config';
@@ -59,6 +59,14 @@ const incoming = (id: string): InboundMessage => ({messageId:id,chatId:'oc_test'
 function replies(): ReplyPort & { sent: string[] } { return {sent:[],async send(_c,text){this.sent.push(text);return 'receipt'+this.sent.length;},async approval(){},async resolved(){}}; }
 
 describe('desktop boundaries and history', () => {
+  it('waits for a temporarily invalidated desktop lease before a new submission',async()=>{
+    const c=config();
+    const pending=readDesktopToolConfig(c,2000);
+    await new Promise(resolve=>setTimeout(resolve,20));
+    await writeFile(c.connectionFile,JSON.stringify({version:1,endpoint:c.endpoint,verifiedAt:Date.now(),desktopPid:process.pid,pipeServerPid:process.pid,
+      toolNames:['list_projects'],pipe:'\\\\.\\pipe\\codex-browser-use-test',mcpServer:{command:process.execPath,cwd:dir}}),'utf8');
+    expect(await pending).toHaveProperty('mcp_servers.codex_app');
+  });
   it('checks idle task runtime without starting a model turn and refuses an active desktop task',async()=>{
     const rpc=new FakeRpc();await backend(rpc).preflightTools();
     expect(rpc.calls.some(c=>c.method==='mcpServerStatus/list')).toBe(true);expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);

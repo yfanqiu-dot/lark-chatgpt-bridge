@@ -30,9 +30,20 @@ export interface BackendOptions {
 export class UncertainExecution extends Error {}
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-export async function readDesktopToolConfig(config: Pick<DesktopConfig, 'connectionFile' | 'endpoint'>): Promise<Record<string, unknown>> {
-  const m = JSON.parse(await readFile(config.connectionFile, 'utf8'));
-  if (m.endpoint !== config.endpoint || m.version !== 1 || Date.now() - m.verifiedAt > 60_000 || m.verifiedAt > Date.now() + 1000 || !Number.isFinite(m.verifiedAt)) throw new Error('Desktop connection lease expired or mismatched');
+export async function readDesktopToolConfig(config: Pick<DesktopConfig, 'connectionFile' | 'endpoint'>, waitMs = 0): Promise<Record<string, unknown>> {
+  const until = Date.now() + waitMs;
+  let m: any;
+  while (true) {
+    try { m = JSON.parse(await readFile(config.connectionFile, 'utf8')); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() >= until) throw e;
+      await delay(500); continue;
+    }
+    if (m.endpoint !== config.endpoint || m.version !== 1 || !Number.isFinite(m.verifiedAt)) throw new Error('Desktop connection lease expired or mismatched');
+    if (Date.now() - m.verifiedAt <= 60_000 && m.verifiedAt <= Date.now() + 1000) break;
+    if (Date.now() >= until) throw new Error('Desktop connection lease expired or mismatched');
+    await delay(500);
+  }
   if (!Number.isInteger(m.desktopPid) || m.desktopPid <= 0 || m.pipeServerPid !== m.desktopPid || !m.toolNames?.includes('list_projects')) throw new Error('Desktop tool endpoint not verified');
   try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
   if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
@@ -49,6 +60,7 @@ export class DesktopBackend {
   private busy = false;
   private stopping = false;
   private disconnected = false;
+  private awaitingExecution = false;
   private approvals = new Map<string, Approval>();
   constructor(readonly config: DesktopConfig, private readonly options: BackendOptions = {}) {}
   pendingApprovals(): Approval[] { return structuredClone([...this.approvals.values()]); }
@@ -86,7 +98,7 @@ export class DesktopBackend {
     if (!thread || thread.id !== this.config.threadId || thread.projectId !== this.config.projectId || resolve(thread.cwd) !== resolve(root)) throw new Error('Desktop thread/project/cwd mismatch');
   }
   private async readToolConfig(): Promise<Record<string, unknown>> {
-    return readDesktopToolConfig(this.config);
+    return readDesktopToolConfig(this.config, this.awaitingExecution ? 45_000 : 0);
   }
   async preflight(): Promise<void> { if (this.busy) throw new Error('Desktop turn already active'); try { await this.connect(false); } finally { this.rpc?.close(); } }
   /** Explicit runtime check: resume only the verified idle task; never start a turn. */
@@ -119,7 +131,7 @@ export class DesktopBackend {
   }
   async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
-    this.busy = true; this.stopping = false; this.disconnected = false; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
+    this.busy = true; this.stopping = false; this.disconnected = false; this.awaitingExecution = true; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
     let submitted = Boolean(resumeTurnId);
     try {
       await this.connect(Boolean(resumeTurnId));
@@ -187,7 +199,7 @@ export class DesktopBackend {
       throw e;
     } finally {
       for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
-      this.approvals.clear(); this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.busy = false;
+      this.approvals.clear(); this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.awaitingExecution = false; this.busy = false;
     }
   }
   private async processMessages(hooks: BackendHooks): Promise<void> {
