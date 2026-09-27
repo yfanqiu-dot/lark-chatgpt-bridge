@@ -37,6 +37,9 @@ function launchAppServer(cfg: HostConfig, env: NodeJS.ProcessEnv) {
     } finally { child.stderr!.removeListener('data',collect);child.stderr!.resume();startupStderr=''; }
   }, error:()=>startupError};
 }
+export function unexpectedChildExit(name: string, child: {exitCode: number | null; signalCode: NodeJS.Signals | null}, startupError?: Error): Error {
+  return new Error(`${name} exited during shared desktop session (code ${child.exitCode}, signal ${child.signalCode})${startupError ? `: ${startupError.message}` : ''}`);
+}
 export async function checkAppServer(cfg: HostConfig): Promise<void> {
   const server=launchAppServer(cfg,cleanDesktopEnvironment(process.env));
   try {await server.ready();}
@@ -182,7 +185,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     desktop=spawn(cfg.desktopExe,[],{env:{...env,CODEX_APP_SERVER_WS_URL:cfg.endpoint},cwd:cfg.projectRoot,stdio:'ignore'});
     let desktopError:Error|undefined;desktop.on('error',e=>{desktopError=e;});
     let verifiedOnce=false,lastReadiness='';const startedAt=Date.now();
-    while(!stopping && server.exitCode===null && desktop.exitCode===null) {
+    while(!stopping && server.exitCode===null && server.signalCode===null && desktop.exitCode===null && desktop.signalCode===null) {
       try { await readFile(`${cfg.connectionFile}.stop`,'utf8');stopping=true;break; }
       catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
       if(appServer.error() || desktopError)throw appServer.error()??desktopError;
@@ -210,6 +213,13 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
         }catch(e){invalidate();console.error('Desktop lease not refreshed:',String(e));}
       }
       await sleep(10_000);
+    }
+    if(!stopping){
+      const reason=server.exitCode!==null || server.signalCode!==null
+        ? unexpectedChildExit('Owned App Server',server,appServer.error())
+        : unexpectedChildExit('Owned desktop',desktop,desktopError);
+      console.error(reason.message);
+      throw reason;
     }
   } finally {
     process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);

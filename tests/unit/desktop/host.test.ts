@@ -5,11 +5,18 @@ import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { DesktopReadiness } from '../../../src/desktop/readiness';
 import { cleanDesktopEnvironment } from '../../../src/desktop/windows-tools';
-import { validateHostConfig, type HostConfig } from '../../../src/desktop/host';
+import { unexpectedChildExit, validateHostConfig, type HostConfig } from '../../../src/desktop/host';
 
 let dir:string;
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'desktop-host-'));});
 afterEach(async()=>{await rm(dir,{recursive:true,force:true});});
+
+it('reports which owned child ended during a shared session',()=>{
+  expect(unexpectedChildExit('Owned desktop',{exitCode:0,signalCode:null}).message)
+    .toContain('Owned desktop exited during shared desktop session (code 0, signal null)');
+  expect(unexpectedChildExit('Owned App Server',{exitCode:null,signalCode:'SIGTERM'},new Error('spawn failed')).message)
+    .toContain('Owned App Server exited during shared desktop session (code null, signal SIGTERM): spawn failed');
+});
 
 it('removes inherited task identity and stale pipe environment before desktop launch',()=>{
   expect(cleanDesktopEnvironment({PATH:'keep',CODEX_HOME:'keep',CODEX_THREAD_ID:'old',CODEX_APP_TOOLS_PIPE_PATH:'old',CODEX_APP_SERVER_WS_URL:'old',NODE_REPL_THREAD:'old'}))
