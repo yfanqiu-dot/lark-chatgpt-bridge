@@ -17,15 +17,21 @@ function quote(text: string): string { return text.split('\n').map(line => `> ${
 /** Human-readable local projection of native history; native desktop history remains authoritative. */
 export class TopicArchive {
   private writes = new Map<string, Promise<void>>();
+  private stopping = false;
   constructor(readonly config: TopicConfig, readonly registry: TopicRegistry,
     private readonly rpcFactory: () => DesktopRpc = () => new DesktopRpc(config.endpoint)) {}
   async sync(row: TopicRecord): Promise<void> {
+    if (this.stopping) throw new Error('Topic archive is shutting down');
     if (row.stage !== 'active' || !row.threadId || !row.chatId) throw new Error('Only active topics can be archived');
     const project = this.config.projects.find(p => p.key === row.projectKey);
     if (!project || project.projectId !== row.projectId || resolve(project.projectRoot) !== resolve(row.projectRoot)) throw new Error('Archive project binding mismatch');
     const prior = this.writes.get(project.key) ?? Promise.resolve();
     const work = prior.then(() => this.writeTopic(row, project));
     this.writes.set(project.key, work.catch(() => {})); await work;
+  }
+  async shutdown(): Promise<void> {
+    this.stopping = true;
+    await Promise.all(this.writes.values());
   }
   private async writeTopic(row: TopicRecord, project: {key:string;projectId:string;projectRoot:string}): Promise<void> {
     const root = await realpath(project.projectRoot);

@@ -26,5 +26,6 @@ tests-smoke/
 # Desktop bridge local identity, connection leases and validation logs
 .p1-local/
 .p2-local/
+.p3-local/
 .feishu-bridge/
 *.local.json

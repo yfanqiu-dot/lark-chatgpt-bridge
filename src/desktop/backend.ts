@@ -62,6 +62,7 @@ export class DesktopBackend {
   private disconnected = false;
   private awaitingExecution = false;
   private approvals = new Map<string, Approval>();
+  private connectionEpoch = 0;
   constructor(readonly config: DesktopConfig, private readonly options: BackendOptions = {}) {}
   pendingApprovals(): Approval[] { return structuredClone([...this.approvals.values()]); }
   get currentTurn(): string | undefined { return this.activeTurn; }
@@ -70,7 +71,8 @@ export class DesktopBackend {
     this.rpc?.close();
     this.inbox = [];
     this.rpc = this.options.rpcFactory?.() ?? new DesktopRpc(this.config.endpoint);
-    this.rpc.onMessage(m => { this.inbox.push(m); });
+    const epoch = ++this.connectionEpoch;
+    this.rpc.onMessage(m => { if (epoch === this.connectionEpoch) this.inbox.push(m); });
     try {
       const config = await (this.options.toolConfig?.() ?? this.readToolConfig());
       await this.rpc.connect();
@@ -87,11 +89,12 @@ export class DesktopBackend {
       // Read identity before resume/config mutation. Never attach a wrong task.
       const read = await this.rpc.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
       this.checkThread(read.thread, expectedRoot);
-      if (resume) await this.resumeThread(config, expectedRoot);
+      // Re-subscribing must not change a desktop-owned active turn's configuration.
+      if (resume) await this.resumeThread(read.thread.status?.type === 'active' ? undefined : config, expectedRoot);
     } catch (e) { this.rpc.close(); throw e; }
   }
-  private async resumeThread(config: Record<string, unknown>, root: string): Promise<void> {
-    const resumed = await this.rpc!.call('thread/resume', { threadId: this.config.threadId, excludeTurns: true, config });
+  private async resumeThread(config: Record<string, unknown> | undefined, root: string): Promise<void> {
+    const resumed = await this.rpc!.call('thread/resume', { threadId: this.config.threadId, excludeTurns: true, ...(config ? { config } : {}) });
     this.checkThread(resumed.thread, root);
   }
   private checkThread(thread: any, root: string): void {
@@ -139,13 +142,21 @@ export class DesktopBackend {
         // Desktop may own a turn. Queue without interrupting it or changing its policy.
         while (true) {
           const read = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
-          if (read.thread.status?.type !== 'active') break;
+          this.checkThread(read.thread, await realpath(this.config.projectRoot));
+          if (read.thread.status?.type === 'idle') {
+            if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
+            await this.resumeThread(await (this.options.toolConfig?.() ?? this.readToolConfig()), await realpath(this.config.projectRoot));
+            await this.verifyRuntimeTools();
+            // Tool startup can take seconds. Recheck desktop ownership before submission.
+            const latest = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
+            this.checkThread(latest.thread, await realpath(this.config.projectRoot));
+            if (latest.thread.status?.type === 'idle') break;
+            if (latest.thread.status?.type !== 'active') throw new Error('Desktop task status is not idle; no turn submitted');
+          } else if (read.thread.status?.type !== 'active') throw new Error('Desktop task status is not idle; no turn submitted');
           if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };
           await hooks.state('等待桌面当前任务结束'); await delay(this.options.pollMs ?? 1000);
         }
         if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
-        await this.resumeThread(await (this.options.toolConfig?.() ?? this.readToolConfig()), await realpath(this.config.projectRoot));
-        await this.verifyRuntimeTools();
         await hooks.submitting(); submitted = true;
         const result = await this.rpc!.call('turn/start', {
           threadId: this.config.threadId,
@@ -163,7 +174,7 @@ export class DesktopBackend {
       while (true) {
         try {
           if (!this.rpc!.connected) {
-            for (const a of this.approvals.values()) await hooks.resolved(a.token);
+            for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
             this.approvals.clear();
             await hooks.state('连接中断，正在核对原任务');
             await this.connect();
@@ -199,7 +210,7 @@ export class DesktopBackend {
       throw e;
     } finally {
       for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
-      this.approvals.clear(); this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.awaitingExecution = false; this.busy = false;
+      this.approvals.clear(); ++this.connectionEpoch; this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.awaitingExecution = false; this.busy = false;
     }
   }
   private async processMessages(hooks: BackendHooks): Promise<void> {
@@ -209,7 +220,7 @@ export class DesktopBackend {
       if (m.method === 'turn/completed' && p.turn?.id === this.activeTurn && ['completed','interrupted','failed'].includes(p.turn.status)) {
         this.completedTurn = p.turn;
       } else if (m.method === 'serverRequest/resolved') {
-        for (const a of this.approvals.values()) if (a.requestId === p.requestId) { this.approvals.delete(a.token); await hooks.resolved(a.token); }
+        for (const a of this.approvals.values()) if (a.requestId === p.requestId) { this.approvals.delete(a.token); await hooks.resolved(a.token).catch(() => {}); }
       } else if (m.id !== undefined && p.turnId === this.activeTurn) {
         if ([...this.approvals.values()].some(a => a.requestId === m.id)) continue;
         let supported = ['accept', 'decline', 'cancel'];
@@ -232,7 +243,9 @@ export class DesktopBackend {
         if (description.length > 6000) { supported = supported.filter(d => d !== 'accept');description = description.slice(0,5500) + '\n详情过长，请到桌面查看完整内容并决定是否同意。'; }
         const decisions = Array.isArray(p.availableDecisions) ? p.availableDecisions.filter((d: unknown) => typeof d === 'string' && supported.includes(d)) : supported;
         const a: Approval = { token: randomUUID(), requestId: m.id, threadId: p.threadId, turnId: p.turnId, method: m.method!, description, decisions };
-        this.approvals.set(a.token, a); await hooks.approval(a);
+        this.approvals.set(a.token, a);
+        try { await hooks.approval(a); }
+        catch { await hooks.state('审批通知回传失败，请在桌面处理或用 /status 查看审批编号'); }
       }
     }
   }

@@ -28,6 +28,8 @@ export function topicDesktopConfig(config: TopicConfig, row: TopicRecord): Deskt
 export class TopicRouter {
   private controllers = new Map<string, TopicController>();
   private intake: Promise<void> = Promise.resolve();
+  private pending = new Set<Promise<void>>();
+  private stopping = false;
   constructor(readonly config: TopicConfig, readonly registry: TopicRegistry, readonly provisioner: TopicProvisioner,
     private readonly factory: TopicControllerFactory, private readonly replies: TopicReply,
     private readonly onActive?: (row: TopicRecord) => Promise<void>) {}
@@ -44,7 +46,15 @@ export class TopicRouter {
     for (const row of this.registry.all().filter(r => r.stage === 'active')) await this.attach(row);
   }
   receive(message: InboundMessage): Promise<void> {
-    const task = this.intake.then(() => this.handle(message)); this.intake = task.catch(() => {}); return task;
+    if (this.stopping) return Promise.resolve();
+    // Only entry-group provisioning shares a queue. Existing groups have their
+    // own controller queues, so slow creation cannot block /stop elsewhere.
+    const task = message.chatId === this.config.entryChatId
+      ? this.intake.then(() => this.handle(message)) : this.handle(message);
+    if (message.chatId === this.config.entryChatId) this.intake = task.catch(() => {});
+    this.pending.add(task);
+    void task.then(() => this.pending.delete(task), () => this.pending.delete(task));
+    return task;
   }
   private async attach(row: TopicRecord): Promise<void> {
     if (this.controllers.has(row.chatId!)) throw new Error('Two topic bindings claim the same chat');
@@ -88,8 +98,15 @@ export class TopicRouter {
     await this.controllers.get(message.chatId)?.receive(message);
   }
   async decideFromCard(chatId: string, operator: string, token: string, decision: string): Promise<void> {
+    if (this.stopping) throw new Error('桥接正在停止，请在桌面处理审批');
     const controller = this.controllers.get(chatId); if (!controller) throw new Error('群尚未绑定桌面对话');
     await controller.decideFromCard(chatId, operator, token, decision);
   }
-  async shutdown(): Promise<void> { await this.intake; await Promise.all([...this.controllers.values()].map(c => c.shutdown())); }
+  async shutdown(): Promise<void> {
+    this.stopping = true;
+    await Promise.allSettled([...this.pending]);
+    const results = await Promise.allSettled([...this.controllers.values()].map(c => c.shutdown()));
+    const errors = results.filter(r => r.status === 'rejected').map(r => r.reason);
+    if (errors.length) throw new AggregateError(errors, 'Topic controllers failed to stop');
+  }
 }

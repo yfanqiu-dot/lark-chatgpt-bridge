@@ -13,8 +13,11 @@ export function desktopToolOverrides(mcpServer: Record<string, any>, pipe: strin
  */
 export async function prepareResumeTools(
   message: RpcMessage, threadIds: ReadonlySet<string>, getConfig: () => Promise<Record<string, unknown>>,
+  isActive?: () => Promise<boolean>,
 ): Promise<RpcMessage> {
   if (message.method !== 'thread/resume' || !threadIds.has(message.params?.threadId)) return message;
+  // Reconnect subscriptions must not replace wiring underneath a running turn.
+  if (await isActive?.()) return message;
   const config = message.params.config;
   if (config != null && (typeof config !== 'object' || Array.isArray(config))) throw new Error('Invalid resume config');
   return { ...message, params: { ...message.params, config: { ...config, ...await getConfig() } } };

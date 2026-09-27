@@ -45,6 +45,7 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:desktop": "vitest run tests/unit/desktop",
+    "test:p3": "vitest run tests/unit/desktop tests/process/desktop-recovery.test.ts",
     "test:p0": "node --test experiments/codex-desktop/connection.test.mjs",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",

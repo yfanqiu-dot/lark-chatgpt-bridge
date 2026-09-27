@@ -147,14 +147,22 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
           if(message){
             try{
               const targets=new Set(toolThreads);
+              let observedThread: any;
+              const readTarget = async () => {
+                if (observedThread) return observedThread;
+                const check = new DesktopRpc(cfg.backendEndpoint);
+                try { await check.connect(); return observedThread = (await check.call('thread/read', {threadId:message.params?.threadId,includeTurns:false})).thread; }
+                finally { check.close(); }
+              };
               if(message.method==='thread/resume' && !targets.has(message.params?.threadId)){
-                const matches=await registeredTopicBinding(cfg,message.params?.threadId,async id=>{
-                  const check=new DesktopRpc(cfg.backendEndpoint);
-                  try{await check.connect();return (await check.call('thread/read',{threadId:id,includeTurns:false})).thread;}finally{check.close();}
-                });
+                const matches=await registeredTopicBinding(cfg,message.params?.threadId,readTarget);
                 if(matches)targets.add(message.params.threadId);
               }
-              prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,targets,resumeConfig)));
+              prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,targets,resumeConfig,async()=>{
+                const thread = await readTarget();
+                if (!thread || thread.id !== message.params.threadId || !['idle','active','notLoaded'].includes(thread.status?.type)) throw new Error('Task state unavailable before tool wiring');
+                return thread.status.type === 'active';
+              })));
             }
             catch{if(message.id!==undefined)down.send(JSON.stringify({id:message.id,error:{code:-32603,message:'Desktop tool wiring unavailable; task was not resumed'}}));return;}
             readiness.request(down,message);

@@ -132,6 +132,27 @@ it('names a new native task on its creation connection after journaling the ID',
 });
 
 describe('P2 group routing', () => {
+  it('keeps an existing group responsive while another topic is being created and drains before shutdown', async () => {
+    const c=config(),store=new TopicRegistry(c.registryFile),r=resources();
+    const seen:string[]=[],stopped:string[]=[];
+    const factory=(bound:{chatId:string}):TopicController=>({async start(){},async receive(m){seen.push(m.messageId);},async decideFromCard(){},async shutdown(){stopped.push(bound.chatId);}});
+    const router=new TopicRouter(c,store,new TopicProvisioner(c,store,r.port),factory,{async send(){return 'receipt';}});
+    await router.start();
+    const incoming=(id:string,chatId:string,content:string):InboundMessage=>({messageId:id,chatId,senderId:'ou_owner',content,mentionedBot:true,replyInThread:false});
+    await router.receive(incoming('a','oc_entry','/topic new alpha A'));
+    let release!:()=>void,entered!:()=>void;
+    const wait=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+    const original=r.port.createChat;
+    r.port.createChat=async(...args)=>{entered();await wait;return original(...args);};
+    const creation=router.receive(incoming('b','oc_entry','/topic new alpha B'));await started;
+    await router.receive(incoming('stop-a','oc_new1','/stop'));
+    expect(seen).toEqual(['stop-a']);
+    const stopping=router.shutdown();
+    await router.receive(incoming('late','oc_new1','ignored'));
+    expect(seen).toEqual(['stop-a']);expect(stopped).toEqual([]);
+    release();await creation;await stopping;
+    expect(stopped.sort()).toEqual(['oc_new1','oc_new2']);expect(store.all()).toHaveLength(2);
+  });
   it('routes messages and approvals only to their own topic controller', async () => {
     const c=config();const store=new TopicRegistry(c.registryFile);const r=resources();
     const received=new Map<string,string[]>(),decisions=new Map<string,string[]>(),sent:string[]=[];
@@ -165,6 +186,21 @@ describe('P2 group routing', () => {
 });
 
 describe('P2 host binding and local records', () => {
+  it('drains an in-flight archive write before shutdown and rejects later writes', async () => {
+    const c=config(),store=new TopicRegistry(c.registryFile);await store.load();const row=await new TopicProvisioner(c,store,resources().port).create('m1','alpha','资料');
+    let release!:()=>void,entered!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+    const rpc={async connect(){},close(){},async call(method:string){
+      if(method==='thread/read'){entered();await gate;return{thread:{id:row.threadId,projectId:'p-alpha',cwd:dir}};}
+      if(method==='thread/turns/list')return{data:[]};throw new Error(method);
+    }} as unknown as DesktopRpc;
+    const archive=new TopicArchive(c,store,()=>rpc);
+    const syncing=archive.sync(row);await started;
+    let drained=false;const stopped=archive.shutdown().then(()=>{drained=true;});
+    await expect(archive.sync(row)).rejects.toThrow('shutting down');expect(drained).toBe(false);
+    release();await syncing;await stopped;
+    expect(drained).toBe(true);expect(await readFile(join(dir,'.lark-chatgpt-bridge','index.md'),'utf8')).toContain(row.threadId!);
+  });
   it('gives desktop tools only to a registered task in an allowlisted project', async () => {
     const c=config(),store=new TopicRegistry(c.registryFile);await store.load();const maker=new TopicProvisioner(c,store,resources().port);
     const row=await maker.create('m1','alpha','资料');

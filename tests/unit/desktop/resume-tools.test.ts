@@ -25,3 +25,9 @@ it('does not change unbound tasks, new-task creation, or approval replies',async
 it('fails closed when verified wiring is unavailable',async()=>{
   await expect(prepareResumeTools({id:1,method:'thread/resume',params:{threadId:'bound'}},new Set(['bound']),async()=>{throw Error('pipe unavailable');})).rejects.toThrow('pipe unavailable');
 });
+
+it('preserves an active task resume without refreshing tools during its running turn',async()=>{
+  const request={id:1,method:'thread/resume',params:{threadId:'bound',excludeTurns:true}};
+  expect(await prepareResumeTools(request,new Set(['bound']),async()=>{throw Error('must not change active tools');},async()=>true)).toBe(request);
+  await expect(prepareResumeTools(request,new Set(['bound']),async()=>({}),async()=>{throw Error('unknown task state');})).rejects.toThrow('unknown task state');
+});

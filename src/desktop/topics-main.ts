@@ -15,6 +15,7 @@ import { TopicProvisioner } from './topic-provisioner';
 import { CodexTopicResources, topicResources } from './topic-resources';
 import { TopicRouter } from './topic-router';
 import { TopicArchive } from './topic-archive';
+import { ApprovalJournal } from './approval-journal';
 
 async function main(): Promise<void> {
   const [configPath, mode, requestId, resourceId] = process.argv.slice(2);
@@ -54,13 +55,17 @@ async function main(): Promise<void> {
   const archive = new TopicArchive(config,registry);
   const channel = createLarkChannel({appId:config.appId,appSecret:secret,domain:'https://open.feishu.cn',source:'lark-chatgpt-topics',resolveChatMode:true,
     policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},respectProxyEnv:true,httpTimeoutMs:30_000});
-  const cards = new Map<string,string>();
+  const cards = new ApprovalJournal(`${config.registryFile}.approvals.json`, {appId:config.appId,ownerOpenId:config.ownerOpenId,entryChatId:config.entryChatId}, {
+    send:async(chatId,request,replyTo,replyInThread)=>(await channel.send(chatId,{card:approvalCard(request)},{replyTo,replyInThread})).messageId,
+    close:async messageId=>{await channel.updateCard(messageId,resolvedCard());},
+  });
   const send = async (chatId:string,text:string,replyTo:string,replyInThread:boolean) => (await channel.send(chatId,{markdown:text},{replyTo,replyInThread})).messageId;
   const router = new TopicRouter(config,registry,new TopicProvisioner(config,registry,topicResources(config,secret)),
     bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound),{
       send,
-      approval:async(chatId,request,replyTo,replyInThread)=>{const result=await channel.send(chatId,{card:approvalCard(request)},{replyTo,replyInThread});if(!result.messageId)throw new Error('Approval card receipt missing');cards.set(request.token,result.messageId);},
-      resolved:async token=>{const id=cards.get(token);if(!id)return;await channel.updateCard(id,resolvedCard());cards.delete(token);},
+      approval:(chatId,request,replyTo,replyInThread)=>cards.publish(chatId,request,replyTo,replyInThread),
+      resolved:token=>cards.resolved(token),
+      cardStatus:chatId=>cards.pending(chatId),
     }),{send},row=>archive.sync(row));
   let readyResolve!:()=>void,readyReject!:(error:unknown)=>void;
   const ready=new Promise<void>((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});void ready.catch(()=>{});
@@ -74,12 +79,12 @@ async function main(): Promise<void> {
   let stopWatcher:ReturnType<typeof setInterval>|undefined,archiveWatcher:ReturnType<typeof setInterval>|undefined,shutdownPromise:Promise<void>|undefined;
   const shutdown=()=>shutdownPromise??=(async()=>{
     clearInterval(stopWatcher);clearInterval(archiveWatcher);
-    try{await router.shutdown();}finally{try{await channel.disconnect();}finally{await rm(`${config.registryFile}.stop`,{force:true});await release();}}
+    try{await router.shutdown();}finally{try{await archive.shutdown();}finally{try{await cards.shutdown();}finally{try{await channel.disconnect();}finally{await rm(`${config.registryFile}.stop`,{force:true});await release();}}}}
   })();
   const onSignal=()=>{void shutdown().catch(e=>{console.error(String(e));process.exitCode=1;});};
   try{
     await rm(`${config.registryFile}.stop`,{force:true});
-    await channel.connect();await router.start();readyResolve();
+    await channel.connect();await cards.start();await router.start();readyResolve();
     process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);
     stopWatcher=setInterval(()=>{void readFile(`${config.registryFile}.stop`,'utf8').then(shutdown).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT'){console.error('Topic bridge shutdown failed:',String(e));process.exitCode=1;}});},1000);
     let syncing=false;

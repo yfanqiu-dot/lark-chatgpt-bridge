@@ -188,3 +188,88 @@ describe('durable single-group controller',()=>{
     expect(out.sent.filter(x=>x==='actual final')).toHaveLength(1);expect(rpc.calls.some(x=>x.method==='turn/start')).toBe(false);
   });
 });
+
+describe('P3 recovery and desktop concurrency', () => {
+  it('automatically observes a persisted known turn before releasing queued work, without replaying it', async () => {
+    const store = new DesktopLedger(config().stateFile, binding()); await store.load();
+    await store.add({messageId:'old',prompt:'old',replyInThread:false,state:'running',turnId:'turn'});
+    await store.add({messageId:'next',prompt:'next',replyInThread:false,state:'queued'});
+    const rpc = new FakeRpc(), out = replies();
+    const recovered = new DesktopLedger(config().stateFile, binding());
+    const c = new DesktopController(config(), recovered, backend(rpc), out);
+    await c.start(); await c.idle();
+    expect(recovered.all().map(r => r.state)).toEqual(['completed','completed']);
+    expect(rpc.calls.filter(r => r.method === 'turn/start')).toHaveLength(1);
+    expect(rpc.calls.find(r => r.method === 'turn/start')?.params.input[0].text).toBe('next');
+    expect(out.sent).toHaveLength(2);
+  });
+
+  it('attempts failed startup reconciliation only once and leaves subsequent work queued', async () => {
+    const store = new DesktopLedger(config().stateFile, binding()); await store.load();
+    await store.add({messageId:'old',prompt:'old',replyInThread:false,state:'running',turnId:'turn'});
+    const rpc = new FakeRpc(); rpc.connect = async () => { rpc.connectCount++; throw new Error('host offline'); };
+    const c = new DesktopController(config(),store,backend(rpc),replies());
+    await c.start(); await c.idle(); await c.receive(incoming('next')); await c.idle();
+    expect(rpc.connectCount).toBe(1); expect(store.get('old')?.state).toBe('uncertain');
+    expect(store.get('next')?.state).toBe('queued');
+    await c.receive({...incoming('retry'),content:'/reconcile'}); await c.idle();
+    expect(rpc.connectCount).toBe(2); expect(rpc.calls.some(r => r.method === 'turn/start')).toBe(false);
+  });
+
+  it('does not resend an ambiguous reply after restart and /result reads the saved answer', async () => {
+    const store = new DesktopLedger(config().stateFile,binding()); await store.load();
+    await store.add({messageId:'old',prompt:'old',replyInThread:false,state:'completed',turnId:'turn',result:'saved answer',deliveryAttempted:true});
+    const rpc = new FakeRpc(), out = replies(); const c = new DesktopController(config(),store,backend(rpc),out);
+    await c.start(); await c.idle(); expect(out.sent).toEqual([]);
+    await c.receive({...incoming('result'),content:'/result'}); await c.idle();
+    expect(out.sent).toEqual(['saved answer']); expect(rpc.calls).toEqual([]);
+  });
+
+  it('defers submission when the desktop starts work during tool verification', async () => {
+    const rpc = new FakeRpc(), original = rpc.call.bind(rpc);
+    rpc.call = async (method, params) => { const result = await original(method,params); if(method === 'mcpServerStatus/list') rpc.desktopActive = true; return result; };
+    const b = backend(rpc), h = hooks(); h.state = async () => { await b.stop(); };
+    expect((await b.execute('queued',h)).status).toBe('interrupted');
+    expect(rpc.calls.some(c => ['turn/start','turn/interrupt'].includes(c.method))).toBe(false);
+  });
+
+  it('refuses to submit when the server does not confirm an idle task', async () => {
+    const rpc = new FakeRpc(), original = rpc.call.bind(rpc);
+    rpc.call = async (method, params) => { const result = await original(method,params); if(method === 'thread/read') delete result.thread.status; return result; };
+    await expect(backend(rpc).execute('run',hooks())).rejects.toThrow('not idle');
+    expect(rpc.calls.some(c => c.method === 'turn/start')).toBe(false);
+  });
+
+  it('keeps a live approval available when the Feishu card send fails', async () => {
+    const rpc = new FakeRpc(); rpc.approval = true;
+    const b = backend(rpc), h = hooks(); h.approval = async () => { throw new Error('Feishu offline'); };
+    h.state = async state => { if(state.includes('通知回传失败')) await b.decide(b.pendingApprovals()[0]!.token,'accept'); };
+    expect((await b.execute('approval',h)).status).toBe('completed');
+    expect(rpc.responses).toHaveLength(1); expect(rpc.connectCount).toBe(1);
+  });
+
+  it('reconnects during approval without applying config to an active task or replaying decisions', async () => {
+    const first = new FakeRpc(), second = new FakeRpc(); first.approval = true;
+    const originalFirst = first.call.bind(first), originalSecond = second.call.bind(second);
+    first.call = async (method, params) => { if(method === 'thread/turns/list') { first.connected = false; throw new Error('wire dropped'); } return originalFirst(method,params); };
+    second.desktopActive = true;
+    second.call = async (method, params) => {
+      const result = await originalSecond(method,params);
+      if(method === 'thread/resume') {
+        expect(params).not.toHaveProperty('config');
+        second.terminal = 'inProgress';
+        second.emit({id:42,method:'item/commandExecution/requestApproval',params:{threadId:'thread',turnId:'turn',command:'echo test',availableDecisions:['accept','cancel']}});
+        // A late event on the old socket cannot resolve the new request.
+        first.emit({method:'serverRequest/resolved',params:{threadId:'thread',requestId:42}});
+      }
+      return result;
+    };
+    let connects = 0; const b = new DesktopBackend(config(),{rpcFactory:()=>++connects === 1 ? first : second,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
+    const h = hooks(), tokens:string[] = [];
+    h.resolved = async () => { throw new Error('card update offline'); };
+    h.approval = async a => { tokens.push(a.token); if(tokens.length === 2) { await expect(b.decide(tokens[0]!,'accept')).rejects.toThrow(); await b.decide(a.token,'accept'); } };
+    expect((await b.execute('approval',h)).status).toBe('completed');
+    expect(tokens).toHaveLength(2); expect(first.responses).toHaveLength(0); expect(second.responses).toHaveLength(1);
+    expect([...first.calls,...second.calls].filter(c=>c.method==='turn/start')).toHaveLength(1);
+  });
+});
