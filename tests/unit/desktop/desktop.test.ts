@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DesktopBackend, UncertainExecution, readDesktopToolConfig, type BackendHooks, type RpcTransport } from '../../../src/desktop/backend';
@@ -10,7 +10,7 @@ import { loopbackEndpoint, type RpcMessage } from '../../../src/desktop/rpc';
 import { desktopInbound } from '../../../src/desktop/inbound';
 
 let dir: string;
-beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'desktop-p1-')); });
+beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-p1-'))); });
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 const config = (): DesktopConfig => ({ appId: 'cli_test', appSecretEnv: 'LARK_APP_SECRET', chatId: 'oc_test', ownerOpenId: 'ou_owner', projectId: 'project', projectRoot: dir, threadId: 'thread', endpoint: 'ws://127.0.0.1:9000/', stateFile: join(dir,'ledger.json'), connectionFile: join(dir,'connection.json'), requireMention: true, maxQueue: 20 });
 const binding = (): Binding => { const c = config(); return { appId: c.appId, chatId: c.chatId, ownerOpenId: c.ownerOpenId, projectId: c.projectId, projectRoot: c.projectRoot, threadId: c.threadId }; };

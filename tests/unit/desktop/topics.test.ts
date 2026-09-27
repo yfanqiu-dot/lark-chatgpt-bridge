@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TopicRegistry, parseCreateTopic, parseTopicConfig, type TopicConfig, type TopicProject } from '../../../src/desktop/topics';
@@ -13,7 +13,7 @@ import { CodexTopicResources, FeishuTopicResources, TOPIC_BOOTSTRAP_PROMPT } fro
 import { WebSocketServer } from 'ws';
 
 let dir: string;
-beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'desktop-p2-')); });
+beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-p2-'))); });
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 const config = (): TopicConfig => parseTopicConfig({
   appId:'cli_test',appSecretEnv:'LARK_APP_SECRET',ownerOpenId:'ou_owner',entryChatId:'oc_entry',

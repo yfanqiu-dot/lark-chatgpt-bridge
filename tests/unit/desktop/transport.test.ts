@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DesktopRpc, RpcError } from '../../../src/desktop/rpc';
@@ -10,7 +10,7 @@ import type { DesktopConfig } from '../../../src/desktop/config';
 let server: WebSocketServer, dir: string, endpoint: string;
 let clients: DesktopRpc[];
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'desktop-transport-'));
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-transport-')));
   server = new WebSocketServer({host:'127.0.0.1',port:0});
   await new Promise<void>(resolve => server.once('listening', resolve));
   endpoint = `ws://127.0.0.1:${(server.address() as {port:number}).port}/`;

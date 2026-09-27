@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
@@ -16,7 +16,7 @@ beforeAll(async()=>{
 },20_000);
 afterAll(async()=>{await rm(bundle,{recursive:true,force:true});});
 beforeEach(async()=>{
-  dir=await mkdtemp(join(tmpdir(),'p3-recovery-process-'));
+  dir=await realpath(await mkdtemp(join(tmpdir(),'p3-recovery-process-')));
   server=new WebSocketServer({host:'127.0.0.1',port:0});await new Promise<void>(resolve=>server.once('listening',resolve));
   await writeFile(join(dir,'config.json'),JSON.stringify({appId:'app',appSecretEnv:'SECRET',chatId:'chat',ownerOpenId:'owner',projectId:'project',projectRoot:dir,threadId:'thread',
     endpoint:`ws://127.0.0.1:${(server.address() as {port:number}).port}/`,stateFile:join(dir,'ledger.json'),connectionFile:join(dir,'unused.json'),requireMention:true,maxQueue:10}),'utf8');
@@ -50,7 +50,9 @@ it.each(['known','unknown'])('survives actual process termination with %s turn i
     if(m.method==='thread/items/list')result={data:[{turnId:'original-turn',item:{type:'agentMessage',phase:'final_answer',text:'durable answer'}}]};
     socket.send(JSON.stringify({id:m.id,result}));
   }));
-  const first=run('initial');await started;if(identity==='known')await first.running;
+  const first=run('initial');
+  const earlyExit=first.exited.then(code=>{throw new Error(`Fixture exited before crash checkpoint (${code}): ${first.errors()} ${first.output()}`);});
+  await Promise.race([started,earlyExit]);if(identity==='known')await Promise.race([first.running,earlyExit]);
   first.child.kill('SIGKILL');await first.exited;
   const crashed=JSON.parse(await readFile(join(dir,'ledger.json'),'utf8')).messages[0];
   expect(crashed.state).toBe(identity==='known'?'running':'submitting');
