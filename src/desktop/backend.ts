@@ -140,9 +140,19 @@ export class DesktopBackend {
       await this.connect(Boolean(resumeTurnId));
       if (!resumeTurnId) {
         // Desktop may own a turn. Queue without interrupting it or changing its policy.
+        let unloadedResumes = 0;
         while (true) {
           const read = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
           this.checkThread(read.thread, await realpath(this.config.projectRoot));
+          if (read.thread.status?.type === 'notLoaded') {
+            if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
+            if (++unloadedResumes > 2) throw new Error('Desktop task remained unloaded after resume; no turn submitted');
+            // A saved task can be absent from the new App Server's memory.
+            // Omit client config here; the host may wire bound tools on first resume.
+            // Recheck desktop ownership before any turn submission.
+            await this.resumeThread(undefined, await realpath(this.config.projectRoot));
+            continue;
+          }
           if (read.thread.status?.type === 'idle') {
             if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
             await this.resumeThread(await (this.options.toolConfig?.() ?? this.readToolConfig()), await realpath(this.config.projectRoot));
@@ -151,6 +161,11 @@ export class DesktopBackend {
             const latest = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
             this.checkThread(latest.thread, await realpath(this.config.projectRoot));
             if (latest.thread.status?.type === 'idle') break;
+            if (latest.thread.status?.type === 'notLoaded') {
+              if (++unloadedResumes > 2) throw new Error('Desktop task remained unloaded after resume; no turn submitted');
+              await this.resumeThread(undefined, await realpath(this.config.projectRoot));
+              continue;
+            }
             if (latest.thread.status?.type !== 'active') throw new Error('Desktop task status is not idle; no turn submitted');
           } else if (read.thread.status?.type !== 'active') throw new Error('Desktop task status is not idle; no turn submitted');
           if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };

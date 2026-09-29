@@ -10,6 +10,7 @@ import { DesktopRpc, loopbackEndpoint } from './rpc';
 import { desktopToolOverrides, prepareResumeTools } from './resume-tools';
 import { cleanDesktopEnvironment, desktopPipes, desktopToolCatalog } from './windows-tools';
 import { DesktopReadiness } from './readiness';
+import { launchPackagedDesktop, type PackagedDesktop } from './packaged-desktop';
 
 export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; toolBindings?: Array<{threadId: string; projectId: string | null}>; topicRegistryFile?: string; topicProjects?: Array<{projectId: string; projectRoot: string}> }
 const exec = promisify(execFile);
@@ -39,6 +40,31 @@ function launchAppServer(cfg: HostConfig, env: NodeJS.ProcessEnv) {
 }
 export function unexpectedChildExit(name: string, child: {exitCode: number | null; signalCode: NodeJS.Signals | null}, startupError?: Error): Error {
   return new Error(`${name} exited during shared desktop session (code ${child.exitCode}, signal ${child.signalCode})${startupError ? `: ${startupError.message}` : ''}`);
+}
+export async function restoreOrdinaryDesktop(cfg:HostConfig):Promise<void> {
+  await rm(`${cfg.connectionFile}.restored.json`,{force:true});
+  const ordinary=await launchPackagedDesktop(cfg);
+  try{
+    const until=Date.now()+60_000;
+    while(Date.now()<until){
+      await ordinary.refresh();
+      if(ordinary.exitCode!==null)throw unexpectedChildExit('Ordinary desktop',ordinary);
+      let verified=false;
+      try{
+        const candidates=await desktopPipes(ordinary.pid,cfg.desktopExe);
+        const matches=[];
+        for(const c of candidates)if((await desktopToolCatalog(join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),c.pipe)).includes('list_projects'))matches.push(c);
+        verified=matches.length===1;
+      }catch{}
+      if(verified){
+        await ordinary.detach();
+        await writeFileAtomic(`${cfg.connectionFile}.restored.json`,JSON.stringify({desktopPid:ordinary.pid,desktopVersion:cfg.desktopVersion,verifiedAt:Date.now(),packageIdentityVerified:true,toolsVerified:true}));
+        console.log('Ordinary packaged desktop and tool catalog verified.');return;
+      }
+      await sleep(1000);
+    }
+    throw new Error('Ordinary desktop tools did not become ready within 60 seconds');
+  }catch(e){await ordinary.stop();throw e;}
 }
 export async function checkAppServer(cfg: HostConfig): Promise<void> {
   const server=launchAppServer(cfg,cleanDesktopEnvironment(process.env));
@@ -99,7 +125,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   const invalidate = () => { leaseWrites = leaseWrites.then(() => rm(cfg.connectionFile,{force:true})); void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; }); };
   const readiness=new DesktopReadiness(invalidate);
   let proxy: WebSocketServer | undefined;
-  let desktop: ReturnType<typeof spawn> | undefined;
+  let desktop: PackagedDesktop | undefined;
   const appServer=launchAppServer(cfg,env),server=appServer.child;
   const pluginDir=join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools');
   const toolThreads=new Set((cfg.toolBindings??[]).map(b=>b.threadId));
@@ -122,6 +148,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   const stop=()=>{stopping=true;};process.once('SIGINT',stop);process.once('SIGTERM',stop);
   try {
     invalidate(); await leaseWrites;
+    await rm(`${cfg.connectionFile}.restored.json`,{force:true});
     await rm(`${cfg.connectionFile}.stop`,{force:true});
     await appServer.ready();
     // Validate saved task identity before changing any native desktop resume.
@@ -182,13 +209,15 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
       const close=()=>{if(closed)return;closed=true;children.delete(down);children.delete(up);down.terminate();up.terminate();readiness.close(down);};
       down.on('error',close);up.on('error',close);down.on('close',close);up.on('close',close);
     });
-    desktop=spawn(cfg.desktopExe,[],{env:{...env,CODEX_APP_SERVER_WS_URL:cfg.endpoint},cwd:cfg.projectRoot,stdio:'ignore'});
-    let desktopError:Error|undefined;desktop.on('error',e=>{desktopError=e;});
+    desktop=await launchPackagedDesktop(cfg,cfg.endpoint);
+    console.log('Owned packaged desktop started:',desktop.pid);
     let verifiedOnce=false,lastReadiness='';const startedAt=Date.now();
     while(!stopping && server.exitCode===null && server.signalCode===null && desktop.exitCode===null && desktop.signalCode===null) {
+      await desktop.refresh();
+      if(desktop.exitCode!==null)break;
       try { await readFile(`${cfg.connectionFile}.stop`,'utf8');stopping=true;break; }
       catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
-      if(appServer.error() || desktopError)throw appServer.error()??desktopError;
+      if(appServer.error())throw appServer.error();
       const snapshot=readiness.snapshot();
       const summary=JSON.stringify({...snapshot,quietForMs:Math.min(snapshot.quietForMs,15000)});
       if(summary!==lastReadiness){console.log('Desktop readiness:',summary);lastReadiness=summary;}
@@ -217,7 +246,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     if(!stopping){
       const reason=server.exitCode!==null || server.signalCode!==null
         ? unexpectedChildExit('Owned App Server',server,appServer.error())
-        : unexpectedChildExit('Owned desktop',desktop,desktopError);
+        : unexpectedChildExit('Owned desktop',desktop);
       console.error(reason.message);
       throw reason;
     }
@@ -227,22 +256,27 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     stopping=true;
     await leaseWrites.catch(()=>{});
     await rm(cfg.connectionFile,{force:true});
-    const desktopStopped=await stopOwnedChild(desktop);
+    const desktopStopped=desktop?await desktop.stop().catch(e=>{console.error('Owned desktop stop failed:',String(e));return false;}):true;
     for(const c of children)c.terminate();proxy?.close();
     const serverStopped=await stopOwnedChild(server);
-    await rm(`${cfg.connectionFile}.stop`,{force:true});await release();
-    if(desktop?.pid && desktopStopped && serverStopped){
-      const ordinary=spawn(cfg.desktopExe,[],{env,cwd:cfg.projectRoot,detached:true,stdio:'ignore'});
-      ordinary.on('error',e=>console.error('Ordinary desktop startup failed:',String(e)));ordinary.unref();
-      console.log('Shared children stopped; ordinary desktop startup requested.');
-    } else console.log('Shared host stopped. Check remaining owned processes before opening Codex normally.');
+    await rm(`${cfg.connectionFile}.stop`,{force:true});
+    try{
+      if(desktop?.pid && desktopStopped && serverStopped)await restoreOrdinaryDesktop(cfg);
+      else console.log('Shared host stopped. Check remaining owned processes before opening Codex normally.');
+    }finally{await release();}
   }
 }
 
 async function main() {
   const [path,mode]=process.argv.slice(2);
-  if(!path || !['--check','--check-server','--check-tools','--start','--stop'].includes(mode??''))throw new Error('Usage: lark-chatgpt-host <host.json> --check|--check-server|--check-tools <desktopPid>|--start|--stop');
+  if(!path || !['--check','--check-server','--check-tools','--start','--stop','--restore'].includes(mode??''))throw new Error('Usage: lark-chatgpt-host <host.json> --check|--check-server|--check-tools <desktopPid>|--start|--stop|--restore');
   const cfg=await validateHostConfig(JSON.parse(await readFile(path,'utf8')));
+  if(mode==='--restore'){
+    if(await lockfile.check(cfg.connectionFile,{realpath:false}))throw new Error('Shared host is still running; restore was not started');
+    const running=await exec('powershell.exe',['-NoProfile','-NonInteractive','-Command',"@(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" | Where-Object { $_.ExecutablePath -like '*OpenAI.Codex_*' -and $_.CommandLine -notmatch '--type=' }).Count"],{windowsHide:true,timeout:20_000});
+    if(Number(running.stdout.trim())!==0)throw new Error('Desktop already exists; verify it instead of starting another');
+    await restoreOrdinaryDesktop(cfg);return;
+  }
   if(mode==='--stop'){
     if(!await lockfile.check(cfg.connectionFile,{realpath:false}))throw new Error('No running host owns this configuration');
     await writeFileAtomic(`${cfg.connectionFile}.stop`,'Restore ordinary desktop startup');

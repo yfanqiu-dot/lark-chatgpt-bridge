@@ -19,7 +19,7 @@ class FakeRpc implements RpcTransport {
   calls: Array<{ method: string; params: any }> = [];
   responses: any[] = [];
   listeners: Array<(m: RpcMessage) => void> = [];
-  terminal = 'completed'; approval = false; dropStart = false; wrongThread = false; pageItems = true; desktopActive = false;
+  terminal = 'completed'; approval = false; dropStart = false; wrongThread = false; pageItems = true; desktopActive = false; threadLoaded = true;
   extraRequest?: RpcMessage;
   connectCount = 0;
   async connect() { this.connected = true; this.connectCount++; }
@@ -30,10 +30,11 @@ class FakeRpc implements RpcTransport {
   async call<T = any>(method: string, params?: any): Promise<T> {
     this.calls.push({ method, params });
     let result: any;
-    const thread = { id: this.wrongThread ? 'other' : 'thread', projectId:'project', cwd:dir, status:{ type:this.desktopActive?'active':'idle' } };
+    const thread = { id: this.wrongThread ? 'other' : 'thread', projectId:'project', cwd:dir, status:{ type:this.threadLoaded?(this.desktopActive?'active':'idle'):'notLoaded' } };
     switch (method) {
       case 'project/list': result = { data: params.cursor ? [{ id:'project', roots:[{path:dir}] }] : [], nextCursor: params.cursor ? null : 'projects2' }; break;
-      case 'thread/read': case 'thread/resume': result = { thread }; break;
+      case 'thread/read': result = { thread }; break;
+      case 'thread/resume': this.threadLoaded=true; thread.status.type=this.desktopActive?'active':'idle'; result = { thread }; break;
       case 'mcpServerStatus/list': result = {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]}; break;
       case 'turn/start':
         if (this.dropStart) { this.connected = false; throw new Error('Response lost'); }
@@ -238,6 +239,28 @@ describe('P3 recovery and desktop concurrency', () => {
     rpc.call = async (method, params) => { const result = await original(method,params); if(method === 'thread/read') delete result.thread.status; return result; };
     await expect(backend(rpc).execute('run',hooks())).rejects.toThrow('not idle');
     expect(rpc.calls.some(c => c.method === 'turn/start')).toBe(false);
+  });
+
+  it('loads a saved task from notLoaded before configuring tools and submitting once', async () => {
+    const rpc = new FakeRpc(); rpc.threadLoaded=false;
+    expect((await backend(rpc).execute('run',hooks())).status).toBe('completed');
+    const resumes=rpc.calls.filter(c=>c.method==='thread/resume');
+    expect(resumes).toHaveLength(2);
+    expect(resumes[0]!.params).not.toHaveProperty('config');
+    expect(resumes[1]!.params).toHaveProperty('config');
+    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+  });
+
+  it('does not submit if a saved task remains notLoaded after resume', async () => {
+    const rpc=new FakeRpc(); rpc.threadLoaded=false;
+    const original=rpc.call.bind(rpc);
+    rpc.call=async (method,params)=>{
+      const result=await original(method,params);
+      if(method==='thread/resume'){rpc.threadLoaded=false;result.thread.status.type='notLoaded';}
+      return result;
+    };
+    await expect(backend(rpc).execute('run',hooks())).rejects.toThrow('remained unloaded');
+    expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
   });
 
   it('keeps a live approval available when the Feishu card send fails', async () => {

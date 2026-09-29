@@ -39,7 +39,10 @@ async function main(): Promise<void> {
     } finally { await unlock(); }
     return;
   }
-  await readDesktopToolConfig(config);
+  // A live host temporarily removes its lease while revalidating desktop tools.
+  // Wait for a fresh, fully verified lease when starting a listener; --check
+  // remains fail-fast so an operator can inspect readiness without waiting.
+  await readDesktopToolConfig(config, mode === '--run' ? 45_000 : 0);
   const codex = new CodexTopicResources(config);
   for (const project of config.projects) await codex.verifyProject(project);
   if (mode === '--check') { console.log('Topic projects and desktop tool lease verified. Feishu not connected.'); return; }

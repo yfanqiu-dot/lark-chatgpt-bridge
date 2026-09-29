@@ -14,7 +14,13 @@ $taskExpectedPid=[int]$env:BRIDGE_DESKTOP_PID
 $taskExpectedExe=$env:BRIDGE_DESKTOP_EXE
 $taskProcess=Get-CimInstance Win32_Process -Filter "ProcessId = $taskExpectedPid"
 if(!$taskProcess -or $taskProcess.ExecutablePath -ne $taskExpectedExe -or $taskProcess.CommandLine -match '--type='){throw 'Desktop process identity changed'}
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public static class BridgePipeOwner { [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid); }'
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public static class BridgePipeOwner { [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid); [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int GetPackageFullName(IntPtr process, ref uint length, StringBuilder name); }'
+$taskPackageExpected=(Split-Path -Parent (Split-Path -Parent $taskExpectedExe) | Split-Path -Leaf)
+$taskHandle=Get-Process -Id $taskExpectedPid
+[uint32]$taskLength=0
+if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$null) -ne 122){throw 'Desktop has no package identity'}
+$taskPackage=[Text.StringBuilder]::new([int]$taskLength)
+if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$taskPackage) -ne 0 -or $taskPackage.ToString() -ne $taskPackageExpected){throw 'Desktop package identity changed'}
 $taskMatches=@(foreach($taskPath in [IO.Directory]::GetFiles('\\.\pipe\')) {
   $taskName=$taskPath.Substring($taskPath.LastIndexOf('\')+1)
   if(!$taskName.StartsWith('codex-browser-use-')){continue}
