@@ -28,6 +28,14 @@ it('does not report a short-lived ordinary process as restored even when its exi
   expect(desktop.detach).not.toHaveBeenCalled();expect(desktop.stop).toHaveBeenCalledOnce();
   await expect(readFile(`${cfg.connectionFile}.restored.json`)).rejects.toMatchObject({code:'ENOENT'});
 });
+it('checks the remaining owned pipes when an earlier catalog fails',async()=>{
+  mocks.pipes.mockResolvedValue([{pipe:'unready',serverPid:42},{pipe:'ready',serverPid:42}]);
+  mocks.catalog.mockRejectedValueOnce(new Error('Catalog timeout')).mockResolvedValueOnce(['list_projects']);
+  await restoreOrdinaryDesktop(cfg);
+  expect(mocks.catalog).toHaveBeenCalledTimes(2);
+  expect(desktop.detach).toHaveBeenCalledOnce();
+  expect(desktop.stop).not.toHaveBeenCalled();
+});
 it('fails restoration when the process exists but package/tool verification never succeeds',async()=>{
   vi.useFakeTimers();mocks.pipes.mockRejectedValue(new Error('Desktop has no package identity'));
   const result=expect(restoreOrdinaryDesktop(cfg)).rejects.toThrow('did not become ready');

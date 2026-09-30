@@ -46,6 +46,7 @@ export async function restoreOrdinaryDesktop(cfg:HostConfig):Promise<void> {
   const ordinary=await launchPackagedDesktop(cfg);
   try{
     const until=Date.now()+60_000;
+    let lastProbe='No tool probe completed';
     while(Date.now()<until){
       await ordinary.refresh();
       if(ordinary.exitCode!==null)throw unexpectedChildExit('Ordinary desktop',ordinary);
@@ -53,9 +54,14 @@ export async function restoreOrdinaryDesktop(cfg:HostConfig):Promise<void> {
       try{
         const candidates=await desktopPipes(ordinary.pid,cfg.desktopExe);
         const matches=[];
-        for(const c of candidates)if((await desktopToolCatalog(join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),c.pipe)).includes('list_projects'))matches.push(c);
+        const failures:string[]=[];
+        for(const c of candidates){
+          try{if((await desktopToolCatalog(join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),c.pipe)).includes('list_projects'))matches.push(c);}
+          catch(e){failures.push(String(e));}
+        }
+        lastProbe=`${candidates.length} pipe candidates, ${matches.length} matching tool catalogs${failures.length?`; ${failures.join('; ')}`:''}`;
         verified=matches.length===1;
-      }catch{}
+      }catch(e){lastProbe=String(e);}
       if(verified){
         await ordinary.detach();
         await writeFileAtomic(`${cfg.connectionFile}.restored.json`,JSON.stringify({desktopPid:ordinary.pid,desktopVersion:cfg.desktopVersion,verifiedAt:Date.now(),packageIdentityVerified:true,toolsVerified:true}));
@@ -63,7 +69,7 @@ export async function restoreOrdinaryDesktop(cfg:HostConfig):Promise<void> {
       }
       await sleep(1000);
     }
-    throw new Error('Ordinary desktop tools did not become ready within 60 seconds');
+    throw new Error(`Ordinary desktop tools did not become ready within 60 seconds: ${lastProbe}`);
   }catch(e){await ordinary.stop();throw e;}
 }
 export async function checkAppServer(cfg: HostConfig): Promise<void> {

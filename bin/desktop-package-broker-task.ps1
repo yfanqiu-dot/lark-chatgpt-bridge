@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$ConnectionFile,
   [Parameter(Mandatory=$true)][string]$TokenFile,
-  [int]$DeadlineSeconds=5400
+  [ValidateRange(60,43200)][int]$DeadlineSeconds=5400,
+  [ValidateRange(60,43200)][int]$BrokerDeadlineSeconds=3600
 )
 $ErrorActionPreference='Stop'
 $taskRoot=Split-Path -Parent $ConnectionFile
@@ -13,7 +14,7 @@ function Save-TaskStatus($value){
   [IO.File]::WriteAllText($taskReport,($value|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
 }
 try {
-  $taskArgs='-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "'+$taskBroker+'" -ConnectionFile "'+$ConnectionFile+'" -TokenFile "'+$TokenFile+'" -DeadlineSeconds 3600'
+  $taskArgs='-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "'+$taskBroker+'" -ConnectionFile "'+$ConnectionFile+'" -TokenFile "'+$TokenFile+'" -DeadlineSeconds '+$BrokerDeadlineSeconds
   Invoke-CommandInDesktopPackage -PackageFamilyName 'OpenAI.Codex_2p2nqsd0c76g0' -AppId App -Command "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Args $taskArgs -PreventBreakaway
   $taskDeadline=[DateTime]::UtcNow.AddSeconds($DeadlineSeconds)
   $taskBrokerPid=$null
