@@ -68,9 +68,9 @@ export class DesktopController {
         if (this.worker) return '当前正在处理任务，请稍后核对。';
         const row = this.ledger.all().find(r => r.state === 'uncertain');
         if (!row) return '没有待核对任务。';
-        if (!row.turnId) return '提交响应丢失，尚无turnId。请在桌面核对执行情况；不会自动重发该请求。';
-        this.launch(row, row.turnId);
-        return '正在恢复订阅并核对原运行，不会重新提交任务。';
+        if (!row.turnId && !row.queueClientId) return '提交响应丢失，尚无turnId。请在桌面核对执行情况；不会自动重发该请求。';
+        this.launch(row, row.turnId, Boolean(row.queueClientId && !row.turnId));
+        return '正在按原消息标识核对队列或轮次，不会重新提交任务。';
       }
       default: return '可用命令：/status、/stop、/steer 指令、/approve 编号 决定、/result [消息编号]、/reconcile。新建话题请在配置的入口群使用 /topic new。';
     }
@@ -84,29 +84,30 @@ export class DesktopController {
     const uncertain = this.ledger.all().find(r => r.state === 'uncertain');
     if (uncertain) {
       // One recovery attempt per known turn per process. Never replay turn/start.
-      if (uncertain.turnId && !this.recoveryAttempted.has(uncertain.messageId)) this.launch(uncertain, uncertain.turnId);
+      if ((uncertain.turnId || uncertain.queueClientId) && !this.recoveryAttempted.has(uncertain.messageId)) this.launch(uncertain, uncertain.turnId, Boolean(uncertain.queueClientId && !uncertain.turnId));
       else this.status = '存在待核对任务，暂停新请求；可使用 /reconcile';
       return;
     }
     const row = this.ledger.all().find(r => r.state === 'queued'); if (!row) return;
     this.launch(row);
   }
-  private launch(row: MessageRecord, turnId?: string): void {
-    if (turnId) this.recoveryAttempted.add(row.messageId);
-    this.worker = this.runRow(row, turnId).catch(e => { this.status = `存储或回复失败，已暂停：${String(e)}`; this.shuttingDown = true; }).finally(() => { this.worker = undefined; this.kick(); });
+  private launch(row: MessageRecord, turnId?: string, recoverQueued = false): void {
+    if (turnId || recoverQueued) this.recoveryAttempted.add(row.messageId);
+    this.worker = this.runRow(row, turnId, recoverQueued).catch(e => { this.status = `存储或回复失败，已暂停：${String(e)}`; this.shuttingDown = true; }).finally(() => { this.worker = undefined; this.kick(); });
   }
-  private async runRow(row: MessageRecord, resumeTurnId?: string): Promise<void> {
+  private async runRow(row: MessageRecord, resumeTurnId?: string, recoverQueued = false): Promise<void> {
     this.activeMessage = row.messageId; this.status = '正在连接桌面';
     try {
       const result = await this.backend.execute(row.prompt, {
-        submitting: () => this.ledger.update(row.messageId, { state: 'submitting' }),
+        submitting: () => this.ledger.update(row.messageId, { state: 'submitting', queueClientId: row.messageId }),
+        accepted: queueSubmissionId => this.ledger.update(row.messageId, { queueSubmissionId }),
         started: turnId => this.ledger.update(row.messageId, { state: 'running', turnId }),
         state: async status => { this.status = status; },
         approval: request => this.replies.approval(this.config.chatId, request, row.messageId, row.replyInThread),
         resolved: token => this.replies.resolved(token),
-      }, resumeTurnId);
+      }, resumeTurnId, row.messageId, Boolean(row.queueClientId) || recoverQueued);
       await this.ledger.update(row.messageId, { state: result.status, turnId: result.turnId, result: result.text,
-        ...(resumeTurnId ? { receipt: undefined, deliveryAttempted: false, error: undefined } : {}) });
+        ...(resumeTurnId || recoverQueued ? { receipt: undefined, deliveryAttempted: false, error: undefined } : {}) });
       this.status = result.status === 'completed' ? '已完成' : result.status === 'interrupted' ? '已停止' : '失败';
     } catch (e) {
       const uncertain = e instanceof UncertainExecution;

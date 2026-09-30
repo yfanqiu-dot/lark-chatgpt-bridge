@@ -9,6 +9,7 @@ export interface Approval { token: string; requestId: string | number; threadId:
 export interface TurnResult { turnId: string; status: 'completed' | 'interrupted' | 'failed'; text: string }
 export interface BackendHooks {
   submitting(): Promise<void>;
+  accepted?(queueSubmissionId: string): Promise<void>;
   started(turnId: string): Promise<void>;
   approval(request: Approval): Promise<void>;
   resolved(token: string): Promise<void>;
@@ -26,6 +27,7 @@ export interface BackendOptions {
   toolConfig?: () => Promise<Record<string, unknown>>;
   pollMs?: number;
   reconnectDelayMs?: number;
+  queueMissingTimeoutMs?: number;
 }
 export class UncertainExecution extends Error {}
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -69,6 +71,7 @@ export class DesktopBackend {
   private approvals = new Map<string, Approval>();
   private connectionEpoch = 0;
   private expectedUserMessages: string[] = [];
+  private expectedClientId?: string;
   constructor(readonly config: DesktopConfig, private readonly options: BackendOptions = {}) {}
   pendingApprovals(): Approval[] { return structuredClone([...this.approvals.values()]); }
   get currentTurn(): string | undefined { return this.activeTurn; }
@@ -100,7 +103,8 @@ export class DesktopBackend {
     } catch (e) { this.rpc.close(); throw e; }
   }
   private async resumeThread(config: Record<string, unknown> | undefined, root: string): Promise<void> {
-    const resumed = await this.rpc!.call('thread/resume', { threadId: this.config.threadId, excludeTurns: true, ...(config ? { config } : {}) });
+    const resumed = await this.rpc!.call('thread/resume', { threadId: this.config.threadId, excludeTurns: true,
+      ...(config ? { config, ...(this.config.model ? { model: this.config.model } : {}) } : {}) });
     this.checkThread(resumed.thread, root);
   }
   private checkThread(thread: any, root: string): void {
@@ -138,14 +142,19 @@ export class DesktopBackend {
     }while(true);
     throw new Error('Task desktop tool server is missing; no turn submitted');
   }
-  async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string): Promise<TurnResult> {
+  async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string, clientMessageId: string = randomUUID(), recoverQueued = false): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
     this.busy = true; this.stopping = false; this.disconnected = false; this.awaitingExecution = true; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
-    this.expectedUserMessages = [prompt];
-    let submitted = Boolean(resumeTurnId);
+    this.expectedUserMessages = [prompt]; this.expectedClientId = recoverQueued ? clientMessageId : undefined;
+    let submitted = Boolean(resumeTurnId || recoverQueued);
     try {
-      await this.connect(Boolean(resumeTurnId));
-      if (!resumeTurnId) {
+      await this.connect(Boolean(resumeTurnId || recoverQueued));
+      if (recoverQueued && !resumeTurnId) {
+        const recovered = await this.waitForQueuedTurn(clientMessageId, prompt, hooks);
+        if (!recovered) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };
+        this.activeTurn = recovered;
+        await hooks.started(recovered);
+      } else if (!resumeTurnId) {
         // Desktop may own a turn. Queue without interrupting it or changing its policy.
         let unloadedResumes = 0;
         while (true) {
@@ -180,17 +189,21 @@ export class DesktopBackend {
         }
         if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
         await hooks.submitting(); submitted = true;
-        const result = await this.rpc!.call('turn/start', {
+        this.expectedClientId = clientMessageId;
+        const result = await this.rpc!.call('thread/queue/add', {
           threadId: this.config.threadId,
           input: [{ type: 'text', text: prompt }],
-          ...(this.config.model ? { model: this.config.model } : {}),
-          // Preserve the task's existing permissions and approval reviewer.
+          clientUserMessageId: clientMessageId,
         });
-        if (!result.turn?.id) throw new UncertainExecution('turn/start response has no turn ID');
-        // turn/start may steer into a desktop-owned active turn after the last
-        // idle read. Its returned turn ID is not proof that we started it.
-        await this.verifyFirstUserMessage(result.turn.id, prompt);
-        this.activeTurn = result.turn.id;
+        if (!result.queuedSubmission?.id || result.queuedSubmission.clientUserMessageId !== clientMessageId)
+          throw new UncertainExecution('Queue admission response has no matching submission ID');
+        await hooks.accepted?.(result.queuedSubmission.id);
+        // Queue admission is atomic with the App Server's turn scheduler. It
+        // cannot steer into a desktop-owned turn; map the persisted client ID
+        // to the actual turn before claiming or interrupting that turn.
+        const startedTurn = await this.waitForQueuedTurn(clientMessageId, prompt, hooks);
+        if (!startedTurn) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };
+        this.activeTurn = startedTurn;
         await hooks.started(this.activeTurn!);
       }
       let failures = 0;
@@ -236,7 +249,7 @@ export class DesktopBackend {
       throw e;
     } finally {
       for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
-      this.approvals.clear(); ++this.connectionEpoch; this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.expectedUserMessages = []; this.awaitingExecution = false; this.busy = false;
+      this.approvals.clear(); ++this.connectionEpoch; this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.expectedUserMessages = []; this.expectedClientId = undefined; this.awaitingExecution = false; this.busy = false;
     }
   }
   private async processMessages(hooks: BackendHooks): Promise<void> {
@@ -316,12 +329,74 @@ export class DesktopBackend {
     } while (cursor);
     return items;
   }
-  private async verifyFirstUserMessage(turnId: string, prompt: string): Promise<void> {
+  private async findQueuedSubmission(clientId: string): Promise<any | undefined> {
+    let cursor: string | undefined; const seen = new Set<string>();
+    do {
+      const page = await this.rpc!.call('thread/queue/list', { threadId: this.config.threadId, limit: 100, ...(cursor ? { cursor } : {}) });
+      if (!Array.isArray(page.data)) throw new Error('Invalid queue page');
+      const matches = page.data.filter((item: any) => item.clientUserMessageId === clientId);
+      if (matches.length > 1) throw new UncertainExecution(`队列中存在重复客户端消息 ${clientId}；未重新提交。`);
+      if (matches.length) return matches[0];
+      cursor = page.nextCursor ?? undefined;
+      if (cursor && seen.has(cursor)) throw new Error('Repeated queue cursor');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return undefined;
+  }
+  private async findTurnForClientId(clientId: string, prompt: string): Promise<string | undefined> {
+    let cursor: string | undefined; const seen = new Set<string>(); let found: string | undefined;
+    do {
+      const page = await this.rpc!.call('thread/turns/list', { threadId: this.config.threadId, limit: 50, itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) });
+      if (!Array.isArray(page.data)) throw new Error('Invalid turn page');
+      for (const turn of page.data) {
+        const items = await this.readItems(turn.id);
+        const matches = items.filter(item => item.type === 'userMessage' && item.clientId === clientId);
+        if (!matches.length) continue;
+        if (found || matches.length !== 1 || userMessageText(matches[0]) !== prompt)
+          throw new UncertainExecution(`客户端消息 ${clientId} 无法唯一归属原轮次；未重新提交。`);
+        found = turn.id;
+      }
+      cursor = page.nextCursor ?? undefined;
+      if (cursor && seen.has(cursor)) throw new Error('Repeated history cursor');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return found;
+  }
+  private async waitForQueuedTurn(clientId: string, prompt: string, hooks: BackendHooks): Promise<string | undefined> {
+    let missingSince: number | undefined;
+    while (true) {
+      const started = this.inbox.find(m => m.method === 'item/started' && m.params?.threadId === this.config.threadId
+        && m.params?.item?.type === 'userMessage' && m.params.item.clientId === clientId);
+      if (started?.params?.turnId) {
+        await this.verifyFirstUserMessage(started.params.turnId, prompt, clientId);
+        return started.params.turnId;
+      }
+      const queued = await this.findQueuedSubmission(clientId);
+      if (this.stopping && queued) {
+        const removed = await this.rpc!.call('thread/queue/delete', { threadId: this.config.threadId, queuedSubmissionId: queued.id });
+        if (removed.deleted) return undefined;
+      }
+      if (!queued) {
+        const turnId = await this.findTurnForClientId(clientId, prompt);
+        if (turnId) {
+          await this.verifyFirstUserMessage(turnId, prompt, clientId);
+          return turnId;
+        }
+        missingSince ??= Date.now();
+        if (Date.now() - missingSince >= (this.options.queueMissingTimeoutMs ?? 10_000)) throw new UncertainExecution(`客户端消息 ${clientId} 已不在队列且未找到原轮次；未重新提交。`);
+      } else {
+        missingSince = undefined;
+        await hooks.state('等待桌面队列执行');
+      }
+      await delay(this.options.pollMs ?? 1000);
+    }
+  }
+  private async verifyFirstUserMessage(turnId: string, prompt: string, clientId?: string): Promise<void> {
     const until = Date.now() + 5_000;
     while (true) {
       const first = (await this.readItems(turnId)).find(item => item.type === 'userMessage');
       if (first) {
-        if (userMessageText(first) !== prompt) throw new UncertainExecution(`轮次 ${turnId} 已由桌面消息开始，飞书请求可能并入其中；请在桌面核对，未自动重试。`);
+        if (userMessageText(first) !== prompt || (clientId && first.clientId !== clientId)) throw new UncertainExecution(`轮次 ${turnId} 已由其他消息开始，飞书请求不能归属该轮；请在桌面核对，未自动重试。`);
         return;
       }
       if (Date.now() >= until) throw new UncertainExecution(`轮次 ${turnId} 无法核实首条用户消息；请在桌面核对，未自动重试。`);
@@ -329,7 +404,10 @@ export class DesktopBackend {
     }
   }
   private verifyTurnInputs(items: any[], turnId: string): void {
-    const inputs = items.filter(item => item.type === 'userMessage').map(userMessageText);
+    const messages = items.filter(item => item.type === 'userMessage');
+    const inputs = messages.map(userMessageText);
+    if (this.expectedClientId && messages[0]?.clientId !== this.expectedClientId)
+      throw new UncertainExecution(`轮次 ${turnId} 的首条用户消息不属于飞书请求；未重新提交。`);
     if (inputs.length !== this.expectedUserMessages.length || inputs.some((text, index) => text !== this.expectedUserMessages[index])) {
       throw new UncertainExecution(`轮次 ${turnId} 含有其他来源或未确认的用户消息，无法将最终答复归属飞书请求；请在桌面核对，未自动重试。`);
     }

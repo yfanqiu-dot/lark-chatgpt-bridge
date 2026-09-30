@@ -20,7 +20,8 @@ class FakeRpc implements RpcTransport {
   responses: any[] = [];
   listeners: Array<(m: RpcMessage) => void> = [];
   terminal = 'completed'; approval = false; dropStart = false; wrongThread = false; pageItems = true; desktopActive = false; threadLoaded = true;
-  steerIntoDesktop = false; extraDesktopMessage = false; lastSubmittedPrompt = 'ignored'; steered: string[] = [];
+  steerIntoDesktop = false; extraDesktopMessage = false; lastSubmittedPrompt = 'ignored'; lastClientId?: string; steered: string[] = [];
+  queueRace = false; queueStay = false; queueDeleted = false; queueReads = 0;
   extraRequest?: RpcMessage;
   connectCount = 0;
   async connect() { this.connected = true; this.connectCount++; }
@@ -37,22 +38,29 @@ class FakeRpc implements RpcTransport {
       case 'thread/read': result = { thread }; break;
       case 'thread/resume': this.threadLoaded=true; thread.status.type=this.desktopActive?'active':'idle'; result = { thread }; break;
       case 'mcpServerStatus/list': result = {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]}; break;
-      case 'turn/start':
-        this.lastSubmittedPrompt = params.input[0].text;
+      case 'thread/queue/add':
+        this.lastSubmittedPrompt = params.input[0].text; this.lastClientId = params.clientUserMessageId;
         if (this.dropStart) { this.connected = false; throw new Error('Response lost'); }
+        if (!this.queueRace && !this.queueStay) this.emit({method:'item/started',params:{threadId:'thread',turnId:'turn',item:{type:'userMessage',clientId:this.lastClientId,content:[{type:'text',text:this.lastSubmittedPrompt}]}}});
         if (this.extraRequest) { this.terminal='inProgress';this.emit(this.extraRequest); }
         if (this.approval) {
           this.terminal = 'inProgress';
           this.emit({ id:42, method:'item/commandExecution/requestApproval', params: { threadId:'thread', turnId:'turn', command:'Write-Output test', availableDecisions:['accept','cancel'] } });
           this.emit({ id:43, method:'item/commandExecution/requestApproval', params: { threadId:'other', turnId:'turn', command:'OTHER', availableDecisions:['accept'] } });
         }
-        result = { turn:{id:this.steerIntoDesktop ? 'desktop-turn' : 'turn'} }; break;
+        result = { queuedSubmission:{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId} }; break;
+      case 'thread/queue/list':
+        if (this.queueStay && !this.queueDeleted) result = {data:[{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId}]};
+        else if (this.queueRace && ++this.queueReads === 1) result = {data:[{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId}]};
+        else { this.queueRace = false; result = {data:[]}; }
+        break;
+      case 'thread/queue/delete': this.queueDeleted = true; result = {deleted:true}; break;
       case 'thread/turns/list': result = { data: params.cursor ? [{id:'turn',status:this.terminal,completedAt:this.terminal==='inProgress'?null:1}] : [{id:'unrelated',status:'completed',completedAt:1}], nextCursor: params.cursor ? null : 'turns2' }; break;
-      case 'thread/items/list': result = params.cursor || !this.pageItems
+      case 'thread/items/list': result = params.turnId === 'unrelated' ? {data:[]} : params.cursor || !this.pageItems
         ? {data:[...this.steered.map(text=>({turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text}]}})),
           ...(this.extraDesktopMessage?[{turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text:'desktop follow-up'}]}}]:[]),
           {turnId:params.turnId,item:{type:'agentMessage',phase:'final_answer',text:'actual final'}}]}
-        : {data:[{turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text:this.steerIntoDesktop ? 'desktop prompt' : this.lastSubmittedPrompt}]}},
+        : {data:[{turnId:params.turnId,item:{type:'userMessage',clientId:this.lastClientId,content:[{type:'text',text:this.steerIntoDesktop ? 'desktop prompt' : this.lastSubmittedPrompt}]}},
           {turnId:params.turnId,item:{type:'agentMessage',phase:'commentary',text:'not final'}}],nextCursor:'items2'}; break;
       case 'turn/interrupt': this.terminal = 'interrupted'; result = {}; break;
       case 'turn/steer': this.steered.push(params.input[0].text); result = {}; break;
@@ -77,7 +85,7 @@ describe('desktop boundaries and history', () => {
   });
   it('checks idle task runtime without starting a model turn and refuses an active desktop task',async()=>{
     const rpc=new FakeRpc();await backend(rpc).preflightTools();
-    expect(rpc.calls.some(c=>c.method==='mcpServerStatus/list')).toBe(true);expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
+    expect(rpc.calls.some(c=>c.method==='mcpServerStatus/list')).toBe(true);expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
     const active=new FakeRpc();active.desktopActive=true;
     await expect(backend(active).preflightTools()).rejects.toThrow('active');
     expect(active.calls.some(c=>c.method==='thread/resume')).toBe(false);
@@ -94,15 +102,35 @@ describe('desktop boundaries and history', () => {
   it('reads final answer across turn and item pages without mixing commentary',async()=>{
     const rpc=new FakeRpc();const r=await backend(rpc).execute('question',hooks());
     expect(r).toEqual({turnId:'turn',status:'completed',text:'actual final'});
-    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
-    expect(rpc.calls.find(c=>c.method==='turn/start')?.params).not.toHaveProperty('approvalPolicy');
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
+    expect(rpc.calls.find(c=>c.method==='thread/queue/add')?.params).not.toHaveProperty('approvalPolicy');
   });
   it('does not resubmit when start response is lost',async()=>{
     const rpc=new FakeRpc();rpc.dropStart=true;
     await expect(backend(rpc).execute('question',hooks())).rejects.toBeInstanceOf(UncertainExecution);
-    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
   });
-  it('does not claim a desktop-owned turn when turn/start steers across the idle gap',async()=>{
+  it('keeps a group request in the App Server queue when desktop starts after the last idle check',async()=>{
+    const rpc=new FakeRpc();rpc.queueRace=true;
+    expect(await backend(rpc).execute('group request',hooks(),undefined,'feishu-message')).toEqual({turnId:'turn',status:'completed',text:'actual final'});
+    expect(rpc.queueReads).toBeGreaterThanOrEqual(2);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
+    expect(rpc.calls.find(c=>c.method==='thread/queue/add')?.params.clientUserMessageId).toBe('feishu-message');
+    expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
+  });
+  it('removes only its own queued submission when stopped before a turn starts',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;const b=backend(rpc);const h=hooks();
+    h.state=async status=>{if(status==='等待桌面队列执行')await b.stop();};
+    expect((await b.execute('queued group request',h)).status).toBe('interrupted');
+    expect(rpc.queueDeleted).toBe(true);
+    expect(rpc.calls.some(c=>c.method==='turn/interrupt')).toBe(false);
+  });
+  it('leaves a missing queued submission uncertain without adding it again',async()=>{
+    const rpc=new FakeRpc();const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueMissingTimeoutMs:20});
+    await expect(b.execute('lost request',hooks(),undefined,'lost-client',true)).rejects.toBeInstanceOf(UncertainExecution);
+    expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
+  });
+  it('refuses a queued turn whose first message does not match the Feishu request',async()=>{
     const rpc=new FakeRpc();rpc.steerIntoDesktop=true;
     const store=new DesktopLedger(config().stateFile,binding());await store.load();
     const out=replies(),c=new DesktopController(config(),store,backend(rpc),out);
@@ -110,10 +138,10 @@ describe('desktop boundaries and history', () => {
     const row=store.get('race');
     expect(row?.state).toBe('uncertain');
     expect(row?.turnId).toBeUndefined();
-    expect(row?.error).toContain('已由桌面消息开始');
+    expect(row?.error).toContain('无法唯一归属原轮次');
     expect(out.sent).toHaveLength(1);
     expect(out.sent[0]).not.toContain('actual final');
-    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
     expect(rpc.calls.some(c=>c.method==='turn/interrupt')).toBe(false);
   });
   it('does not attribute a mixed desktop and group answer to the group',async()=>{
@@ -127,7 +155,7 @@ describe('desktop boundaries and history', () => {
   });
   it('resumes known turns without starting another turn',async()=>{
     const rpc=new FakeRpc();await backend(rpc).execute('ignored',hooks(),'turn');
-    expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
+    expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
   });
   it('matches approval by thread and turn, rejects duplicates, waits for resolved',async()=>{
     const rpc=new FakeRpc();rpc.approval=true;const b=backend(rpc);const h=hooks();const tokens:string[]=[];const resolved:string[]=[];
@@ -146,7 +174,7 @@ describe('desktop boundaries and history', () => {
     const rpc=new FakeRpc();rpc.desktopActive=true;const b=backend(rpc),h=hooks();
     h.state=async()=>{await b.stop();};
     expect((await b.execute('queued',h)).status).toBe('interrupted');
-    expect(rpc.calls.some(c=>['turn/start','turn/interrupt','thread/resume'].includes(c.method))).toBe(false);
+    expect(rpc.calls.some(c=>['thread/queue/add','turn/interrupt','thread/resume'].includes(c.method))).toBe(false);
   });
   it('steers only the exact active turn',async()=>{
     const rpc=new FakeRpc();rpc.approval=true;const b=backend(rpc),h=hooks();
@@ -172,7 +200,7 @@ describe('durable single-group controller',()=>{
     const rpc=new FakeRpc(),store=new DesktopLedger(config().stateFile,binding());
     const c=new DesktopController(config(),store,backend(rpc),replies());await c.start();
     await c.receive(inbound!);await c.receive(inbound!);await c.idle();
-    expect(rpc.calls.filter(r=>r.method==='turn/start')).toHaveLength(1);
+    expect(rpc.calls.filter(r=>r.method==='thread/queue/add')).toHaveLength(1);
     expect(store.all()[0]?.prompt).toBe('现在的校验词是什么？');
     expect(desktopInbound({...inbound!,resources:[{type:'image'}],mentions:[],rawContentType:'post'})).toBeUndefined();
     expect(desktopInbound({...inbound!,resources:[],mentions:[],rawContentType:'interactive'})).toBeUndefined();
@@ -180,7 +208,7 @@ describe('durable single-group controller',()=>{
   it('deduplicates message IDs and serially executes three rounds',async()=>{
     const rpc=new FakeRpc();const out=replies();const store=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),store,backend(rpc),out);await c.start();
     await Promise.all(['a','a','b','c'].map(id=>c.receive(incoming(id))));await c.idle();
-    expect(rpc.calls.filter(x=>x.method==='turn/start')).toHaveLength(3);expect(store.all()).toHaveLength(3);expect(out.sent).toHaveLength(3);
+    expect(rpc.calls.filter(x=>x.method==='thread/queue/add')).toHaveLength(3);expect(store.all()).toHaveLength(3);expect(out.sent).toHaveLength(3);
     const saved=JSON.parse(await readFile(config().stateFile,'utf8'));expect(saved.messages.every((x:any)=>x.receipt)).toBe(true);
   });
   it('ignores another group, another sender, bots and missing mention',async()=>{
@@ -197,7 +225,7 @@ describe('durable single-group controller',()=>{
   it('persists final result on delivery loss and never reruns the model for /result',async()=>{
     const rpc=new FakeRpc();const out=replies();out.send=async()=>{throw new Error('receipt lost');};const store=new DesktopLedger(config().stateFile,binding());const c=new DesktopController(config(),store,backend(rpc),out);await c.start();await c.receive(incoming('a'));await c.idle();
     expect(store.get('a')).toMatchObject({state:'completed',result:'actual final',deliveryAttempted:true});
-    await c.receive({...incoming('b'),content:'/result'});await c.idle();expect(rpc.calls.filter(x=>x.method==='turn/start')).toHaveLength(1);
+    await c.receive({...incoming('b'),content:'/result'});await c.idle();expect(rpc.calls.filter(x=>x.method==='thread/queue/add')).toHaveLength(1);
   });
   it('refuses loading a ledger for a different project/chat binding',async()=>{
     const store=new DesktopLedger(config().stateFile,binding());await store.load();
@@ -216,7 +244,7 @@ describe('durable single-group controller',()=>{
     const rpc=new FakeRpc(),out=replies();rpc.lastSubmittedPrompt='question';const c=new DesktopController(config(),store,backend(rpc),out);
     await c.start();await c.receive({...incoming('command'),content:'/reconcile'});await c.idle();
     expect(store.get('old')).toMatchObject({state:'completed',result:'actual final'});
-    expect(out.sent.filter(x=>x==='actual final')).toHaveLength(1);expect(rpc.calls.some(x=>x.method==='turn/start')).toBe(false);
+    expect(out.sent.filter(x=>x==='actual final')).toHaveLength(1);expect(rpc.calls.some(x=>x.method==='thread/queue/add')).toBe(false);
   });
 });
 
@@ -230,8 +258,8 @@ describe('P3 recovery and desktop concurrency', () => {
     const c = new DesktopController(config(), recovered, backend(rpc), out);
     await c.start(); await c.idle();
     expect(recovered.all().map(r => r.state)).toEqual(['completed','completed']);
-    expect(rpc.calls.filter(r => r.method === 'turn/start')).toHaveLength(1);
-    expect(rpc.calls.find(r => r.method === 'turn/start')?.params.input[0].text).toBe('next');
+    expect(rpc.calls.filter(r => r.method === 'thread/queue/add')).toHaveLength(1);
+    expect(rpc.calls.find(r => r.method === 'thread/queue/add')?.params.input[0].text).toBe('next');
     expect(out.sent).toHaveLength(2);
   });
 
@@ -244,7 +272,7 @@ describe('P3 recovery and desktop concurrency', () => {
     expect(rpc.connectCount).toBe(1); expect(store.get('old')?.state).toBe('uncertain');
     expect(store.get('next')?.state).toBe('queued');
     await c.receive({...incoming('retry'),content:'/reconcile'}); await c.idle();
-    expect(rpc.connectCount).toBe(2); expect(rpc.calls.some(r => r.method === 'turn/start')).toBe(false);
+    expect(rpc.connectCount).toBe(2); expect(rpc.calls.some(r => r.method === 'thread/queue/add')).toBe(false);
   });
 
   it('does not resend an ambiguous reply after restart and /result reads the saved answer', async () => {
@@ -261,14 +289,14 @@ describe('P3 recovery and desktop concurrency', () => {
     rpc.call = async (method, params) => { const result = await original(method,params); if(method === 'mcpServerStatus/list') rpc.desktopActive = true; return result; };
     const b = backend(rpc), h = hooks(); h.state = async () => { await b.stop(); };
     expect((await b.execute('queued',h)).status).toBe('interrupted');
-    expect(rpc.calls.some(c => ['turn/start','turn/interrupt'].includes(c.method))).toBe(false);
+    expect(rpc.calls.some(c => ['thread/queue/add','turn/interrupt'].includes(c.method))).toBe(false);
   });
 
   it('refuses to submit when the server does not confirm an idle task', async () => {
     const rpc = new FakeRpc(), original = rpc.call.bind(rpc);
     rpc.call = async (method, params) => { const result = await original(method,params); if(method === 'thread/read') delete result.thread.status; return result; };
     await expect(backend(rpc).execute('run',hooks())).rejects.toThrow('not idle');
-    expect(rpc.calls.some(c => c.method === 'turn/start')).toBe(false);
+    expect(rpc.calls.some(c => c.method === 'thread/queue/add')).toBe(false);
   });
 
   it('loads a saved task from notLoaded before configuring tools and submitting once', async () => {
@@ -278,7 +306,7 @@ describe('P3 recovery and desktop concurrency', () => {
     expect(resumes).toHaveLength(2);
     expect(resumes[0]!.params).not.toHaveProperty('config');
     expect(resumes[1]!.params).toHaveProperty('config');
-    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
   });
 
   it('does not submit if a saved task remains notLoaded after resume', async () => {
@@ -290,7 +318,7 @@ describe('P3 recovery and desktop concurrency', () => {
       return result;
     };
     await expect(backend(rpc).execute('run',hooks())).rejects.toThrow('remained unloaded');
-    expect(rpc.calls.some(c=>c.method==='turn/start')).toBe(false);
+    expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
   });
 
   it('keeps a live approval available when the Feishu card send fails', async () => {
@@ -317,12 +345,16 @@ describe('P3 recovery and desktop concurrency', () => {
       }
       return result;
     };
-    let connects = 0; const b = new DesktopBackend(config(),{rpcFactory:()=>++connects === 1 ? first : second,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
+    let connects = 0; const b = new DesktopBackend(config(),{rpcFactory:()=>{
+      if (++connects === 1) return first;
+      second.lastClientId = first.lastClientId; second.lastSubmittedPrompt = first.lastSubmittedPrompt;
+      return second;
+    },toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
     const h = hooks(), tokens:string[] = [];
     h.resolved = async () => { throw new Error('card update offline'); };
     h.approval = async a => { tokens.push(a.token); if(tokens.length === 2) { await expect(b.decide(tokens[0]!,'accept')).rejects.toThrow(); await b.decide(a.token,'accept'); } };
     expect((await b.execute('approval',h)).status).toBe('completed');
     expect(tokens).toHaveLength(2); expect(first.responses).toHaveLength(0); expect(second.responses).toHaveLength(1);
-    expect([...first.calls,...second.calls].filter(c=>c.method==='turn/start')).toHaveLength(1);
+    expect([...first.calls,...second.calls].filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
   });
 });

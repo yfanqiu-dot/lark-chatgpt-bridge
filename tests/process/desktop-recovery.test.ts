@@ -37,7 +37,7 @@ function run(mode:string) {
 }
 
 it.each(['known','unknown'])('survives actual process termination with %s turn identity and never replays the original start',async identity=>{
-  let starts=0,completed=false,prompt='',notifyStart:()=>void=()=>{};
+  let starts=0,completed=false,prompt='',clientId='',notifyStart:()=>void=()=>{};
   const started=new Promise<void>(resolve=>{notifyStart=resolve;});
   server.on('connection',socket=>socket.on('message',data=>{
     const m=JSON.parse(data.toString());if(m.id===undefined)return;
@@ -45,10 +45,16 @@ it.each(['known','unknown'])('survives actual process termination with %s turn i
     if(m.method==='project/list')result={data:[{id:'project',roots:[{path:dir}]}]};
     if(['thread/read','thread/resume'].includes(m.method))result={thread:{id:'thread',projectId:'project',cwd:dir,status:{type:starts&&!completed?'active':'idle'}}};
     if(m.method==='mcpServerStatus/list')result={data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]};
-    if(m.method==='turn/start'){starts++;prompt=m.params.input[0].text;notifyStart();if(identity==='unknown')return;result={turn:{id:'original-turn'}};}
+    if(m.method==='thread/queue/add'){
+      starts++;prompt=m.params.input[0].text;clientId=m.params.clientUserMessageId;notifyStart();
+      if(identity==='unknown')return;
+      result={queuedSubmission:{id:'original-queued',clientUserMessageId:clientId}};
+      socket.send(JSON.stringify({method:'item/started',params:{threadId:'thread',turnId:'original-turn',item:{type:'userMessage',clientId,content:[{type:'text',text:prompt}]}}}));
+    }
+    if(m.method==='thread/queue/list')result={data:[]};
     if(m.method==='thread/turns/list')result={data:[{id:'original-turn',status:completed?'completed':'inProgress',completedAt:completed?1:null}]};
     if(m.method==='thread/items/list')result={data:[
-      {turnId:'original-turn',item:{type:'userMessage',content:[{type:'text',text:prompt}]}},
+      {turnId:'original-turn',item:{type:'userMessage',clientId,content:[{type:'text',text:prompt}]}},
       {turnId:'original-turn',item:{type:'agentMessage',phase:'final_answer',text:'durable answer'}}]};
     socket.send(JSON.stringify({id:m.id,result}));
   }));
@@ -62,10 +68,6 @@ it.each(['known','unknown'])('survives actual process termination with %s turn i
   const second=run('recover');expect(await second.exited,second.errors()).toBe(0);
   const recovered=JSON.parse(await readFile(join(dir,'ledger.json'),'utf8')).messages[0];
   expect(starts).toBe(1);
-  if(identity==='known') {
-    expect(recovered).toMatchObject({state:'completed',turnId:'original-turn',result:'durable answer',receipt:'receipt'});
-    expect(second.output().match(/REPLY /g)).toHaveLength(1);
-  } else {
-    expect(recovered.state).toBe('uncertain');expect(recovered.turnId).toBeUndefined();expect(second.output()).not.toContain('REPLY ');
-  }
+  expect(recovered).toMatchObject({state:'completed',turnId:'original-turn',result:'durable answer',receipt:'receipt'});
+  expect(second.output().match(/REPLY /g)).toHaveLength(1);
 },15_000);

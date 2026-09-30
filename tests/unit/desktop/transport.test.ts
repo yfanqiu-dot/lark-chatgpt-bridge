@@ -10,8 +10,9 @@ import type { DesktopConfig } from '../../../src/desktop/config';
 let server: WebSocketServer, dir: string, endpoint: string;
 let clients: DesktopRpc[];
 let submittedPrompt = '';
+let submittedClientId = '';
 beforeEach(async () => {
-  submittedPrompt = '';
+  submittedPrompt = ''; submittedClientId = '';
   dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-transport-')));
   server = new WebSocketServer({host:'127.0.0.1',port:0});
   await new Promise<void>(resolve => server.once('listening', resolve));
@@ -31,19 +32,24 @@ type Handler = (m:any,s:WebSocket)=>unknown;
 function serve(handler:Handler) {
   server.on('connection',socket=>socket.on('message',data=>{
     const m=JSON.parse(data.toString());
-    if (m.method === 'turn/start') submittedPrompt = m.params.input[0].text;
+    if (m.method === 'thread/queue/add') { submittedPrompt = m.params.input[0].text; submittedClientId = m.params.clientUserMessageId; }
     if (m.id===undefined || !m.method) { handler(m,socket);return; }
     if (m.method==='initialize') { socket.send(JSON.stringify({id:m.id,result:{}}));return; }
     const result=handler(m,socket);
-    if (result!==undefined) socket.send(JSON.stringify({id:m.id,result}));
+    if (result!==undefined) {
+      socket.send(JSON.stringify({id:m.id,result:m.method==='thread/queue/add'
+        ? {queuedSubmission:{id:'queued',clientUserMessageId:submittedClientId}} : result}));
+      if (m.method==='thread/queue/add') socket.send(JSON.stringify({method:'item/started',params:{threadId:'t',turnId:'turn',item:{type:'userMessage',clientId:submittedClientId,content:[{type:'text',text:submittedPrompt}]}}}));
+    }
   }));
 }
 function baseline(m:any) {
   if(m.method==='mcpServerStatus/list')return {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]};
   if(m.method==='project/list')return {data:[{id:'p',roots:[{path:dir}]}]};
   if(['thread/read','thread/resume'].includes(m.method))return {thread:{id:'t',projectId:'p',cwd:dir,status:{type:'idle'}}};
+  if(m.method==='thread/queue/list')return {data:[]};
   if(m.method==='thread/items/list')return {data:[
-    {turnId:'turn',item:{type:'userMessage',content:[{type:'text',text:submittedPrompt}]}},
+    {turnId:'turn',item:{type:'userMessage',clientId:submittedClientId,content:[{type:'text',text:submittedPrompt}]}},
     {turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'结果'}}]};
 }
 
@@ -65,7 +71,7 @@ it('correlates responses, routes server requests, rejects RPC errors and times o
 
 it('does not repeat a real wire submission whose response was lost',async()=>{
   let starts=0;
-  serve((m,s)=>{if(m.method==='turn/start'){starts++;s.terminate();return;}return baseline(m);});
+  serve((m,s)=>{if(m.method==='thread/queue/add'){starts++;s.terminate();return;}return baseline(m);});
   const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
   await expect(b.execute('one',hooks())).rejects.toBeInstanceOf(UncertainExecution);
   expect(starts).toBe(1);
@@ -73,7 +79,7 @@ it('does not repeat a real wire submission whose response was lost',async()=>{
 
 it('does not submit a model turn when the task MCP runtime failed despite a readable catalog',async()=>{
   let starts=0;
-  serve(m=>{if(m.method==='turn/start'){starts++;return {};}
+  serve(m=>{if(m.method==='thread/queue/add'){starts++;return {};}
     if(m.method==='mcpServerStatus/list')return {data:[{name:'codex_app',runtimeStatus:'failed',tools:{list_projects:{name:'list_projects'}}}]};
     return baseline(m);});
   const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({})});
@@ -88,7 +94,7 @@ it('checks paginated task-scoped MCP state and waits for startup before submitti
       if(!m.params.cursor)return {data:[],nextCursor:'next'};
       return {data:[{name:'codex_app',runtimeStatus:++checks===1?'starting':'connected',tools:{list_projects:{name:'list_projects'}}}]};
     }
-    if(m.method==='turn/start'){starts++;return {turn:{id:'turn'}};}
+    if(m.method==='thread/queue/add'){starts++;return {turn:{id:'turn'}};}
     if(m.method==='thread/turns/list')return {data:[{id:'turn',status:'completed',completedAt:1}]};
     return baseline(m);
   });
@@ -100,7 +106,7 @@ it('reconnects to a known turn and returns its final output without submitting a
   let starts=0,reads=0,resumes=0;
   serve((m,s)=>{
     if(m.method==='thread/resume')resumes++;
-    if(m.method==='turn/start'){starts++;return {turn:{id:'turn'}};}
+    if(m.method==='thread/queue/add'){starts++;return {turn:{id:'turn'}};}
     if(m.method==='thread/turns/list'){
       if(++reads===1){s.terminate();return;}
       return {data:[{id:'turn',status:'completed',completedAt:1}]};
@@ -117,7 +123,7 @@ it('invalidates disconnected approval cards and handles server replay with a new
   const request={id:'approval',method:'item/commandExecution/requestApproval',params:{threadId:'t',turnId:'turn',command:'echo test',availableDecisions:['accept','cancel']}};
   serve((m,s)=>{
     if(m.method==='thread/resume' && ++resumes===2)s.send(JSON.stringify(request));
-    if(m.method==='turn/start'){starts++;s.send(JSON.stringify(request));return {turn:{id:'turn'}};}
+    if(m.method==='thread/queue/add'){starts++;s.send(JSON.stringify(request));return {turn:{id:'turn'}};}
     if(m.method==='thread/turns/list')return {data:[{id:'turn',status:terminal?'completed':'inProgress',completedAt:terminal?1:null}]};
     if(m.id==='approval' && m.result){terminal=true;s.send(JSON.stringify({method:'serverRequest/resolved',params:{threadId:'t',requestId:'approval'}}));}
     return baseline(m);
@@ -137,7 +143,7 @@ it('invalidates disconnected approval cards and handles server replay with a new
 it('waits for the matching live completion when persisted history reports an undated interruption',async()=>{
   let starts=0,reads=0,finished=false;
   serve((m,s)=>{
-    if(m.method==='turn/start'){starts++;return {turn:{id:'turn',status:'inProgress'}};}
+    if(m.method==='thread/queue/add'){starts++;return {turn:{id:'turn',status:'inProgress'}};}
     if(m.method==='thread/turns/list'){
       reads++;
       s.send(JSON.stringify({method:'turn/completed',params:{threadId:'other',turn:{id:'turn',status:'failed'}}}));
@@ -156,7 +162,7 @@ it('waits for the matching live completion when persisted history reports an und
 it('does not call an undated inactive history entry a confirmed stop or resubmit it',async()=>{
   let starts=0;
   serve(m=>{
-    if(m.method==='turn/start'){starts++;return {turn:{id:'turn'}};}
+    if(m.method==='thread/queue/add'){starts++;return {turn:{id:'turn'}};}
     if(m.method==='thread/turns/list')return {data:[{id:'turn',status:'interrupted',completedAt:null}]};
     return baseline(m);
   });
