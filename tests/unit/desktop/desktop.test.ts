@@ -20,6 +20,7 @@ class FakeRpc implements RpcTransport {
   responses: any[] = [];
   listeners: Array<(m: RpcMessage) => void> = [];
   terminal = 'completed'; approval = false; dropStart = false; wrongThread = false; pageItems = true; desktopActive = false; threadLoaded = true;
+  steerIntoDesktop = false; extraDesktopMessage = false; lastSubmittedPrompt = 'ignored'; steered: string[] = [];
   extraRequest?: RpcMessage;
   connectCount = 0;
   async connect() { this.connected = true; this.connectCount++; }
@@ -37,6 +38,7 @@ class FakeRpc implements RpcTransport {
       case 'thread/resume': this.threadLoaded=true; thread.status.type=this.desktopActive?'active':'idle'; result = { thread }; break;
       case 'mcpServerStatus/list': result = {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]}; break;
       case 'turn/start':
+        this.lastSubmittedPrompt = params.input[0].text;
         if (this.dropStart) { this.connected = false; throw new Error('Response lost'); }
         if (this.extraRequest) { this.terminal='inProgress';this.emit(this.extraRequest); }
         if (this.approval) {
@@ -44,11 +46,16 @@ class FakeRpc implements RpcTransport {
           this.emit({ id:42, method:'item/commandExecution/requestApproval', params: { threadId:'thread', turnId:'turn', command:'Write-Output test', availableDecisions:['accept','cancel'] } });
           this.emit({ id:43, method:'item/commandExecution/requestApproval', params: { threadId:'other', turnId:'turn', command:'OTHER', availableDecisions:['accept'] } });
         }
-        result = { turn:{id:'turn'} }; break;
+        result = { turn:{id:this.steerIntoDesktop ? 'desktop-turn' : 'turn'} }; break;
       case 'thread/turns/list': result = { data: params.cursor ? [{id:'turn',status:this.terminal,completedAt:this.terminal==='inProgress'?null:1}] : [{id:'unrelated',status:'completed',completedAt:1}], nextCursor: params.cursor ? null : 'turns2' }; break;
-      case 'thread/items/list': result = params.cursor || !this.pageItems ? {data:[{turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'actual final'}}]} : {data:[{turnId:'turn',item:{type:'agentMessage',phase:'commentary',text:'not final'}}],nextCursor:'items2'}; break;
+      case 'thread/items/list': result = params.cursor || !this.pageItems
+        ? {data:[...this.steered.map(text=>({turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text}]}})),
+          ...(this.extraDesktopMessage?[{turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text:'desktop follow-up'}]}}]:[]),
+          {turnId:params.turnId,item:{type:'agentMessage',phase:'final_answer',text:'actual final'}}]}
+        : {data:[{turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text:this.steerIntoDesktop ? 'desktop prompt' : this.lastSubmittedPrompt}]}},
+          {turnId:params.turnId,item:{type:'agentMessage',phase:'commentary',text:'not final'}}],nextCursor:'items2'}; break;
       case 'turn/interrupt': this.terminal = 'interrupted'; result = {}; break;
-      case 'turn/steer': result = {}; break;
+      case 'turn/steer': this.steered.push(params.input[0].text); result = {}; break;
       default: throw new Error(method);
     }
     return result;
@@ -94,6 +101,29 @@ describe('desktop boundaries and history', () => {
     const rpc=new FakeRpc();rpc.dropStart=true;
     await expect(backend(rpc).execute('question',hooks())).rejects.toBeInstanceOf(UncertainExecution);
     expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+  });
+  it('does not claim a desktop-owned turn when turn/start steers across the idle gap',async()=>{
+    const rpc=new FakeRpc();rpc.steerIntoDesktop=true;
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();
+    const out=replies(),c=new DesktopController(config(),store,backend(rpc),out);
+    await c.start();await c.receive(incoming('race'));await c.idle();
+    const row=store.get('race');
+    expect(row?.state).toBe('uncertain');
+    expect(row?.turnId).toBeUndefined();
+    expect(row?.error).toContain('已由桌面消息开始');
+    expect(out.sent).toHaveLength(1);
+    expect(out.sent[0]).not.toContain('actual final');
+    expect(rpc.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+    expect(rpc.calls.some(c=>c.method==='turn/interrupt')).toBe(false);
+  });
+  it('does not attribute a mixed desktop and group answer to the group',async()=>{
+    const rpc=new FakeRpc();rpc.extraDesktopMessage=true;
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();
+    const out=replies(),c=new DesktopController(config(),store,backend(rpc),out);
+    await c.start();await c.receive(incoming('mixed'));await c.idle();
+    expect(store.get('mixed')).toMatchObject({state:'uncertain',turnId:'turn'});
+    expect(store.get('mixed')?.error).toContain('其他来源或未确认');
+    expect(out.sent[0]).not.toContain('actual final');
   });
   it('resumes known turns without starting another turn',async()=>{
     const rpc=new FakeRpc();await backend(rpc).execute('ignored',hooks(),'turn');
@@ -183,7 +213,7 @@ describe('durable single-group controller',()=>{
   it('reconciles a known turn and delivers its newly confirmed final result once',async()=>{
     const store=new DesktopLedger(config().stateFile,binding());await store.load();
     await store.add({messageId:'old',prompt:'question',replyInThread:true,state:'uncertain',turnId:'turn',result:'uncertain',receipt:'previous',deliveryAttempted:true});
-    const rpc=new FakeRpc(),out=replies();const c=new DesktopController(config(),store,backend(rpc),out);
+    const rpc=new FakeRpc(),out=replies();rpc.lastSubmittedPrompt='question';const c=new DesktopController(config(),store,backend(rpc),out);
     await c.start();await c.receive({...incoming('command'),content:'/reconcile'});await c.idle();
     expect(store.get('old')).toMatchObject({state:'completed',result:'actual final'});
     expect(out.sent.filter(x=>x==='actual final')).toHaveLength(1);expect(rpc.calls.some(x=>x.method==='turn/start')).toBe(false);
@@ -195,7 +225,7 @@ describe('P3 recovery and desktop concurrency', () => {
     const store = new DesktopLedger(config().stateFile, binding()); await store.load();
     await store.add({messageId:'old',prompt:'old',replyInThread:false,state:'running',turnId:'turn'});
     await store.add({messageId:'next',prompt:'next',replyInThread:false,state:'queued'});
-    const rpc = new FakeRpc(), out = replies();
+    const rpc = new FakeRpc(), out = replies(); rpc.lastSubmittedPrompt='old';
     const recovered = new DesktopLedger(config().stateFile, binding());
     const c = new DesktopController(config(), recovered, backend(rpc), out);
     await c.start(); await c.idle();
@@ -275,7 +305,7 @@ describe('P3 recovery and desktop concurrency', () => {
     const first = new FakeRpc(), second = new FakeRpc(); first.approval = true;
     const originalFirst = first.call.bind(first), originalSecond = second.call.bind(second);
     first.call = async (method, params) => { if(method === 'thread/turns/list') { first.connected = false; throw new Error('wire dropped'); } return originalFirst(method,params); };
-    second.desktopActive = true;
+    second.desktopActive = true; second.lastSubmittedPrompt='approval';
     second.call = async (method, params) => {
       const result = await originalSecond(method,params);
       if(method === 'thread/resume') {

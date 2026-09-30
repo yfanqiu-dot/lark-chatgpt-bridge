@@ -29,6 +29,11 @@ export interface BackendOptions {
 }
 export class UncertainExecution extends Error {}
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+function userMessageText(item: any): string | undefined {
+  if (item?.type !== 'userMessage' || !Array.isArray(item.content)) return undefined;
+  if (item.content.some((part: any) => part?.type !== 'text' || typeof part.text !== 'string')) return undefined;
+  return item.content.map((part: any) => part.text).join('');
+}
 
 export async function readDesktopToolConfig(config: Pick<DesktopConfig, 'connectionFile' | 'endpoint'>, waitMs = 0): Promise<Record<string, unknown>> {
   const until = Date.now() + waitMs;
@@ -63,6 +68,7 @@ export class DesktopBackend {
   private awaitingExecution = false;
   private approvals = new Map<string, Approval>();
   private connectionEpoch = 0;
+  private expectedUserMessages: string[] = [];
   constructor(readonly config: DesktopConfig, private readonly options: BackendOptions = {}) {}
   pendingApprovals(): Approval[] { return structuredClone([...this.approvals.values()]); }
   get currentTurn(): string | undefined { return this.activeTurn; }
@@ -135,6 +141,7 @@ export class DesktopBackend {
   async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
     this.busy = true; this.stopping = false; this.disconnected = false; this.awaitingExecution = true; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
+    this.expectedUserMessages = [prompt];
     let submitted = Boolean(resumeTurnId);
     try {
       await this.connect(Boolean(resumeTurnId));
@@ -180,6 +187,9 @@ export class DesktopBackend {
           // Preserve the task's existing permissions and approval reviewer.
         });
         if (!result.turn?.id) throw new UncertainExecution('turn/start response has no turn ID');
+        // turn/start may steer into a desktop-owned active turn after the last
+        // idle read. Its returned turn ID is not proof that we started it.
+        await this.verifyFirstUserMessage(result.turn.id, prompt);
         this.activeTurn = result.turn.id;
         await hooks.started(this.activeTurn!);
       }
@@ -202,6 +212,7 @@ export class DesktopBackend {
           const turn = this.completedTurn ?? (historyTurn?.completedAt != null ? historyTurn : undefined);
           if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
             const items = await this.readItems(this.activeTurn!);
+            this.verifyTurnInputs(items, this.activeTurn!);
             const text = items.filter((i: any) => i.type === 'agentMessage' && i.phase === 'final_answer').map((i: any) => i.text).join('\n\n');
             return { turnId: this.activeTurn!, status: turn.status, text: text || turn.error?.message || (turn.status === 'interrupted' ? '当前对话轮次已停止；已经启动的外部命令可能继续运行。' : '该轮次已结束，没有最终文本。') };
           }
@@ -225,7 +236,7 @@ export class DesktopBackend {
       throw e;
     } finally {
       for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
-      this.approvals.clear(); ++this.connectionEpoch; this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.awaitingExecution = false; this.busy = false;
+      this.approvals.clear(); ++this.connectionEpoch; this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.expectedUserMessages = []; this.awaitingExecution = false; this.busy = false;
     }
   }
   private async processMessages(hooks: BackendHooks): Promise<void> {
@@ -276,6 +287,7 @@ export class DesktopBackend {
   async steer(text: string): Promise<void> {
     if (!this.activeTurn || !this.rpc?.connected || this.stopping) throw new Error('没有可追加指令的活动任务');
     await this.rpc.call('turn/steer', { threadId: this.config.threadId, expectedTurnId: this.activeTurn, input: [{ type: 'text', text }] });
+    this.expectedUserMessages.push(text);
   }
   private async interruptKnownTurn(): Promise<void> {
     try { await this.rpc!.call('turn/interrupt', { threadId: this.config.threadId, turnId: this.activeTurn }); }
@@ -303,5 +315,23 @@ export class DesktopBackend {
       if (cursor && seen.has(cursor)) throw new Error('Repeated item cursor'); if (cursor) seen.add(cursor);
     } while (cursor);
     return items;
+  }
+  private async verifyFirstUserMessage(turnId: string, prompt: string): Promise<void> {
+    const until = Date.now() + 5_000;
+    while (true) {
+      const first = (await this.readItems(turnId)).find(item => item.type === 'userMessage');
+      if (first) {
+        if (userMessageText(first) !== prompt) throw new UncertainExecution(`轮次 ${turnId} 已由桌面消息开始，飞书请求可能并入其中；请在桌面核对，未自动重试。`);
+        return;
+      }
+      if (Date.now() >= until) throw new UncertainExecution(`轮次 ${turnId} 无法核实首条用户消息；请在桌面核对，未自动重试。`);
+      await delay(this.options.pollMs ?? 250);
+    }
+  }
+  private verifyTurnInputs(items: any[], turnId: string): void {
+    const inputs = items.filter(item => item.type === 'userMessage').map(userMessageText);
+    if (inputs.length !== this.expectedUserMessages.length || inputs.some((text, index) => text !== this.expectedUserMessages[index])) {
+      throw new UncertainExecution(`轮次 ${turnId} 含有其他来源或未确认的用户消息，无法将最终答复归属飞书请求；请在桌面核对，未自动重试。`);
+    }
   }
 }

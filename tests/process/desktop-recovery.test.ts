@@ -37,7 +37,7 @@ function run(mode:string) {
 }
 
 it.each(['known','unknown'])('survives actual process termination with %s turn identity and never replays the original start',async identity=>{
-  let starts=0,completed=false,notifyStart:()=>void=()=>{};
+  let starts=0,completed=false,prompt='',notifyStart:()=>void=()=>{};
   const started=new Promise<void>(resolve=>{notifyStart=resolve;});
   server.on('connection',socket=>socket.on('message',data=>{
     const m=JSON.parse(data.toString());if(m.id===undefined)return;
@@ -45,9 +45,11 @@ it.each(['known','unknown'])('survives actual process termination with %s turn i
     if(m.method==='project/list')result={data:[{id:'project',roots:[{path:dir}]}]};
     if(['thread/read','thread/resume'].includes(m.method))result={thread:{id:'thread',projectId:'project',cwd:dir,status:{type:starts&&!completed?'active':'idle'}}};
     if(m.method==='mcpServerStatus/list')result={data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]};
-    if(m.method==='turn/start'){starts++;notifyStart();if(identity==='unknown')return;result={turn:{id:'original-turn'}};}
+    if(m.method==='turn/start'){starts++;prompt=m.params.input[0].text;notifyStart();if(identity==='unknown')return;result={turn:{id:'original-turn'}};}
     if(m.method==='thread/turns/list')result={data:[{id:'original-turn',status:completed?'completed':'inProgress',completedAt:completed?1:null}]};
-    if(m.method==='thread/items/list')result={data:[{turnId:'original-turn',item:{type:'agentMessage',phase:'final_answer',text:'durable answer'}}]};
+    if(m.method==='thread/items/list')result={data:[
+      {turnId:'original-turn',item:{type:'userMessage',content:[{type:'text',text:prompt}]}},
+      {turnId:'original-turn',item:{type:'agentMessage',phase:'final_answer',text:'durable answer'}}]};
     socket.send(JSON.stringify({id:m.id,result}));
   }));
   const first=run('initial');

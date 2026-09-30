@@ -9,7 +9,9 @@ import type { DesktopConfig } from '../../../src/desktop/config';
 
 let server: WebSocketServer, dir: string, endpoint: string;
 let clients: DesktopRpc[];
+let submittedPrompt = '';
 beforeEach(async () => {
+  submittedPrompt = '';
   dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-transport-')));
   server = new WebSocketServer({host:'127.0.0.1',port:0});
   await new Promise<void>(resolve => server.once('listening', resolve));
@@ -29,6 +31,7 @@ type Handler = (m:any,s:WebSocket)=>unknown;
 function serve(handler:Handler) {
   server.on('connection',socket=>socket.on('message',data=>{
     const m=JSON.parse(data.toString());
+    if (m.method === 'turn/start') submittedPrompt = m.params.input[0].text;
     if (m.id===undefined || !m.method) { handler(m,socket);return; }
     if (m.method==='initialize') { socket.send(JSON.stringify({id:m.id,result:{}}));return; }
     const result=handler(m,socket);
@@ -39,7 +42,9 @@ function baseline(m:any) {
   if(m.method==='mcpServerStatus/list')return {data:[{name:'codex_app',runtimeStatus:'connected',tools:{list_projects:{name:'list_projects'}}}]};
   if(m.method==='project/list')return {data:[{id:'p',roots:[{path:dir}]}]};
   if(['thread/read','thread/resume'].includes(m.method))return {thread:{id:'t',projectId:'p',cwd:dir,status:{type:'idle'}}};
-  if(m.method==='thread/items/list')return {data:[{turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'结果'}}]};
+  if(m.method==='thread/items/list')return {data:[
+    {turnId:'turn',item:{type:'userMessage',content:[{type:'text',text:submittedPrompt}]}},
+    {turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'结果'}}]};
 }
 
 it('correlates responses, routes server requests, rejects RPC errors and times out without replay',async()=>{
