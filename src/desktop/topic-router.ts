@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import type { DesktopConfig } from './config';
 import type { InboundMessage } from './controller';
-import { TopicRegistry, parseCreateTopic, type TopicConfig, type TopicRecord } from './topics';
+import { TopicRegistry, parseCreateTopic, topicChatEnabled, validateTopicScope, type TopicConfig, type TopicRecord } from './topics';
 import { TopicProvisioner } from './topic-provisioner';
 
 export interface TopicController {
@@ -34,8 +34,9 @@ export class TopicRouter {
     private readonly factory: TopicControllerFactory, private readonly replies: TopicReply,
     private readonly onActive?: (row: TopicRecord) => Promise<void>) {}
   async start(): Promise<void> {
-    await this.registry.load();
-    if (this.config.existing) {
+    await this.registry.load(true);
+    validateTopicScope(this.config, this.registry.all());
+    if (this.config.existing && topicChatEnabled(this.config, this.config.existing.chatId)) {
       const e = this.config.existing, project = this.config.projects.find(p => p.key === e.projectKey)!;
       const c = this.factory({ appId: this.config.appId, appSecretEnv: this.config.appSecretEnv, ownerOpenId: this.config.ownerOpenId,
         chatId: e.chatId, projectId: project.projectId, projectRoot: project.projectRoot, threadId: e.threadId,
@@ -43,10 +44,10 @@ export class TopicRouter {
         model: this.config.model, requireMention: this.config.requireMention, maxQueue: this.config.maxQueue });
       await c.start(); this.controllers.set(e.chatId, c);
     }
-    for (const row of this.registry.all().filter(r => r.stage === 'active')) await this.attach(row);
+    for (const row of this.registry.all().filter(r => r.stage === 'active' && topicChatEnabled(this.config, r.chatId!))) await this.attach(row);
   }
   receive(message: InboundMessage): Promise<void> {
-    if (this.stopping) return Promise.resolve();
+    if (this.stopping || !topicChatEnabled(this.config, message.chatId)) return Promise.resolve();
     // Only entry-group provisioning shares a queue. Existing groups have their
     // own controller queues, so slow creation cannot block /stop elsewhere.
     const task = message.chatId === this.config.entryChatId
@@ -70,6 +71,10 @@ export class TopicRouter {
       catch (error) { await this.replies.send(message.chatId, String(error), message.messageId, message.replyInThread); return; }
       const resume = /^\/topic\s+resume\s+(\S+)$/i.exec(message.content.trim());
       if (create || resume) {
+        if (this.config.allowTopicCreation === false) {
+          await this.replies.send(message.chatId, '当前部署已关闭话题创建与接续，请保留原绑定。', message.messageId, message.replyInThread);
+          return;
+        }
         try {
           const previous = resume ? this.registry.byRequest(resume[1]!) : undefined;
           if (resume && !previous) throw new Error('找不到该创建请求');
@@ -92,13 +97,14 @@ export class TopicRouter {
       }
     }
     if (message.chatId !== this.config.entryChatId && /^\/topic\b/i.test(message.content.trim()) && this.controllers.has(message.chatId)) {
-      await this.replies.send(message.chatId, `请在入口群 ${this.config.entryChatId} 使用 /topic new <projectKey> <名称>。`, message.messageId, message.replyInThread);
+      await this.replies.send(message.chatId, this.config.allowTopicCreation === false ? '当前部署已关闭话题创建与接续，请保留原绑定。' : `请在入口群 ${this.config.entryChatId} 使用 /topic new <projectKey> <名称>。`, message.messageId, message.replyInThread);
       return;
     }
     await this.controllers.get(message.chatId)?.receive(message);
   }
   async decideFromCard(chatId: string, operator: string, token: string, decision: string): Promise<void> {
     if (this.stopping) throw new Error('桥接正在停止，请在桌面处理审批');
+    if (!topicChatEnabled(this.config, chatId)) throw new Error('该群未纳入当前灰度范围，请在桌面处理审批');
     const controller = this.controllers.get(chatId); if (!controller) throw new Error('群尚未绑定桌面对话');
     await controller.decideFromCard(chatId, operator, token, decision);
   }

@@ -24,7 +24,9 @@ export class ApprovalJournal {
   private timer?: ReturnType<typeof setInterval>;
   private stopping = false;
   constructor(readonly path: string, private readonly binding: unknown, private readonly port: ApprovalCardPort,
-    private readonly retryMs = 5_000) {}
+    private readonly retryMs = 5_000, private readonly enabledChatIds?: readonly string[]) {}
+
+  private enabled(chatId: string): boolean { return this.enabledChatIds === undefined || this.enabledChatIds.includes(chatId); }
 
   async start(): Promise<void> {
     try {
@@ -40,7 +42,7 @@ export class ApprovalJournal {
       }
       this.records = saved.cards;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-    for (const card of this.records) if (card.state !== 'closed') card.state = card.messageId ? 'closing' : 'unknown';
+    for (const card of this.records) if (this.enabled(card.chatId) && card.state !== 'closed') card.state = card.messageId ? 'closing' : 'unknown';
     await this.save();
     const retry = () => { void this.flush().catch(e => console.error('Approval journal persistence failed:', String(e))); };
     // A Feishu outage must not hold up all group controllers at startup.
@@ -51,6 +53,7 @@ export class ApprovalJournal {
 
   async publish(chatId: string, request: Approval, replyTo: string, replyInThread: boolean): Promise<void> {
     if (this.stopping) throw new Error('Approval journal is shutting down');
+    if (!this.enabled(chatId)) throw new Error('Approval chat is outside rollout scope');
     if (this.records.some(c => c.token === request.token)) throw new Error('Approval card send already attempted');
     const card: CardRecord = { token: request.token, chatId, state: 'sending' };
     this.records.push(card);
@@ -71,14 +74,14 @@ export class ApprovalJournal {
 
   async resolved(token: string): Promise<void> {
     const card = this.records.find(c => c.token === token);
-    if (!card || card.state === 'closed' || !card.messageId) return;
+    if (!card || !this.enabled(card.chatId) || card.state === 'closed' || !card.messageId) return;
     card.state = 'closing';
     await this.save();
     await this.flush();
   }
 
   pending(chatId?: string): { closing: number; unknown: number } {
-    const cards = this.records.filter(c => chatId === undefined || c.chatId === chatId);
+    const cards = this.records.filter(c => this.enabled(c.chatId) && (chatId === undefined || c.chatId === chatId));
     return { closing: cards.filter(c => c.state === 'closing').length, unknown: cards.filter(c => c.state === 'unknown').length };
   }
 
@@ -86,7 +89,7 @@ export class ApprovalJournal {
     if (this.stopping) return this.flushing ?? Promise.resolve();
     if (this.flushing) return this.flushing;
     this.flushing = (async () => {
-      for (const card of this.records.filter(c => c.state === 'closing')) {
+      for (const card of this.records.filter(c => this.enabled(c.chatId) && c.state === 'closing')) {
         if (this.stopping) break;
         try { await this.port.close(card.messageId!); }
         catch { continue; } // Retain durable closing intent for the next retry/restart.

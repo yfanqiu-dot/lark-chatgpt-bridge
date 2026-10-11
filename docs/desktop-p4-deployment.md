@@ -1,0 +1,98 @@
+# P4 部署开发与灰度运行手册
+
+更新：2026-10-11。P3 已在本人确认的范围内关闭；P4 当前完成首批部署基础代码，尚未切换常驻消费者。
+
+## 首批实现
+
+| 能力 | 行为 |
+| --- | --- |
+| 单群灰度 | `enabledChatIds` 限定监听控制器、消息、审批及项目记录同步范围；初始部署仅允许一个已有群 |
+| 禁止新资源 | 灰度配置必须显式 `allowTopicCreation=false`；拒绝创建、接续创建和灰度配置下的绑定修复 |
+| 启动预检 | 未找到选中群的活动绑定、项目归属改变或重复绑定时，在连接飞书之前拒绝启动 |
+| 部署快照 | `prepare` 保存白名单配置、旧启动引用、文件 SHA 和账本状态计数，不复制任意配置字段或消息正文 |
+| 变更检测 | `verify` 核对版本、配置、构建和原绑定；账本允许追加真实进展，不要求回到旧 SHA |
+| 只读诊断 | `diagnose --native` 核对项目、任务身份、已完成历史、等待审批及分页队列；不提交模型输入 |
+| 回退检查 | `rollback-check` 检查新 host/监听锁是否已释放；禁止用旧快照覆盖当前账本 |
+
+未填写 `enabledChatIds` 的既有配置保持原多群行为。`allowTopicCreation` 默认保留现有创建能力；灰度配置不能沿用该默认值。名单外群不会启动控制器、恢复任务、处理卡片或同步项目记录，已有记录继续保留。
+
+## 准备单群候选
+
+Node.js 22 及以上。以下命令只准备文件或读取状态，不启动、停止服务，不调用飞书 API。
+
+```powershell
+node bin/lark-chatgpt-deploy.mjs prepare D:\bridge-local\deployment.json D:\bridge-local\stage-001
+node bin/lark-chatgpt-deploy.mjs verify D:\bridge-local\stage-001
+node bin/lark-chatgpt-deploy.mjs diagnose D:\bridge-local\stage-001
+node bin/lark-chatgpt-deploy.mjs diagnose D:\bridge-local\stage-001 --native
+node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
+```
+
+`prepare` 的目标目录必须不存在，父目录预先建立。失败后保留部分目录用于检查，不覆盖或自动删除。命令退出码：成功 `0`，检查失败 `1`，`rollback-check` 发现新运行锁未释放 `2`。回退检查的退出码0仅表示锁检查通过，仍需实际进程身份和唯一消费者核对。
+
+`deployment.json` 结构：
+
+```json
+{
+  "hostConfigFile": "D:\\bridge-local\\host.json",
+  "topicConfigFile": "D:\\bridge-local\\topics-gray.json",
+  "codeRevision": "0000000000000000000000000000000000000000",
+  "artifactFiles": [
+    "D:\\bridge\\dist\\desktop-host.js",
+    "D:\\bridge\\dist\\desktop-topics.js",
+    "D:\\bridge\\dist\\desktop-deploy.js",
+    "D:\\bridge\\bin\\desktop-package-broker.ps1",
+    "D:\\bridge\\bin\\desktop-package-broker-task.ps1"
+  ],
+  "expectedToolNames": ["list_projects"],
+  "legacy": {
+    "scheduledTaskName": "LarkChannelBridge.Bot.codex",
+    "executable": "D:\\nodejs\\node.exe",
+    "entryPoint": "D:\\legacy\\bin\\lark-channel-bridge.mjs",
+    "profile": "codex",
+    "configFiles": ["D:\\legacy-local\\config.json", "D:\\legacy-local\\launcher.cmd", "D:\\legacy-local\\launcher-hidden.vbs"]
+  }
+}
+```
+
+示例中的路径、全零提交及最小工具名单均为占位；使用实际代码提交、全部运行文件及完整已验收工具目录。准备命令校验文件存在及 SHA，不查询 Git 服务证明提交归属，因此操作者须从已交付提交构建。Host 使用 P3 已验收的版本与二进制 SHA。Topics 使用同一 endpoint、connectionFile 和 registry，并指向原账本；增加一个选中群和禁止创建设置即可，不重建对话。
+
+快照目录包含 `host.json`、`topics.json`、`legacy-launch.json` 和 `manifest.json`。前两项只保存明确配置字段，旧启动记录只保存计划任务名、路径和 profile，旧配置原文及认证数据仅计算 SHA，继续留在原位置。快照不是完整灾备包，也不是签名发布物；需要限制本机访问权限。仓库 `.p4-local` 被忽略，不上传本机身份与证据。
+
+## 诊断结论的含义
+
+| finding | 说明 |
+| --- | --- |
+| `desktop_lease_unavailable` | 共享桌面证明不存在、过期或无法验证；普通桌面模式下属于预期 |
+| `tool_catalog_or_version_mismatch` | 工具目录、桌面版本或 CLI SHA 与部署基线不一致 |
+| `project_unbound_or_unavailable` | 原生项目或对应根目录无法验证 |
+| `native_binding_mismatch` | 原任务 ID、项目或根目录不匹配 |
+| `history_incompatible` | 未找到持久化的已完成历史；不自动新建任务 |
+| `permission_denied` | 原生 RPC 返回权限拒绝；不扩大权限或代为批准 |
+| `protocol_unsupported` | 原生服务不支持所需读取方法 |
+| `waiting_approval` | 实际原生状态含 `waitingOnApproval`，需要本人处理 |
+| `native_turn_active` / `native_queue_pending` | 原生轮次活动或队列未清空，不能据此执行空闲切换 |
+| `native_state_unavailable` | 原生连接或读取失败，状态不明 |
+| `queue_busy` / `uncertain_paused` | 选中群账本有排队、运行、提交中或待核对记录 |
+| `approval_card_pending` | 选中群持久卡片未关闭；不能代替原生待审批状态证明 |
+| `saved_result_pending` | 有结果尚无回执；显式取回时仍须防止重复发送 |
+
+报告只输出状态计数和配置引用，不输出提示词、结果、原始错误、认证数据或 MCP 配置。`--native` 仅在新鲜租约且完整版本/工具基线一致时读取原生服务，使用 `project/list`、`thread/read`、`thread/turns/list`、`thread/queue/list`。原生身份及历史通过不意味着任务空闲；需同时核对 findings。
+
+## 正式切换顺序（后续实现及现场验收）
+
+1. 完整备份旧启动定义、非敏感配置及受保护凭据恢复方式；保留原账本、审批回执和历史失败，不替换为旧快照。
+2. 准备独立生产监督器和包内启动器，脱离当前桌面会话生命周期；登录启动、正常停止和异常回退均保存实际身份、创建时间及工具证明。
+3. 所有相关桌面任务空闲、原生队列空、审批关闭后停止旧消费者；复核旧消费者为零，再启动唯一新消费者。现有应用锁不能代替跨安装目录的实际进程检查。
+4. 首先只启用原 C 群，话题创建关闭。旧消费者按同一机器人全局停止后，名单外群暂不由任何消费者处理；正式灰度窗口前明确此影响，再由本人发送全新标记验证普通文本闭环及桌面飞书工具。
+5. 做一次同一窗口的受控回退：先停止新监听，再停止 host，确认普通桌面恢复；新进程/运行锁均清理后才恢复唯一旧消费者。自动回退不得重放模型输入或发送未知回执结果。
+6. 扩群前逐群核对项目、历史可恢复性及待核对记录。A/B历史 `uncertain` 不因部署而清除；不能直接视为可迁移成功。完成单群灰度与回退后，才制定逐群扩展顺序。
+7. 最后安排升级回归、CLI 依赖清理与旧启动项退役。飞书 CLI 仍供桌面工具使用，不能因旧消费者退役而一并删除。
+
+当前命令不会自动执行以上服务切换。`rollback-check` 不终止进程、不恢复配置、不删除活锁、不启动旧服务，不作为故障回退已验收的证据。
+
+## 验证与保留边界
+
+首批新增13项 P4 专项测试；结合既有话题/审批测试32项通过。2026-10-11本机全仓117个测试文件、796项通过，TypeScript与构建通过。测试覆盖真实临时文件和本机 WebSocket 读取协议，未冒充现场飞书灰度。
+
+P3 已接受的反向输入归属保护限制保持：群任务运行时桌面追加可能进入同一轮次，Bridge 对混合来源保持 `uncertain` 并暂停本群，不能承诺双向独立轮次。长时观察不作为P3关闭考核，本轮未执行。P4 的常驻上线、真实灰度、监督器、回退及扩群验收仍待完成。

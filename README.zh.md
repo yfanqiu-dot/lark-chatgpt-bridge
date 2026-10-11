@@ -2,6 +2,8 @@
 
 > 本二开仓库新增 Codex 桌面后端：[P1 运行说明与当前验证状态](README.desktop.md)。下文保留上游 CLI 使用说明。
 
+P4 已启动部署基础开发：[单群灰度、部署快照与只读诊断](docs/desktop-p4-deployment.md)。当前尚未切换常驻消费者。
+
 把飞书 / Lark 消息和本地 Claude Code 或 Codex CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
 
 [English README](./README.md)

@@ -11,7 +11,7 @@ import { DesktopController } from './controller';
 import { DesktopLedger } from './ledger';
 import { approvalCard, resolvedCard } from './cards';
 import { desktopInbound } from './inbound';
-import { parseTopicConfig, TopicRegistry } from './topics';
+import { parseTopicConfig, TopicRegistry, topicChatEnabled, validateTopicScope } from './topics';
 import { TopicProvisioner } from './topic-provisioner';
 import { CodexTopicResources, topicResources } from './topic-resources';
 import { TopicRouter } from './topic-router';
@@ -27,6 +27,7 @@ async function main(): Promise<void> {
     await writeFileAtomic(`${config.registryFile}.stop`, 'Stop the topic bridge gracefully'); return;
   }
   if (mode === '--repair-thread' || mode === '--repair-chat') {
+    if (config.enabledChatIds) throw new Error('Repair using the full binding config while all consumers are stopped; gray deployment cannot change bindings');
     if (!requestId || !resourceId) throw new Error('Repair requires a source message ID and verified resource ID');
     if (await lockfile.check(config.registryFile, {realpath:false})) throw new Error('Stop the topic bridge before repairing its registry');
     const unlock = await lockfile.lock(config.registryFile, {realpath:false,retries:0});
@@ -43,6 +44,9 @@ async function main(): Promise<void> {
   // A live host temporarily removes its lease while revalidating desktop tools.
   // Wait for a fresh, fully verified lease when starting a listener; --check
   // remains fail-fast so an operator can inspect readiness without waiting.
+  const preflightRegistry = new TopicRegistry(config.registryFile);
+  await preflightRegistry.load(true);
+  validateTopicScope(config, preflightRegistry.all());
   await readDesktopToolConfig(config, mode === '--run' ? 45_000 : 0);
   const codex = new CodexTopicResources(config);
   for (const project of config.projects) await codex.verifyProject(project);
@@ -56,13 +60,15 @@ async function main(): Promise<void> {
   catch (e) { await appLock.release(); throw e; }
   const release = async () => { await releaseRegistry(); await appLock.release(); };
   const registry = new TopicRegistry(config.registryFile);
+  try { await registry.load(true); validateTopicScope(config, registry.all()); }
+  catch (e) { await release(); throw e; }
   const archive = new TopicArchive(config,registry);
   const channel = createLarkChannel({appId:config.appId,appSecret:secret,domain:'https://open.feishu.cn',source:'lark-chatgpt-topics',resolveChatMode:true,
     policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},outbound:desktopOutboundConfig,respectProxyEnv:true,httpTimeoutMs:30_000});
   const cards = new ApprovalJournal(`${config.registryFile}.approvals.json`, {appId:config.appId,ownerOpenId:config.ownerOpenId,entryChatId:config.entryChatId}, {
     send:async(chatId,request,replyTo,replyInThread)=>(await channel.send(chatId,{card:approvalCard(request)},{replyTo,replyInThread})).messageId,
     close:async messageId=>{await channel.updateCard(messageId,resolvedCard());},
-  });
+  }, 5_000, config.enabledChatIds);
   const send = async (chatId:string,text:string,replyTo:string,replyInThread:boolean) => (await channel.send(chatId,{markdown:text},{replyTo,replyInThread})).messageId;
   const router = new TopicRouter(config,registry,new TopicProvisioner(config,registry,topicResources(config,secret)),
     bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound),{
@@ -93,9 +99,9 @@ async function main(): Promise<void> {
     stopWatcher=setInterval(()=>{void readFile(`${config.registryFile}.stop`,'utf8').then(shutdown).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT'){console.error('Topic bridge shutdown failed:',String(e));process.exitCode=1;}});},1000);
     let syncing=false;
     archiveWatcher=setInterval(()=>{if(syncing)return;syncing=true;void (async()=>{
-      for(const row of registry.all().filter(r=>r.stage==='active'))await archive.sync(row).catch(e=>console.error(`Topic archive ${row.chatId}:`,String(e)));
+      for(const row of registry.all().filter(r=>r.stage==='active' && topicChatEnabled(config,r.chatId!)))await archive.sync(row).catch(e=>console.error(`Topic archive ${row.chatId}:`,String(e)));
     })().finally(()=>{syncing=false;});},60_000);
-    console.log(`Topic bridge ready for entry chat ${config.entryChatId}`);
+    console.log(`Topic bridge ready: ${config.enabledChatIds ? `selected chats ${config.enabledChatIds.join(',')}` : `all bindings, entry chat ${config.entryChatId}`}; topic creation ${config.allowTopicCreation === false ? 'disabled' : 'enabled'}`);
   }catch(e){readyReject(e);await shutdown();throw e;}
 }
 void main().catch(e=>{console.error(String(e));process.exitCode=1;});

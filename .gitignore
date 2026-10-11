@@ -27,5 +27,6 @@ tests-smoke/
 .p1-local/
 .p2-local/
 .p3-local/
+.p4-local/
 .feishu-bridge/
 *.local.json

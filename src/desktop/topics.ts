@@ -9,6 +9,9 @@ export interface TopicConfig {
   endpoint: string; connectionFile: string; registryFile: string; stateDir: string;
   projects: TopicProject[]; requireMention: boolean; maxQueue: number; model?: string;
   existing?: { chatId: string; projectKey: string; threadId: string; stateFile: string };
+  /** Omitted means all bindings. Gray rollout never provisions new resources. */
+  enabledChatIds?: string[];
+  allowTopicCreation?: boolean;
 }
 
 export function parseTopicConfig(raw: unknown): TopicConfig {
@@ -36,7 +39,29 @@ export function parseTopicConfig(raw: unknown): TopicConfig {
     if (!e || typeof e !== 'object' || typeof e.chatId !== 'string' || !/^oc_[a-zA-Z0-9]+$/.test(e.chatId) || typeof e.projectKey !== 'string' || !projects.some(p => p.key === e.projectKey) || typeof e.threadId !== 'string' || !e.threadId || typeof e.stateFile !== 'string' || !isAbsolute(e.stateFile)) throw new Error('Invalid existing desktop binding');
     config.existing = { chatId: e.chatId, projectKey: e.projectKey, threadId: e.threadId, stateFile: resolve(e.stateFile) };
   }
+  if (r.allowTopicCreation !== undefined && typeof r.allowTopicCreation !== 'boolean') throw new Error('allowTopicCreation must be boolean');
+  if (r.allowTopicCreation !== undefined) config.allowTopicCreation = r.allowTopicCreation;
+  if (r.enabledChatIds !== undefined) {
+    if (!Array.isArray(r.enabledChatIds) || !r.enabledChatIds.length || r.enabledChatIds.some(id => typeof id !== 'string' || !/^oc_[a-zA-Z0-9]+$/.test(id)) || new Set(r.enabledChatIds).size !== r.enabledChatIds.length) throw new Error('Invalid enabledChatIds');
+    if (config.allowTopicCreation !== false) throw new Error('Gray rollout requires allowTopicCreation=false');
+    config.enabledChatIds = [...r.enabledChatIds];
+  }
   return config;
+}
+
+export function topicChatEnabled(config: TopicConfig, chatId: string): boolean {
+  return config.enabledChatIds === undefined || config.enabledChatIds.includes(chatId);
+}
+
+/** Fail before connecting Feishu or starting any controller. */
+export function validateTopicScope(config: TopicConfig, rows: TopicRecord[]): void {
+  const bindings = rows.filter(r => r.stage === 'active');
+  if (config.existing && bindings.some(r => r.chatId === config.existing!.chatId || r.threadId === config.existing!.threadId)) throw new Error('Existing binding conflicts with topic registry');
+  for (const row of bindings.filter(r => topicChatEnabled(config, r.chatId!))) {
+    const project = config.projects.find(p => p.key === row.projectKey);
+    if (!project || project.projectId !== row.projectId || project.projectRoot !== resolve(row.projectRoot)) throw new Error('Selected topic binding does not match configured project');
+  }
+  for (const id of config.enabledChatIds ?? []) if (id !== config.existing?.chatId && !bindings.some(r => r.chatId === id)) throw new Error(`Selected chat has no active binding: ${id}`);
 }
 
 export type TopicStage = 'planned' | 'thread_creating' | 'thread_initializing' | 'thread_ready' | 'chat_creating' | 'chat_ready' | 'active';
@@ -50,7 +75,7 @@ export class TopicRegistry {
   private rows: TopicRecord[] = [];
   private writes: Promise<void> = Promise.resolve();
   constructor(readonly path: string) {}
-  async load(): Promise<void> {
+  async load(readOnly = false): Promise<void> {
     try {
       const saved = JSON.parse(await readFile(this.path, 'utf8'));
       if (saved.version !== 1 || !Array.isArray(saved.topics)) throw new Error('Topic registry version mismatch');
@@ -65,7 +90,7 @@ export class TopicRegistry {
       }
       this.rows = saved.topics;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-    await this.save();
+    if (!readOnly) await this.save();
   }
   all(): TopicRecord[] { return structuredClone(this.rows); }
   byRequest(id: string): TopicRecord | undefined { return this.all().find(r => r.requestId === id); }
