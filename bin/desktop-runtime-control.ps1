@@ -46,6 +46,19 @@ function Assert-Identity($expected,$expectedRole){
   if($expectedRole -eq 'legacy' -and $taskCurrent.ExecutablePath -ne $taskConfig.legacy.executable){throw 'Legacy executable changed'}
   return $taskCurrent
 }
+function Normalize-TaskDefinition($xmlText,[bool]$enabled){
+  $taskDocument=[xml]$xmlText
+  $taskSettingsNode=$taskDocument.SelectSingleNode('//*[local-name()="Settings"]')
+  if($null -eq $taskSettingsNode){throw 'Legacy task settings are missing'}
+  $taskEnabledNode=$taskSettingsNode.SelectSingleNode('*[local-name()="Enabled"]')
+  if($null -ne $taskEnabledNode){
+    if($taskEnabledNode.InnerText -notin @('true','false') -or (($taskEnabledNode.InnerText -eq 'true') -ne $enabled)){throw 'Legacy task enabled state differs from export'}
+    [void]$taskSettingsNode.RemoveChild($taskEnabledNode)
+  }elseif(!$enabled){throw 'Disabled legacy task export omits enabled state'}
+  # Export omits Enabled when the task uses its default true value. Exclude
+  # only that setting from the definition hash so enable/disable stays stable.
+  return @{xml=$xmlText;sha256=(Get-Sha $taskDocument.OuterXml);enabled=$enabled}
+}
 function Read-TaskDefinition {
   $taskScheduled=Get-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName
   if(@($taskScheduled.Actions).Count -ne 1){throw 'Legacy task has unexpected actions'}
@@ -55,12 +68,8 @@ function Read-TaskDefinition {
   $taskScript=$taskAction.Arguments.Trim().Trim('"')
   if([IO.Path]::GetFullPath($taskAction.Execute) -ne (Join-Path $env:SystemRoot 'System32\wscript.exe') -or ![IO.Path]::IsPathRooted($taskScript) -or !$taskScript.EndsWith('.vbs',[StringComparison]::OrdinalIgnoreCase) -or $taskScript -notin $taskConfig.legacy.configFiles){throw 'Legacy task launcher is not in verified configuration'}
   $taskXml=[string](Export-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName)
-  $taskDocument=[xml]$taskXml
-  $taskEnabledNode=$taskDocument.SelectSingleNode('//*[local-name()="Settings"]/*[local-name()="Enabled"]')
-  if(!$taskEnabledNode){throw 'Legacy task enabled state is missing'}
-  $taskEnabled=$taskEnabledNode.InnerText -eq 'true'
-  $taskEnabledNode.InnerText='true'
-  return @{xml=$taskXml;sha256=(Get-Sha $taskDocument.OuterXml);enabled=$taskEnabled}
+  if($null -eq $taskScheduled.Settings.Enabled){throw 'Legacy task enabled state is missing'}
+  return Normalize-TaskDefinition $taskXml ([bool]$taskScheduled.Settings.Enabled)
 }
 if($Action -eq 'Snapshot'){
   $taskResult=@{legacy=@();desktop=@();host=@();listener=@();broker=@()}
