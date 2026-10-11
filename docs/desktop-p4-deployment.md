@@ -118,6 +118,8 @@ node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:
 
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 
+最终编码修复候选 `f8e27e3` 重新完成上述只读检查，并从真实备份文件按字节解析XML成功。最新可用证据为 `.p4-local/supervisor-f8e27e3/verification.json`；旧 `8ccbd7a` 备份存在编码声明问题，作为缺陷原始证据保留，不用作恢复XML文件。全程没有执行旧任务修改、桌面关闭或消费者切换。
+
 原C群本机候选 `6f2f1ad` 已通过实际 `prepare / verify / diagnose / rollback-check`：原绑定保留、C账本17条completed及3条failed，无queued/running/submitting/uncertain；A/B各一条历史uncertain不变，新运行锁未持有。原三次故障回传的无回执事实仍保留，其中C10/C12有带ID取回回执，C7有无ID `/result` 回执与既有现场对应证据。候选不把无ID取回自动归因，也不重发任何旧结果。普通桌面模式没有共享租约，诊断的 `desktop_lease_unavailable` 属预期；未运行共享原生诊断或真实飞书灰度。
 
 P3 已接受的反向输入归属保护限制保持：群任务运行时桌面追加可能进入同一轮次，Bridge 对混合来源保持 `uncertain` 并暂停本群，不能承诺双向独立轮次。长时观察不作为P3关闭考核，本轮未执行。P4 的常驻上线、真实灰度、生产监督器接入、现场回退及扩群验收仍待完成。
