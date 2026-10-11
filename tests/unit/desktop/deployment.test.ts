@@ -120,6 +120,14 @@ describe('P4 offline deployment and rollback guards', () => {
     const report = await diagnoseDeployment(stage); expect(report.ledgers[2]?.counts).toEqual({ failed: 1, completed: 1 });
     expect(JSON.stringify(report)).not.toContain('SECRET_'); expect(report.findings).toContain('desktop_lease_unavailable');
     expect(report.rollback.ledgerRestoreAllowed).toBe(false); expect(await jsonFile(file)).toEqual(saved);
+    saved.messages.push({ messageId: 'ambiguous', prompt: 'PRIVATE_PROMPT', replyInThread: false, state: 'completed', result: 'SECRET_RESULT', deliveryAttempted: true });
+    saved.messages.push({ messageId: 'retrieve', prompt: '/result ambiguous', replyInThread: false, state: 'completed', result: 'SECRET_RESULT', receipt: 'retrieval-receipt', deliveryAttempted: true });
+    await save(file, saved);
+    const retrieved = await diagnoseDeployment(stage);
+    expect(retrieved.ledgers[2]).toMatchObject({ savedResultsPending: 0, deliveryReceiptsUnconfirmed: 1, savedResultsRetrieved: 1 });
+    expect(retrieved.findings).toContain('original_delivery_receipt_unconfirmed');
+    expect(retrieved.findings).not.toContain('saved_result_pending');
+    expect(await jsonFile(file)).toEqual(saved); // Original receipt stays absent.
   });
   it('blocks rollback readiness while either new runtime lock is live and does not remove locks', async () => {
     const { c, spec, stage } = await fixture(); await prepareDeployment(spec, stage);

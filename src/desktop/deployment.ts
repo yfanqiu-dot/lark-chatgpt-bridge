@@ -27,6 +27,8 @@ interface LedgerSummary {
   sha256: string;
   counts: Partial<Record<DeliveryState, number>>;
   savedResultsPending: number;
+  deliveryReceiptsUnconfirmed: number;
+  savedResultsRetrieved: number;
 }
 interface Snapshot {
   version: 1;
@@ -96,14 +98,22 @@ async function ledger(config: TopicConfig, binding: Binding): Promise<LedgerSumm
   const bytes = await readFile(file), saved = JSON.parse(bytes.toString('utf8'));
   if (saved.version !== 1 || !Array.isArray(saved.messages) || !saved.binding || Object.entries(binding).some(([k, v]) => saved.binding[k] !== v)) throw new Error('Ledger identity/version mismatch');
   const counts: LedgerSummary['counts'] = {}, ids = new Set<string>();
-  let savedResultsPending = 0;
+  let savedResultsPending = 0, deliveryReceiptsUnconfirmed = 0, savedResultsRetrieved = 0;
   for (const m of saved.messages) {
     if (!m || typeof m.messageId !== 'string' || ids.has(m.messageId) || !['queued', 'submitting', 'running', 'completed', 'interrupted', 'failed', 'uncertain'].includes(m.state) || (m.queueClientId !== undefined && m.queueClientId !== m.messageId)) throw new Error('Malformed ledger');
     ids.add(m.messageId);
     const state = m.state as DeliveryState; counts[state] = (counts[state] ?? 0) + 1;
-    if (typeof m.result === 'string' && !m.receipt) savedResultsPending++;
+    if (typeof m.result === 'string' && m.result && !m.receipt) {
+      if (!m.deliveryAttempted) savedResultsPending++;
+      else {
+        deliveryReceiptsUnconfirmed++;
+        // Explicit /result has its own message and receipt. Do not falsify the
+        // original ambiguous send's receipt or count that retrieval as a replay.
+        if (saved.messages.some((r: any) => r.state === 'completed' && r.receipt && typeof r.prompt === 'string' && /^\/result\s+(\S+)\s*$/i.exec(r.prompt.trim())?.[1] === m.messageId)) savedResultsRetrieved++;
+      }
+    }
   }
-  return { binding, file, sha256: digest(bytes), counts, savedResultsPending };
+  return { binding, file, sha256: digest(bytes), counts, savedResultsPending, deliveryReceiptsUnconfirmed, savedResultsRetrieved };
 }
 const proof = async (path: string): Promise<FileProof> => ({ path, sha256: digest(await readFile(path)) });
 
@@ -200,6 +210,7 @@ export async function diagnoseDeployment(directory: string, native = false) {
   if (selected.some(l => l.counts.uncertain)) findings.push('uncertain_paused');
   if (selected.some(l => l.counts.queued || l.counts.running || l.counts.submitting)) findings.push('queue_busy');
   if (selected.some(l => l.savedResultsPending)) findings.push('saved_result_pending');
+  if (selected.some(l => l.deliveryReceiptsUnconfirmed)) findings.push('original_delivery_receipt_unconfirmed');
   if ((await pendingApprovalChats(topics)).some(id => topicChatEnabled(topics, id))) findings.push('approval_card_pending');
   let leaseVerified = false, nativeBindingsVerified = false;
   try {
@@ -220,7 +231,7 @@ export async function diagnoseDeployment(directory: string, native = false) {
     desktopVersion: host.desktopVersion, selectedChatIds: topics.enabledChatIds,
     leaseVerified, nativeBindingsVerified, hostLockHeld, topicLockHeld, findings,
     // Counts only; no prompts, results, error text, auth config or MCP definitions.
-    ledgers: ledgers.map(l => ({ chatId: l.binding.chatId, selected: topicChatEnabled(topics, l.binding.chatId), counts: l.counts, savedResultsPending: l.savedResultsPending })),
+    ledgers: ledgers.map(l => ({ chatId: l.binding.chatId, selected: topicChatEnabled(topics, l.binding.chatId), counts: l.counts, savedResultsPending: l.savedResultsPending, deliveryReceiptsUnconfirmed: l.deliveryReceiptsUnconfirmed, savedResultsRetrieved: l.savedResultsRetrieved })),
     rollback: { newRuntimeStopped: !hostLockHeld && !topicLockHeld, ledgerRestoreAllowed: false, legacyLaunch: snapshot.spec.legacy, requiresProcessIdentityAndUniqueConsumerCheck: true },
   };
 }

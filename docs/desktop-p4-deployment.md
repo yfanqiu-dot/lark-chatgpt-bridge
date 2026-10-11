@@ -75,7 +75,8 @@ node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
 | `native_state_unavailable` | 原生连接或读取失败，状态不明 |
 | `queue_busy` / `uncertain_paused` | 选中群账本有排队、运行、提交中或待核对记录 |
 | `approval_card_pending` | 选中群持久卡片未关闭；不能代替原生待审批状态证明 |
-| `saved_result_pending` | 有结果尚无回执；显式取回时仍须防止重复发送 |
+| `saved_result_pending` | 已保存结果尚未尝试回传 |
+| `original_delivery_receipt_unconfirmed` | 原发送已尝试但无回执；独立 `/result` 的取回回执按 `savedResultsRetrieved` 计数，不伪填原发送回执 |
 
 报告只输出状态计数和配置引用，不输出提示词、结果、原始错误、认证数据或 MCP 配置。`--native` 仅在新鲜租约且完整版本/工具基线一致时读取原生服务，使用 `project/list`、`thread/read`、`thread/turns/list`、`thread/queue/list`。原生身份及历史通过不意味着任务空闲；需同时核对 findings。
 
