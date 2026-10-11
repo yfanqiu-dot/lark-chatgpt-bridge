@@ -76,7 +76,7 @@ node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
 | `queue_busy` / `uncertain_paused` | 选中群账本有排队、运行、提交中或待核对记录 |
 | `approval_card_pending` | 选中群持久卡片未关闭；不能代替原生待审批状态证明 |
 | `saved_result_pending` | 已保存结果尚未尝试回传 |
-| `original_delivery_receipt_unconfirmed` | 原发送已尝试但无回执；独立 `/result` 的取回回执按 `savedResultsRetrieved` 计数，不伪填原发送回执 |
+| `original_delivery_receipt_unconfirmed` | 原发送已尝试但无回执；显式带ID的 `/result` 取回回执按 `savedResultsRetrieved` 计数，不伪填原发送回执；无ID取回不自动归到某一原消息 |
 
 报告只输出状态计数和配置引用，不输出提示词、结果、原始错误、认证数据或 MCP 配置。`--native` 仅在新鲜租约且完整版本/工具基线一致时读取原生服务，使用 `project/list`、`thread/read`、`thread/turns/list`、`thread/queue/list`。原生身份及历史通过不意味着任务空闲；需同时核对 findings。
 
@@ -95,5 +95,7 @@ node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
 ## 验证与保留边界
 
 首批新增13项 P4 专项测试；结合既有话题/审批测试32项通过。2026-10-11本机全仓117个测试文件、796项通过，TypeScript与构建通过。测试覆盖真实临时文件和本机 WebSocket 读取协议，未冒充现场飞书灰度。
+
+原C群本机候选 `6f2f1ad` 已通过实际 `prepare / verify / diagnose / rollback-check`：原绑定保留、C账本17条completed及3条failed，无queued/running/submitting/uncertain；A/B各一条历史uncertain不变，新运行锁未持有。原三次故障回传的无回执事实仍保留，其中C10/C12有带ID取回回执，C7有无ID `/result` 回执与既有现场对应证据。候选不把无ID取回自动归因，也不重发任何旧结果。普通桌面模式没有共享租约，诊断的 `desktop_lease_unavailable` 属预期；未运行共享原生诊断或真实飞书灰度。
 
 P3 已接受的反向输入归属保护限制保持：群任务运行时桌面追加可能进入同一轮次，Bridge 对混合来源保持 `uncertain` 并暂停本群，不能承诺双向独立轮次。长时观察不作为P3关闭考核，本轮未执行。P4 的常驻上线、真实灰度、监督器、回退及扩群验收仍待完成。
