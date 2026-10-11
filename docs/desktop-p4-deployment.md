@@ -1,6 +1,6 @@
 # P4 部署开发与灰度运行手册
 
-更新：2026-10-11。P3 已在本人确认的范围内关闭；P4 当前完成首批部署基础代码，尚未切换常驻消费者。
+更新：2026-10-11。P3 已在本人确认的范围内关闭；P4 已实现部署基础、监督状态机和 Windows 只读预备入口，尚未切换常驻消费者。
 
 ## 首批实现
 
@@ -26,6 +26,7 @@ node bin/lark-chatgpt-deploy.mjs verify D:\bridge-local\stage-001
 node bin/lark-chatgpt-deploy.mjs diagnose D:\bridge-local\stage-001
 node bin/lark-chatgpt-deploy.mjs diagnose D:\bridge-local\stage-001 --native
 node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
+node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:\bridge-local\supervisor-001
 ```
 
 `prepare` 的目标目录必须不存在，父目录预先建立。失败后保留部分目录用于检查，不覆盖或自动删除。命令退出码：成功 `0`，检查失败 `1`，`rollback-check` 发现新运行锁未释放 `2`。回退检查的退出码0仅表示锁检查通过，仍需实际进程身份和唯一消费者核对。
@@ -41,6 +42,9 @@ node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
     "D:\\bridge\\dist\\desktop-host.js",
     "D:\\bridge\\dist\\desktop-topics.js",
     "D:\\bridge\\dist\\desktop-deploy.js",
+    "D:\\bridge\\dist\\desktop-supervisor.js",
+    "D:\\bridge\\dist\\desktop-supervisor-windows.js",
+    "D:\\bridge\\bin\\desktop-runtime-control.ps1",
     "D:\\bridge\\bin\\desktop-package-broker.ps1",
     "D:\\bridge\\bin\\desktop-package-broker-task.ps1"
   ],
@@ -82,6 +86,16 @@ node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
 
 ## 正式切换顺序（后续实现及现场验收）
 
+### 已实现的监督基础
+
+`supervisor-prepare` 要求新证据目录，核对当前唯一旧消费者、唯一普通桌面以及无新 host/监听/broker。它复核 PID、父 PID、创建时间、可执行文件和命令行 SHA，导出已校验的旧计划任务定义及原启用状态；不会启停服务或改变计划任务。任务动作必须是已记录的 `System32\wscript.exe` 和单一已验证 VBS 路径，不导出任意动作参数。启动脚本与认证配置仍留在原位置并以 SHA 核对；任务 XML 备份不代表完整凭据灾备。
+
+监督状态机在每个变更前保存意图和进程身份，准入要求不超过5秒的原生空闲证明、原绑定对应、队列空、审批关闭及工具目录一致。旧消费者停止后还需再次核对桌面空闲。失败按监听、host、普通桌面、旧消费者、broker的顺序回退；普通桌面版本和工具证明未通过时不恢复旧消费者。发现陌生进程或 PID 复用时停止自动处理，避免误杀或双消费者。
+
+监督器异常退出后，新实例等待写锁自然过期，从同一运行记录只执行回退；不继续前向切换、不删除活锁、不重放原请求。Windows 控制模块默认只允许清点、身份自检和任务备份，服务变更尚未接入可运行的生产监督器。
+
+入口返回 `productionReady=false`。仍须实现普通桌面的真实原生空闲/队列探测、独立生产启动器和持续包内 broker 生命周期，再做现场切换及回退。独立 App Server 的持久历史或测试标志不能替代普通桌面的实时空闲证明。
+
 1. 完整备份旧启动定义、非敏感配置及受保护凭据恢复方式；保留原账本、审批回执和历史失败，不替换为旧快照。
 2. 准备独立生产监督器和包内启动器，脱离当前桌面会话生命周期；登录启动、正常停止和异常回退均保存实际身份、创建时间及工具证明。
 3. 所有相关桌面任务空闲、原生队列空、审批关闭后停止旧消费者；复核旧消费者为零，再启动唯一新消费者。现有应用锁不能代替跨安装目录的实际进程检查。
@@ -94,8 +108,10 @@ node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
 
 ## 验证与保留边界
 
-首批新增13项 P4 专项测试；结合既有话题/审批测试32项通过。2026-10-11本机全仓117个测试文件、796项通过，TypeScript与构建通过。测试覆盖真实临时文件和本机 WebSocket 读取协议，未冒充现场飞书灰度。
+首批新增13项 P4 专项测试，本轮新增18项监督状态机测试和1项独立进程恢复测试。2026-10-11本机全仓119个测试文件、815项通过，TypeScript、构建及 PowerShell 语法检查通过。独立进程测试实际终止临时监督进程，等待锁自然过期，再核对同一运行只回退；角色进程是隔离的测试进程，不连接飞书、不操作真实桌面或计划任务，不算真实桌面故障恢复验收。
+
+上一批提交 `e8841b9` 的 Windows、Linux、macOS CI 已全部通过；本轮新增监督代码的 CI 需按其实际提交另行核对。
 
 原C群本机候选 `6f2f1ad` 已通过实际 `prepare / verify / diagnose / rollback-check`：原绑定保留、C账本17条completed及3条failed，无queued/running/submitting/uncertain；A/B各一条历史uncertain不变，新运行锁未持有。原三次故障回传的无回执事实仍保留，其中C10/C12有带ID取回回执，C7有无ID `/result` 回执与既有现场对应证据。候选不把无ID取回自动归因，也不重发任何旧结果。普通桌面模式没有共享租约，诊断的 `desktop_lease_unavailable` 属预期；未运行共享原生诊断或真实飞书灰度。
 
-P3 已接受的反向输入归属保护限制保持：群任务运行时桌面追加可能进入同一轮次，Bridge 对混合来源保持 `uncertain` 并暂停本群，不能承诺双向独立轮次。长时观察不作为P3关闭考核，本轮未执行。P4 的常驻上线、真实灰度、监督器、回退及扩群验收仍待完成。
+P3 已接受的反向输入归属保护限制保持：群任务运行时桌面追加可能进入同一轮次，Bridge 对混合来源保持 `uncertain` 并暂停本群，不能承诺双向独立轮次。长时观察不作为P3关闭考核，本轮未执行。P4 的常驻上线、真实灰度、生产监督器接入、现场回退及扩群验收仍待完成。
