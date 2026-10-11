@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import lockfile from 'proper-lockfile';
 import { createLarkChannel } from '@larksuite/channel';
+import { desktopOutboundConfig } from './outbound';
 import { parseDesktopConfig } from './config';
 import { DesktopBackend } from './backend';
 import { DesktopLedger } from './ledger';
@@ -37,7 +38,7 @@ async function main(): Promise<void> {
   const release = async () => { await releaseState(); await appLock.release(); };
   const binding = { appId: config.appId, chatId: config.chatId, ownerOpenId: config.ownerOpenId, projectId: config.projectId, projectRoot: config.projectRoot, threadId: config.threadId };
   const channel = createLarkChannel({ appId: config.appId, appSecret: secret, domain: 'https://open.feishu.cn', source: 'lark-chatgpt-bridge', resolveChatMode: true,
-    policy: { dmMode: 'disabled', requireMention: false, respondToMentionAll: false }, safety: { chatQueue: { enabled: false } }, respectProxyEnv: true, httpTimeoutMs: 30_000 });
+    policy: { dmMode: 'disabled', requireMention: false, respondToMentionAll: false }, safety: { chatQueue: { enabled: false } }, outbound: desktopOutboundConfig, respectProxyEnv: true, httpTimeoutMs: 30_000 });
   const cards = new ApprovalJournal(`${config.stateFile}.approvals.json`, binding, {
     send: async (chatId, request, replyTo, replyInThread) => (await channel.send(chatId, { card: approvalCard(request) }, { replyTo, replyInThread })).messageId,
     close: async messageId => { await channel.updateCard(messageId, resolvedCard()); },

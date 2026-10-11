@@ -2,6 +2,7 @@ import { readFile, rm, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { createLarkChannel } from '@larksuite/channel';
+import { desktopOutboundConfig } from './outbound';
 import { acquireAppRuntimeLock } from '../runtime/locks';
 import { resolveAppPaths } from '../config/app-paths';
 import { writeFileAtomic } from '../platform/atomic-write';
@@ -57,7 +58,7 @@ async function main(): Promise<void> {
   const registry = new TopicRegistry(config.registryFile);
   const archive = new TopicArchive(config,registry);
   const channel = createLarkChannel({appId:config.appId,appSecret:secret,domain:'https://open.feishu.cn',source:'lark-chatgpt-topics',resolveChatMode:true,
-    policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},respectProxyEnv:true,httpTimeoutMs:30_000});
+    policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},outbound:desktopOutboundConfig,respectProxyEnv:true,httpTimeoutMs:30_000});
   const cards = new ApprovalJournal(`${config.registryFile}.approvals.json`, {appId:config.appId,ownerOpenId:config.ownerOpenId,entryChatId:config.entryChatId}, {
     send:async(chatId,request,replyTo,replyInThread)=>(await channel.send(chatId,{card:approvalCard(request)},{replyTo,replyInThread})).messageId,
     close:async messageId=>{await channel.updateCard(messageId,resolvedCard());},
