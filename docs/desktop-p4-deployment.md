@@ -27,6 +27,7 @@ node bin/lark-chatgpt-deploy.mjs diagnose D:\bridge-local\stage-001
 node bin/lark-chatgpt-deploy.mjs diagnose D:\bridge-local\stage-001 --native
 node bin/lark-chatgpt-deploy.mjs rollback-check D:\bridge-local\stage-001
 node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:\bridge-local\supervisor-001
+node bin/lark-chatgpt-deploy.mjs ordinary-check D:\bridge-local\stage-001 D:\bridge-local\ordinary-001
 ```
 
 `prepare` 的目标目录必须不存在，父目录预先建立。失败后保留部分目录用于检查，不覆盖或自动删除。命令退出码：成功 `0`，检查失败 `1`，`rollback-check` 发现新运行锁未释放 `2`。回退检查的退出码0仅表示锁检查通过，仍需实际进程身份和唯一消费者核对。
@@ -44,6 +45,8 @@ node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:
     "D:\\bridge\\dist\\desktop-deploy.js",
     "D:\\bridge\\dist\\desktop-supervisor.js",
     "D:\\bridge\\dist\\desktop-supervisor-windows.js",
+    "D:\\bridge\\dist\\desktop-ordinary-idle.js",
+    "D:\\bridge\\dist\\desktop-broker-lease.js",
     "D:\\bridge\\bin\\desktop-runtime-control.ps1",
     "D:\\bridge\\bin\\desktop-package-broker.ps1",
     "D:\\bridge\\bin\\desktop-package-broker-task.ps1"
@@ -96,6 +99,22 @@ node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:
 
 入口返回 `productionReady=false`。仍须实现普通桌面的真实原生空闲/队列探测、独立生产启动器和持续包内 broker 生命周期，再做现场切换及回退。独立 App Server 的持久历史或测试标志不能替代普通桌面的实时空闲证明。
 
+### 普通桌面的只读能力探测
+
+`ordinary-check` 校验原部署与完整进程身份，使用Windows包身份及管道所属PID证明选出普通桌面的管道。它只允许 `tools/list`、`thread/loaded/list`、`thread/read`、`thread/queue/list`，不调用业务工具，不启动独立App Server，不提交消息或批准审批。完整工具目录必须精确匹配，再尝试原生读取接口。
+
+若接口支持，遍历所有已加载任务（包含名单外项目）及原绑定任务的分页队列，重复核对忙闲状态、已加载集合和完整进程身份。扫描开始时间作为证明时间，超过5秒、收到状态通知、出现队列或审批、归属变化均拒绝放行。传输断开不重连、不重放。报告只保存计数、固定结论及成功时的原绑定证明，不保存提示词、任务结果、原始RPC错误或任意响应正文。
+
+协议不支持返回 `ordinary_native_rpc_unsupported` 和退出码2，不能视为任务空闲。工具目录可用不代表原生队列读取可用，即使读取成功也不代表生产切换入口已接通；该命令始终不会启停服务。
+
+### 持续 broker 的租约协议（尚未接入生产启动器）
+
+原有无 `OwnerLeaseFile` 模式保持限时运行。新增 `-OwnerLeaseFile <absolute-path>` 时，broker及包装进程不再因内置的小时数到期退出；必须持续持有新鲜的监督进程租约。`BrokerOwnerLease` 在新文件上取得唯一写锁，按周期原子续租，保存运行编号、完整监督进程身份、包名、递增版本及临时能力token的SHA，不保存token原值。旧租约文件作为证据保留，不覆盖为新运行。
+
+broker实际核对CIM进程的PID、父PID、创建时间、二进制路径和命令行SHA；绑定初始监督身份及运行编号，拒绝版本倒退、过期或伪造租约。租约失效后不可重新变为就绪：进入 `draining`，写入共享host的停止请求，拒绝新的共享桌面启动，在默认180秒内保留普通桌面恢复与释放入口。普通桌面已释放且无活动子进程，或期限到达后退出。`drainTimedOut=true` 必须保留为失败，不能据此声称普通桌面或旧消费者已恢复。
+
+包装进程也核对新鲜的就绪回执、运行编号及完整broker身份，不用PID存在作为恢复证明。生产启动器仍须接入独立监督进程、持续续租、停止与回退，并确保外部启动定义没有限时执行设置。当前没有注册生产启动任务，也没有在真实包内启用持续模式；不能把纯租约/策略测试记为现场常驻或自动回退通过。
+
 1. 完整备份旧启动定义、非敏感配置及受保护凭据恢复方式；保留原账本、审批回执和历史失败，不替换为旧快照。
 2. 准备独立生产监督器和包内启动器，脱离当前桌面会话生命周期；登录启动、正常停止和异常回退均保存实际身份、创建时间及工具证明。
 3. 所有相关桌面任务空闲、原生队列空、审批关闭后停止旧消费者；复核旧消费者为零，再启动唯一新消费者。现有应用锁不能代替跨安装目录的实际进程检查。
@@ -115,6 +134,8 @@ node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:
 备份后续复核发现导出的 UTF-16 声明与保存的 UTF-8 字节不符，已统一为 UTF-8，追加回归通过（当前Windows XML专项共3项）。首次备份作为原始证据保留，使用修复后的新候选重新备份和验证XML可解析。桌面清点也计入其他安装路径的主进程，并在身份检查时核对锁定的可执行文件，避免漏掉并行桌面。
 
 提交 `e8841b9` 和本轮监督代码 `eb83f7b` 的 Windows、Linux、macOS CI 已全部通过；后续编码修复按其实际提交另行核对。
+
+上轮最终提交 `075cbe0` 的CI已核实：Windows/Linux通过，macOS独立进程恢复测试失败于文件锁仍被持有。原失败日志留本机。锁库会向上取整初始文件时间，固定等待2.5秒不能保证自然过期；新增 `waitUntilAvailable` 按实际锁状态等待，仍由 `open` 原子获取，绝不删除活锁。修复后的活锁保护与独立进程恢复测试通过，本轮全仓123个文件、840项通过，另补的续租计时器回归通过（broker租约专项共8项）。类型与构建通过。本轮新增普通桌面探测12项、broker租约8项、Windows broker策略2项及活锁观察1项；新提交的三平台CI仍须独立核对。
 
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 

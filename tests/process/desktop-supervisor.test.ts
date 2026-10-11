@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
+import { SupervisorJournal } from '../../src/desktop/supervisor';
 
 let bundle: string, dir: string;
 const children: ChildProcess[] = [];
@@ -46,7 +47,7 @@ it('recovers only backward after actual supervisor termination and natural write
   for (const role of ['host','broker','listener']) { const p = JSON.parse(await readFile(join(dir, `identity-${role}.json`), 'utf8')); expect(() => process.kill(p.pid, 0)).not.toThrow(); }
   first.child.kill('SIGKILL'); await first.exit;
   // Do not delete an active lock. Wait for its configured natural stale window.
-  await new Promise(resolve => setTimeout(resolve, 2500));
+  expect(await new SupervisorJournal(join(dir,'supervisor.json'),2000).waitUntilAvailable(7000)).toBe(true);
   const second = run('recover'); expect(await second.exit, second.errors()).toBe(0); expect(second.output()).toContain('RESTORED');
   const after = JSON.parse(await readFile(join(dir, 'supervisor.json'), 'utf8')); expect(after.runId).toBe(before.runId); expect(after.phase).toBe('restored');
   const events = JSON.parse(await readFile(join(dir, 'events.json'), 'utf8'));

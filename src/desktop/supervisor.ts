@@ -83,6 +83,17 @@ export class SupervisorJournal {
   constructor(readonly path: string, private readonly staleMs = 10_000) {
     if (!isAbsolute(path) || !Number.isSafeInteger(staleMs) || staleMs < 2000) throw new Error('Supervisor journal path or stale interval is invalid');
   }
+  /** Observe natural expiry without acquiring/removing a live writer's lock.
+   * Availability is only a hint: open() still performs the atomic acquisition. */
+  async waitUntilAvailable(timeoutMs = 15_000): Promise<boolean> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) throw new Error('Invalid journal availability timeout');
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (!await lockfile.check(this.path, { realpath: false, stale: this.staleMs })) return true;
+      const remaining = deadline - Date.now(); if (remaining <= 0) return false;
+      await new Promise(resolve => setTimeout(resolve, Math.min(100,remaining)));
+    } while (true);
+  }
   async open(): Promise<SupervisorState | undefined> {
     await mkdir(dirname(this.path), { recursive: true });
     this.release = await lockfile.lock(this.path, { realpath: false, retries: 0, stale: this.staleMs });

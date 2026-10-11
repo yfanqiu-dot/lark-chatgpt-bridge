@@ -3,24 +3,60 @@ import { diagnoseDeployment, prepareDeployment, verifyDeployment } from './deplo
 import { WindowsSupervisorControl } from './supervisor-windows';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeFile } from 'node:fs/promises';
+import { desktopPipes } from './windows-tools';
+import { OrdinaryPipeRpc, inspectOrdinaryIdle } from './ordinary-idle';
 
 async function main(): Promise<void> {
   const [mode, path, directory, ...extra] = process.argv.slice(2);
-  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory>');
+  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check <stage> <new-evidence-directory>');
   if (mode === 'prepare') {
     if (!directory) throw new Error('A new staging directory is required');
     const snapshot = await prepareDeployment(JSON.parse(await readFile(path, 'utf8')), directory);
     console.log(JSON.stringify({ staged: true, codeRevision: snapshot.spec.codeRevision, grayChatCount: 1, servicesChanged: false }));
-  } else if (mode === 'supervisor-prepare') {
+  } else if (mode === 'supervisor-prepare' || mode === 'ordinary-check') {
     if (!directory) throw new Error('A new evidence directory is required');
     const script = resolve(dirname(fileURLToPath(import.meta.url)), '../bin/desktop-runtime-control.ps1');
     const control = await WindowsSupervisorControl.prepare(path, script, directory);
     const inventory = await control.inventory();
     if (inventory.legacy.length !== 1 || inventory.desktop.length !== 1 || inventory.host.length || inventory.listener.length || inventory.broker.length) throw new Error('Initial supervisor inventory is not unique');
     await control.testIdentity('legacy', inventory.legacy[0]!); await control.testIdentity('desktop', inventory.desktop[0]!);
+    if (mode === 'ordinary-check') {
+      const { host, snapshot } = await verifyDeployment(path);
+      const desktop = inventory.desktop[0]!;
+      const pipes = await desktopPipes(desktop.pid, host.desktopExe);
+      const matching: string[] = [];
+      for (const candidate of pipes) {
+        const rpc = new OrdinaryPipeRpc(candidate.pipe);
+        try {
+          await rpc.connect(); const catalog = await rpc.call('tools/list', { threadStartKind: 'all' });
+          const names = catalog.tools?.map((t: any) => t.name);
+          if (Array.isArray(names) && JSON.stringify([...names].sort()) === JSON.stringify([...snapshot.spec.expectedToolNames].sort())) matching.push(candidate.pipe);
+        } catch { /* A failed pipe is not a successful capability check. */ }
+        finally { rpc.close(); }
+      }
+      let observation;
+      if (matching.length !== 1) observation = { verified: false, findings: ['ordinary_tool_pipe_not_unique'], toolCount: 0 };
+      else {
+        const rpc = new OrdinaryPipeRpc(matching[0]!);
+        await rpc.connect();
+        observation = await inspectOrdinaryIdle(rpc, desktop, snapshot.bindings, snapshot.spec.expectedToolNames, async () => {
+          await control.testIdentity('desktop', desktop);
+          const current = await control.inventory();
+          if (current.desktop.length !== 1 || current.legacy.length !== 1 || current.host.length || current.listener.length || current.broker.length) throw new Error('Ordinary inventory changed');
+          return current.desktop[0]!;
+        });
+      }
+      await control.testIdentity('desktop', desktop);
+      const report = { ...observation, observedAt: new Date().toISOString(), source: 'ordinary_desktop_owned_pipe', pipeCount: pipes.length, matchingToolCatalogs: matching.length, servicesChanged: false, productionReady: false };
+      await writeFile(join(directory, 'ordinary-observation.json'), JSON.stringify(report, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      console.log(JSON.stringify({ ...report, proof: report.proof ? { taskCount: report.proof.tasks.length, verifiedAt: report.proof.verifiedAt } : undefined }, null, 2));
+      if (!observation.verified) process.exitCode = 2;
+      return;
+    }
     const backup = await control.backupTask(join(directory, 'legacy-backup'));
     console.log(JSON.stringify({ prepared: true, servicesChanged: false, inventoryCounts: Object.fromEntries(Object.entries(inventory).map(([role, items]) => [role, items.length])), legacyTaskDefinitionBackedUp: true,
-      legacyTaskEnabled: backup.enabled, productionReady: false, missingCapabilities: ['ordinary_desktop_native_idle_and_queue_probe', 'independent_production_launcher', 'continuous_package_broker_lifecycle', 'live_cutover_and_rollback_acceptance'] }, null, 2));
+      legacyTaskEnabled: backup.enabled, productionReady: false, missingCapabilities: ['ordinary_desktop_native_idle_and_queue_probe', 'independent_production_launcher', 'continuous_package_broker_wiring_and_acceptance', 'live_cutover_and_rollback_acceptance'] }, null, 2));
   } else if (mode === 'verify') {
     if (directory) throw new Error('Unexpected argument');
     const { snapshot } = await verifyDeployment(path);

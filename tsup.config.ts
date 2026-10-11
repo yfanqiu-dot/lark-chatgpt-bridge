@@ -2,7 +2,7 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig([
   {
-    entry: { cli: 'src/cli/index.ts', desktop: 'src/desktop/main.ts', 'desktop-host': 'src/desktop/host-main.ts', 'desktop-topics': 'src/desktop/topics-main.ts', 'desktop-deploy': 'src/desktop/deployment-main.ts', 'desktop-supervisor': 'src/desktop/supervisor.ts', 'desktop-supervisor-windows': 'src/desktop/supervisor-windows.ts' },
+    entry: { cli: 'src/cli/index.ts', desktop: 'src/desktop/main.ts', 'desktop-host': 'src/desktop/host-main.ts', 'desktop-topics': 'src/desktop/topics-main.ts', 'desktop-deploy': 'src/desktop/deployment-main.ts', 'desktop-supervisor': 'src/desktop/supervisor.ts', 'desktop-supervisor-windows': 'src/desktop/supervisor-windows.ts', 'desktop-ordinary-idle': 'src/desktop/ordinary-idle.ts', 'desktop-broker-lease': 'src/desktop/broker-lease.ts' },
     outDir: 'dist',
     format: ['esm'],
     target: 'node20',

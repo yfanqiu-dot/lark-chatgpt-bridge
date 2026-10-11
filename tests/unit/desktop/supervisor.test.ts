@@ -9,6 +9,13 @@ beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'p4-supervisor-')); 
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 const identity = (pid: number): ProcessIdentity => ({ pid, parentPid: 1, createdAt: '2026-10-11T00:00:00.000Z', executable: process.execPath, commandLineSha256: 'a'.repeat(64) });
 const bindings = [{ threadId: 'thread', projectId: 'project', projectRoot: tmpdir() }];
+it('waits for lock availability without disturbing an active writer', async () => {
+  const path = join(dir,'availability.json'), writer = new SupervisorJournal(path), observer = new SupervisorJournal(path);
+  await writer.open();
+  try { expect(await observer.waitUntilAvailable(30)).toBe(false); await expect(observer.open()).rejects.toThrow(); }
+  finally { await writer.close(); }
+  expect(await observer.waitUntilAvailable(30)).toBe(true); await observer.open(); await observer.close();
+});
 function harness() {
   const inventory: SupervisorInventory = { legacy: [identity(1)], desktop: [identity(2)], host: [], listener: [], broker: [] };
   const events: string[] = []; let failedStep = '', failAfter = false, health = true, stop = false;
