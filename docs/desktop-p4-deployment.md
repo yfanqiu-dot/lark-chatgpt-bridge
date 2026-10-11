@@ -111,6 +111,8 @@ node bin/lark-chatgpt-deploy.mjs ordinary-check D:\bridge-local\stage-001 D:\bri
 
 真实候选 `d2d3ce3` 的首次检查：7个自有管道中1个完整匹配54项工具，原生读取未成功，返回 `ordinary_native_state_unavailable` / 退出码2，未形成空闲证明。前后原进程身份及registry/审批journal/全部原账本字节均未变。原始脱敏报告留 `.p4-local/ordinary-d2d3ce3/verification.json`，没有把该结果改写为成功。后续报告增加固定失败方法和分类，仍不保存原始响应或RPC错误正文。
 
+候选 `bb023e4` 独立复核确认失败发生于 `thread/loaded/list`，实际RPC错误码 `-32602`。此结果表示自有工具管道拒绝本次原生读取，不能据此断言整个桌面版本不支持原生队列或将任务判为空闲。最新脱敏证据 `.p4-local/ordinary-bb023e4/verification.json` 保留退出码2，进程与全部原账本仍未变。自动关闭当前普通桌面和热切换准入保持禁用；须确认受支持的实时接口及其初始化要求，不降级为任务摘要或独立后台的历史读取。
+
 ### 持续 broker 的租约协议（尚未接入生产启动器）
 
 原有无 `OwnerLeaseFile` 模式保持限时运行。新增 `-OwnerLeaseFile <absolute-path>` 时，broker及包装进程不再因内置的小时数到期退出；必须持续持有新鲜的监督进程租约。`BrokerOwnerLease` 在新文件上取得唯一写锁，按周期原子续租，保存运行编号、完整监督进程身份、包名、递增版本及临时能力token的SHA，不保存token原值。旧租约文件作为证据保留，不覆盖为新运行。
@@ -140,6 +142,8 @@ broker实际核对CIM进程的PID、父PID、创建时间、二进制路径和�
 提交 `e8841b9` 和本轮监督代码 `eb83f7b` 的 Windows、Linux、macOS CI 已全部通过；后续编码修复按其实际提交另行核对。
 
 上轮最终提交 `075cbe0` 的CI已核实：Windows/Linux通过，macOS独立进程恢复测试失败于文件锁仍被持有。原失败日志留本机。锁库会向上取整初始文件时间，固定等待2.5秒不能保证自然过期；新增 `waitUntilAvailable` 按实际锁状态等待，仍由 `open` 原子获取，绝不删除活锁。修复后的活锁保护与独立进程恢复测试通过，本轮全仓123个文件、840项通过，另补的续租计时器回归通过（broker租约专项共8项）。类型与构建通过。本轮新增普通桌面探测12项、broker租约8项、Windows broker策略2项及活锁观察1项；新提交的三平台CI仍须独立核对。
+
+核心功能提交 `d2d3ce3` 的[CI](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/actions/runs/38117003406)已独立核对Windows、Linux、macOS全部通过，原失败修复已得到三平台验证。后续仅增加失败诊断分类的提交按其真实CI单独记录，不用本次成功覆盖原失败事实。
 
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 
