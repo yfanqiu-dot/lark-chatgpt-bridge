@@ -21,7 +21,7 @@ function Has-Argument($command,$value){
   return [regex]::IsMatch($command,$taskPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
 }
 function Get-Role($process){
-  if($process.Name -eq 'ChatGPT.exe' -and $process.ExecutablePath -eq $taskConfig.desktopExe -and $process.CommandLine -notmatch '(?:^|\s)--type='){return 'desktop'}
+  if($process.Name -eq 'ChatGPT.exe' -and $process.CommandLine -notmatch '(?:^|\s)--type='){return 'desktop'}
   if($process.Name -in @('powershell.exe','pwsh.exe') -and $process.CommandLine -match 'desktop-package-broker\.ps1["\s]'){return 'broker'}
   if($process.Name -ne 'node.exe'){return $null}
   if((Has-Argument $process.CommandLine $taskConfig.legacy.entryPoint) -and (Has-Argument $process.CommandLine 'run') -and $process.CommandLine -match ('(?:^|\s)--profile\s+"?'+[regex]::Escape($taskConfig.legacy.profile)+'"?(?:\s|$)')){return 'legacy'}
@@ -44,10 +44,15 @@ function Assert-Identity($expected,$expectedRole){
   }
   if((Get-Role $taskCurrent) -ne $expectedRole){throw 'Process role changed'}
   if($expectedRole -eq 'legacy' -and $taskCurrent.ExecutablePath -ne $taskConfig.legacy.executable){throw 'Legacy executable changed'}
+  if($expectedRole -eq 'desktop' -and $taskCurrent.ExecutablePath -ne $taskConfig.desktopExe){throw 'Desktop executable changed'}
   return $taskCurrent
 }
 function Normalize-TaskDefinition($xmlText,[bool]$enabled){
   $taskDocument=[xml]$xmlText
+  if($taskDocument.FirstChild -is [Xml.XmlDeclaration]){$taskDocument.FirstChild.Encoding='UTF-8'}
+  # Backup bytes are UTF-8. Export's UTF-16 declaration must not remain in the
+  # saved file; retain the actual enabled setting before hashing its exclusion.
+  $taskSavedXml=$taskDocument.OuterXml
   $taskSettingsNode=$taskDocument.SelectSingleNode('//*[local-name()="Settings"]')
   if($null -eq $taskSettingsNode){throw 'Legacy task settings are missing'}
   $taskEnabledNode=$taskSettingsNode.SelectSingleNode('*[local-name()="Enabled"]')
@@ -57,7 +62,7 @@ function Normalize-TaskDefinition($xmlText,[bool]$enabled){
   }elseif(!$enabled){throw 'Disabled legacy task export omits enabled state'}
   # Export omits Enabled when the task uses its default true value. Exclude
   # only that setting from the definition hash so enable/disable stays stable.
-  return @{xml=$xmlText;sha256=(Get-Sha $taskDocument.OuterXml);enabled=$enabled}
+  return @{xml=$taskSavedXml;sha256=(Get-Sha $taskDocument.OuterXml);enabled=$enabled}
 }
 function Read-TaskDefinition {
   $taskScheduled=Get-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName

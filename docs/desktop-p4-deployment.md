@@ -108,11 +108,13 @@ node bin/lark-chatgpt-deploy.mjs supervisor-prepare D:\bridge-local\stage-001 D:
 
 ## 验证与保留边界
 
-首批新增13项 P4 专项测试，本轮新增18项监督状态机测试、1项独立进程恢复测试及2项 Windows 任务XML回归。Windows 本机全仓120个测试文件、817项通过，TypeScript、构建及 PowerShell 语法检查通过。Windows XML测试在其他平台跳过。独立进程测试实际终止临时监督进程，等待锁自然过期，再核对同一运行只回退；角色进程是隔离的测试进程，不连接飞书、不操作真实桌面或计划任务，不算真实桌面故障恢复验收。
+首批新增13项 P4 专项测试，本轮新增18项监督状态机测试、1项独立进程恢复测试及3项 Windows 任务XML回归。Windows 本机全仓120个测试文件、818项通过，TypeScript、构建及 PowerShell 语法检查通过。Windows XML测试在其他平台跳过。独立进程测试实际终止临时监督进程，等待锁自然过期，再核对同一运行只回退；角色进程是隔离的测试进程，不连接飞书、不操作真实桌面或计划任务，不算真实桌面故障恢复验收。
 
 首次真实任务备份预检发现 Windows 导出 XML 会省略默认 `Enabled=true` 字段，原错误已保留。读取改为核对实际 Task Scheduler 启用状态，并只排除该可切换字段计算定义 SHA；其他设置变化或 XML/实际状态矛盾仍拒绝处理。
 
-上一批提交 `e8841b9` 的 Windows、Linux、macOS CI 已全部通过；本轮新增监督代码的 CI 需按其实际提交另行核对。
+备份后续复核发现导出的 UTF-16 声明与保存的 UTF-8 字节不符，已统一为 UTF-8，追加回归通过（当前Windows XML专项共3项）。首次备份作为原始证据保留，使用修复后的新候选重新备份和验证XML可解析。桌面清点也计入其他安装路径的主进程，并在身份检查时核对锁定的可执行文件，避免漏掉并行桌面。
+
+提交 `e8841b9` 和本轮监督代码 `eb83f7b` 的 Windows、Linux、macOS CI 已全部通过；后续编码修复按其实际提交另行核对。
 
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 
