@@ -192,7 +192,7 @@ C7 原生队列客户端 ID 与飞书消息 ID 一致，唯一轮次正确完成
 - C10 使用限定 HTTPS Agent，真实连接飞书外部 TLS 端点，在HTTP socket交付前断开，证书验证成功、HTTP写出字节为零。SDK发送失败，原结果先保存；正式构建恢复及监听重启后，本人编号 `/result` 取回唯一回复，没有新增模型轮次。此范围不等于飞书服务宕机。原始证据 `.p3-local/p3-external-reset-c10-20261011`。
 - C10 暴露channel默认会对 `unknown` 错误尝试3次。本次全部在认证/正文写出前截断，没有重复远端消息，但原配置不能保证发送回执不明时底层不重试。两个正式桌面入口已使用共享 `desktopOutboundConfig`，设置 `outbound.retry.maxAttempts=1`；真实channel/SDK测试覆盖文本/卡片的ECONNRESET、超时和HTTP成功但缺少回执，6项均只有一个发送尝试。桌面与恢复回归93项、类型检查、tsup构建通过。**C12修复后现场复测通过**：一个真实外部TLS连接、一个原始ECONNRESET，原结果保存、正式监听恢复、本人编号 `/result` 唯一取回、原生轮次不增，项目记录对应。临时入口按新正式 SHA 撤下。证据 `.p3-local/p3-external-reset-c12-20261011`。没有模拟“远端已接收而回执丢失”，不把此范围扩大为飞书宕机。
 - C11 桌面侧审批恢复通过：原待审批卡有真实回执，listener-only SIGKILL后等锁自然过期，新监听恢复原轮次、新卡仍属于原消息；本人仅在原C桌面对话批准本次，命令执行一次，唯一群结果，两卡远端关闭。没有新用户输入或模型重投。临时reviewer及构建恢复；新版首次 `thread/resume` 恢复reviewer未生效，保留原响应后改用当前schema的 `thread/settings/update`，复核恢复原 `auto_review / on-request`。原始证据 `.p3-local/p3-desktop-approval-c11-20261011`。
-- `6aad7eb` 已推送至原私有仓库分支，[对应CI](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/actions/runs/38109462158)三平台测试/类型/构建成功。本次新增发送修复及文档仍须提交和对应CI。
+- `6aad7eb` 已推送至原私有仓库分支，[对应CI](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/actions/runs/38109462158)三平台测试/类型/构建成功。本次发送修复、6项实际SDK回归及脱敏现场记录已提交并推送 `a4bde9c`；[修复提交CI](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/actions/runs/38110887015)已启动，最终状态须独立核对，不沿用旧提交结果。
 
 异常退出首恢复路径另行复测；正常共享重启不能替代。A/B各一条历史 `uncertain` 保留，C8按本人接受的保护边界和结案授权保留证据后为 `failed`。本窗口最终普通桌面/旧Bridge恢复须独立核对，P3整体未关闭。
 
