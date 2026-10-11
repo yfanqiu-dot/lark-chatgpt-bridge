@@ -68,16 +68,18 @@ export interface OrdinaryIdleObservation {
   toolCount: number;
   loadedThreadCount?: number;
   proof?: IdleProof;
+  failure?: { method?: string; kind: string; code?: number };
 }
 /** The caller must verify the Windows package/pipe owner and the complete
  * process identity before AND after this read. A separate App Server is not an
  * admissible transport. Unsupported app-tools RPC cannot be treated as idle. */
 export async function inspectOrdinaryIdle(rpc: OrdinaryReadRpc, desktop: ProcessIdentity, bindings: readonly SupervisorBinding[], expectedTools: readonly string[], recheckIdentity: () => Promise<ProcessIdentity>, now = Date.now): Promise<OrdinaryIdleObservation> {
-  const started = now(); let toolCount = 0, loadedThreadCount: number | undefined;
+  const started = now(); let toolCount = 0, loadedThreadCount: number | undefined, lastMethod: string | undefined;
+  const read = (method: string, params: unknown) => { lastMethod = method; return rpc.call(method,params); };
   const failure = (finding: string): OrdinaryIdleObservation => ({ verified: false, findings: [finding], toolCount, ...(loadedThreadCount === undefined ? {} : { loadedThreadCount }) });
   try {
     if (!bindings.length || new Set(bindings.map(b => b.threadId)).size !== bindings.length) return failure('ordinary_bindings_invalid');
-    const catalog = await rpc.call('tools/list', { threadStartKind: 'all' });
+    const catalog = await read('tools/list', { threadStartKind: 'all' });
     if (!Array.isArray(catalog.tools) || catalog.tools.some((t: any) => typeof t.name !== 'string')) return failure('ordinary_tool_catalog_invalid');
     const names = catalog.tools.map((t: any) => t.name); toolCount = names.length;
     if (new Set(names).size !== names.length || !expectedTools.length || JSON.stringify([...names].sort()) !== JSON.stringify([...expectedTools].sort())) return failure('ordinary_tools_mismatch');
@@ -85,7 +87,7 @@ export async function inspectOrdinaryIdle(rpc: OrdinaryReadRpc, desktop: Process
       let cursor: string | undefined; const cursors = new Set<string>(), data: any[] = [];
       do {
         if (cursors.size >= 100 || now() - started > 5000) throw new Error('Ordinary inspection exceeded bounded window');
-        const page = await rpc.call(method, { ...params, limit: 100, ...(cursor ? { cursor } : {}) });
+        const page = await read(method, { ...params, limit: 100, ...(cursor ? { cursor } : {}) });
         if (!Array.isArray(page.data)) throw new Error('Invalid ordinary page');
         data.push(...page.data); if (data.length > 10_000) throw new Error('Ordinary page limit exceeded');
         cursor = page.nextCursor ?? undefined;
@@ -106,7 +108,7 @@ export async function inspectOrdinaryIdle(rpc: OrdinaryReadRpc, desktop: Process
     for (let pass = 0; pass < 2; pass++) {
       tasks = [];
       for (const threadId of ids) {
-        const { thread } = await rpc.call('thread/read', { threadId, includeTurns: false });
+        const { thread } = await read('thread/read', { threadId, includeTurns: false });
         if (thread?.id !== threadId || !['idle','notLoaded','active'].includes(thread.status?.type) || (thread.status.activeFlags !== undefined && !Array.isArray(thread.status.activeFlags))) return failure('ordinary_native_state_invalid');
         if (thread.status.activeFlags?.includes('waitingOnApproval')) return failure('ordinary_waiting_approval');
         if (!['idle','notLoaded'].includes(thread.status.type) || thread.status.activeFlags?.length) return failure('ordinary_task_active');
@@ -123,6 +125,7 @@ export async function inspectOrdinaryIdle(rpc: OrdinaryReadRpc, desktop: Process
     if (now() - started > 5000 || now() < started) return failure('ordinary_observation_stale');
     return { verified: true, findings: [], toolCount, loadedThreadCount, proof: { verifiedAt: started, desktop: structuredClone(desktop), allDesktopTasksIdle: true, toolsExact: true, tasks } };
   } catch (e) {
-    return failure(e instanceof RpcError && [-32601,-32600].includes(e.code) ? 'ordinary_native_rpc_unsupported' : e instanceof RpcError && e.code === 403 ? 'ordinary_native_permission_denied' : 'ordinary_native_state_unavailable');
+    return { ...failure(e instanceof RpcError && [-32601,-32600].includes(e.code) ? 'ordinary_native_rpc_unsupported' : e instanceof RpcError && e.code === 403 ? 'ordinary_native_permission_denied' : 'ordinary_native_state_unavailable'),
+      failure: e instanceof RpcError ? { method: lastMethod, kind: 'rpc_error', code: e.code } : { method: lastMethod, kind: e instanceof Error && e.message === 'Ordinary read timeout' ? 'read_timeout' : e instanceof Error && e.message === 'Ordinary read disconnected' ? 'transport_disconnected' : 'read_validation_or_transport_failed' } };
   } finally { rpc.close(); }
 }
