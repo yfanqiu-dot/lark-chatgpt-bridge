@@ -10,7 +10,7 @@ import { prepareStandalone } from './standalone';
 
 async function main(): Promise<void> {
   const [mode, path, directory, ...extra] = process.argv.slice(2);
-  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check','standalone-prepare'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check <stage> <new-evidence-directory> | standalone-prepare <stage> <new-plan-directory>');
+  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check','cold-check','standalone-prepare'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check|cold-check <stage> <new-evidence-directory> | standalone-prepare <stage> <new-plan-directory>');
   if (mode === 'prepare') {
     if (!directory) throw new Error('A new staging directory is required');
     const snapshot = await prepareDeployment(JSON.parse(await readFile(path, 'utf8')), directory);
@@ -18,10 +18,22 @@ async function main(): Promise<void> {
   } else if (mode === 'standalone-prepare') {
     if (!directory) throw new Error('A new standalone plan directory is required');
     console.log(JSON.stringify({ ...await prepareStandalone(path,directory),servicesChanged:false,productionReady:false },null,2));
-  } else if (mode === 'supervisor-prepare' || mode === 'ordinary-check') {
+  } else if (mode === 'supervisor-prepare' || mode === 'ordinary-check' || mode === 'cold-check') {
     if (!directory) throw new Error('A new evidence directory is required');
     const script = resolve(dirname(fileURLToPath(import.meta.url)), '../bin/desktop-runtime-control.ps1');
     const control = await WindowsSupervisorControl.prepare(path, script, directory);
+    if (mode === 'cold-check') {
+      const scan = await control.coldSnapshot();
+      const valid = scan.complete === true && Number.isFinite(scan.verifiedAt) && scan.verifiedAt <= Date.now()+1000 && Date.now()-scan.verifiedAt <= 5000
+        && Array.isArray(scan.desktopRelated) && scan.inventory.legacy.length === 1 && !scan.inventory.host.length && !scan.inventory.listener.length && !scan.inventory.broker.length;
+      const exited = valid && !scan.desktopRelated.length && !scan.inventory.desktop.length;
+      const report = {version:1,observedAt:new Date().toISOString(),startMode:'cold',desktopExitVerified:exited,
+        findings:!valid ? ['cold_inventory_invalid_or_conflicting'] : exited ? [] : ['cold_desktop_or_backend_present'],
+        desktopRelatedCount:scan.desktopRelated.length,inventoryCounts:Object.fromEntries(Object.entries(scan.inventory).map(([role,items]) => [role,items.length])),
+        servicesChanged:false,productionReady:false,oldDesktopNativeIdleVerified:false};
+      await writeFile(join(directory,'cold-observation.json'),JSON.stringify(report,null,2),{encoding:'utf8',flag:'wx',mode:0o600});
+      console.log(JSON.stringify(report,null,2)); if (!exited) process.exitCode=2; return;
+    }
     const inventory = await control.inventory();
     if (inventory.legacy.length !== 1 || inventory.desktop.length !== 1 || inventory.host.length || inventory.listener.length || inventory.broker.length) throw new Error('Initial supervisor inventory is not unique');
     await control.testIdentity('legacy', inventory.legacy[0]!); await control.testIdentity('desktop', inventory.desktop[0]!);

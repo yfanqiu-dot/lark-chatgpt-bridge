@@ -1,0 +1,58 @@
+import { beforeEach,expect,it,vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readOwnedSharedContext,inspectOwnedShared } from '../../../src/desktop/shared-inspector';
+import type { WindowsSupervisorControl } from '../../../src/desktop/supervisor-windows';
+const mocked=vi.hoisted(()=>({verify:vi.fn(),tools:vi.fn(),read:vi.fn(),pipes:vi.fn(),catalog:vi.fn(),connect:vi.fn(),calls:vi.fn(),close:vi.fn()}));
+vi.mock('../../../src/desktop/deployment',()=>({verifyDeployment:mocked.verify}));
+vi.mock('../../../src/desktop/backend',()=>({readDesktopToolConfig:mocked.tools}));
+vi.mock('node:fs/promises',()=>({readFile:mocked.read}));
+vi.mock('../../../src/desktop/windows-tools',()=>({desktopPipes:mocked.pipes,desktopToolCatalog:mocked.catalog}));
+vi.mock('../../../src/desktop/rpc',async importOriginal=>{
+  const original=await importOriginal<typeof import('../../../src/desktop/rpc')>();
+  return {...original,DesktopRpc:class {connect=mocked.connect;call=mocked.calls;close=mocked.close;onMessage(){} }};
+});
+const identity=(pid:number,parentPid=1,executable=process.execPath)=>({pid,parentPid,createdAt:'2026-10-12T00:00:00.000Z',executable,commandLineSha256:'a'.repeat(64)});
+const owned={host:identity(42),broker:identity(41)};
+const host={endpoint:'ws://127.0.0.1:9998/',backendEndpoint:'ws://127.0.0.1:9999/',connectionFile:join(tmpdir(),'lease.json'),desktopExe:join(tmpdir(),'ChatGPT.exe'),codexBinary:join(tmpdir(),'codex.exe'),desktopVersion:'fixture',codexSha256:'b'.repeat(64)};
+let lease:any,scan:any;
+const control={sharedSnapshot:async()=>structuredClone(scan)} as WindowsSupervisorControl;
+beforeEach(()=>{
+  vi.resetAllMocks();
+  lease={version:1,endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,hostPid:42,backendPid:43,desktopPid:44,pipeServerPid:44,pipe:'pipe',verifiedAt:Date.now(),desktopVersion:host.desktopVersion,codexSha256:host.codexSha256,toolNames:['list_projects']};
+  scan={verifiedAt:Date.now(),complete:true,desktopRelated:[identity(44,41,host.desktopExe),identity(43,42,host.codexBinary)],inventory:{host:[structuredClone(owned.host)],broker:[structuredClone(owned.broker)],desktop:[identity(44,41,host.desktopExe)],legacy:[],listener:[]},
+    endpointOwners:[{endpoint:host.endpoint,listeners:[{address:'127.0.0.1',pid:42}]},{endpoint:host.backendEndpoint,listeners:[{address:'127.0.0.1',pid:43}]}]};
+  mocked.verify.mockResolvedValue({host,snapshot:{bindings:[{threadId:'original',projectId:'project',projectRoot:tmpdir()}],spec:{expectedToolNames:['list_projects']}}});
+  mocked.tools.mockResolvedValue({});mocked.read.mockImplementation(async()=>JSON.stringify(lease));mocked.pipes.mockResolvedValue([{pipe:'pipe',serverPid:44}]);mocked.catalog.mockResolvedValue(['list_projects']);
+  mocked.calls.mockImplementation(async(m:string,p:any)=>m==='project/list'?{data:[{id:'project',roots:[{path:tmpdir()}]}]}:m==='thread/turns/list'?{data:[{status:'completed',completedAt:1}]}:
+    m==='thread/loaded/list'?{data:['original']}:m==='thread/read'?{thread:{id:p.threadId,projectId:'project',cwd:tmpdir(),status:{type:'idle'}}}:m==='thread/queue/list'?{data:[]}:undefined);
+});
+it('matches actual host, its own child backend, package pipe and both TCP owners',async()=>{
+  expect(await readOwnedSharedContext(tmpdir(),control,owned)).toMatchObject({host:owned.host,backend:{pid:43,parentPid:42},desktop:{pid:44},packageIdentityVerified:true,endpointOwnershipVerified:true});
+  expect(mocked.tools).toHaveBeenCalledOnce();expect(mocked.pipes).toHaveBeenCalledWith(44,host.desktopExe);
+});
+it.each(['hostPid','backendPid','version','stale','parent','replacement'])('rejects %s lease/identity drift',async condition=>{
+  if(condition==='hostPid')lease.hostPid=99;
+  if(condition==='backendPid')lease.backendPid=99;
+  if(condition==='version')lease.desktopVersion='other';
+  if(condition==='stale')lease.verifiedAt-=61_000;
+  if(condition==='parent')scan.desktopRelated[1].parentPid=999;
+  if(condition==='replacement')scan.inventory.host[0].createdAt='2026-10-12T00:01:00.000Z';
+  await expect(readOwnedSharedContext(tmpdir(),control,owned)).rejects.toThrow();expect(mocked.calls).not.toHaveBeenCalled();
+});
+it.each(['wrongOwner','wildcard','duplicate','foreignBackend','legacy','pipe'])('rejects %s conflicts before native inspection',async condition=>{
+  if(condition==='wrongOwner')scan.endpointOwners[0].listeners[0].pid=99;
+  if(condition==='wildcard')scan.endpointOwners[0].listeners[0].address='0.0.0.0';
+  if(condition==='duplicate')scan.endpointOwners[0].listeners.push({address:'127.0.0.1',pid:99});
+  if(condition==='foreignBackend')scan.desktopRelated.push(identity(99,999,host.codexBinary));
+  if(condition==='legacy')scan.inventory.legacy.push(identity(99));
+  if(condition==='pipe')mocked.pipes.mockResolvedValue([{pipe:'pipe',serverPid:99}]);
+  await expect(readOwnedSharedContext(tmpdir(),control,owned)).rejects.toThrow();expect(mocked.calls).not.toHaveBeenCalled();
+});
+it('measures the real desktop catalog, then performs only native deployment reads',async()=>{
+  expect(await inspectOwnedShared(tmpdir(),control,owned)).toMatchObject({verified:true,source:'owned_shared_native'});
+  expect(mocked.catalog).toHaveBeenCalledOnce();expect(mocked.calls.mock.calls.map(([m])=>m).every(m=>['project/list','thread/turns/list','thread/loaded/list','thread/read','thread/queue/list'].includes(m))).toBe(true);
+});
+it('rejects catalog mismatch before opening the native connection',async()=>{
+  mocked.catalog.mockResolvedValue(['list_projects','unexpected']);await expect(inspectOwnedShared(tmpdir(),control,owned)).rejects.toThrow('catalog mismatch');expect(mocked.connect).not.toHaveBeenCalled();
+});

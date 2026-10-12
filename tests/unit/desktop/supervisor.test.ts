@@ -116,3 +116,80 @@ it('locks a journal against two writers and rejects malformed state before any O
   await writeFile(h.path, JSON.stringify({ version: 1, phase: 'running', owned: {}, legacyPauseAttempted: true }), 'utf8');
   await expect(h.run()).rejects.toThrow('journal_invalid'); expect(h.events).toEqual([]);
 });
+
+function coldHarness() {
+  const h=harness(); let stop=false, tick=Date.now(), linger=false, reads=0;
+  h.port.coldExit=async () => { h.events.push('coldExit'); reads++; return {verifiedAt:tick,complete:true,desktopRelated:linger ? [identity(90)] : structuredClone(h.inventory.desktop)}; };
+  h.port.sharedIdle=async () => { h.events.push('sharedIdle'); return {verifiedAt:tick,desktop:h.inventory.desktop[0]!,allDesktopTasksIdle:true,toolsExact:true,
+    tasks:bindings.map(b => ({...b,status:'idle',queueCount:0,waitingApproval:false}))}; };
+  const run=(pause=async () => { if(h.inventory.desktop[0]?.pid===2) h.inventory.desktop=[]; else stop=true; }) =>
+    new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings,()=>tick).run(async()=>stop,pause,{startMode:'cold',exitTimeoutMs:20});
+  return {...h,run,stop:()=>{stop=true;},advance:(ms=21)=>{tick+=ms;},linger:()=>{linger=true;},get reads(){return reads;}};
+}
+it('cold mode waits for a human exit, checks shared tasks twice and never closes the old desktop', async () => {
+  const h=coldHarness(); let waiting=false;
+  const result=await h.run(async()=>{
+    if(h.inventory.desktop[0]?.pid===2) { waiting=true; expect(JSON.parse(await readFile(h.path,'utf8')).phase).toBe('waiting_desktop_exit');
+      expect(h.events).not.toContain('pauseLegacy'); h.inventory.desktop=[];
+    } else h.stop();
+  });
+  expect(waiting).toBe(true); expect(result).toMatchObject({startMode:'cold',phase:'restored',desktopCloseAttempted:false,desktopRestoreRequired:true,lastColdExitProof:{desktopRelated:[]}});
+  expect(h.events).not.toContain('idle'); expect(h.events).not.toContain('closeDesktop');
+  expect(h.events.filter(e=>e==='sharedIdle')).toHaveLength(2);
+  expect(h.events.indexOf('sharedIdle')).toBeLessThan(h.events.indexOf('startListener'));
+  expect(h.events.indexOf('ordinary')).toBeLessThan(h.events.indexOf('restoreLegacy'));
+});
+it('cold cancellation during waiting does not stop services or reopen the desktop', async()=>{
+  const h=coldHarness(); expect(await h.run(async()=>h.stop())).toMatchObject({phase:'blocked',errorCode:'stop_requested'});
+  expect(h.inventory.desktop).toEqual([identity(2)]); expect(h.events).not.toContain('pauseLegacy'); expect(h.events).not.toContain('ordinary');
+});
+it.each(['desktop','backend'])('cold %s remaining at timeout does not mutate any service',async remaining=>{
+  const h=coldHarness();
+  if(remaining==='backend') {h.port.backup=async()=>{h.inventory.desktop=[];return {legacyTaskEnabled:true,launchDefinitionSha256:'b'.repeat(64)};};h.linger();}
+  expect(await h.run(async()=>h.advance())).toMatchObject({phase:'blocked',errorCode:'cold_exit_timeout'});
+  expect(h.events).not.toContain('pauseLegacy'); expect(h.events).not.toContain('startBroker');
+});
+it.each(['incomplete','stale'])('rejects %s cold inventory evidence before stopping old consumer',async condition=>{
+  const h=coldHarness(), read=h.port.coldExit!;
+  h.port.coldExit=async()=>({...await read(),...(condition==='incomplete'?{complete:false}:{verifiedAt:Date.now()-6000})});
+  expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'cold_exit_proof_rejected'});expect(h.events).not.toContain('pauseLegacy');
+});
+it('rejects a desktop reopened during cold waiting with a different creation identity',async()=>{
+  const h=coldHarness();expect(await h.run(async()=>{h.inventory.desktop=[identity(80)];})).toMatchObject({phase:'blocked',errorCode:'cold_exit_inventory_changed'});
+  expect(h.events).not.toContain('pauseLegacy');
+});
+it.each([{allDesktopTasksIdle:false},{toolsExact:false},{tasks:[]},{tasks:[{...bindings[0]!,status:'idle' as const,queueCount:1,waitingApproval:false}]},
+  {tasks:[{...bindings[0]!,status:'idle' as const,queueCount:0,waitingApproval:true}]}])('rejects invalid new shared native proof and restores before old consumer',async proof=>{
+  const h=coldHarness(), idle=h.port.sharedIdle!;h.port.sharedIdle=async()=>({...await idle(),...proof});
+  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'idle_proof_rejected'});
+  expect(h.events).not.toContain('startListener');expect(h.events.indexOf('ordinary')).toBeLessThan(h.events.indexOf('restoreLegacy'));
+});
+it('cold mode restores an ordinary desktop even if pausing legacy fails before a host was started',async()=>{
+  const h=coldHarness(); h.fail('pauseLegacy'); expect(await h.run()).toMatchObject({phase:'restored',desktopCloseAttempted:false,desktopRestoreRequired:true});
+  expect(h.events).toContain('ordinary');expect(h.events).not.toContain('startHost');
+});
+it('restart of cold waiting never treats a human exit as permission for a forward launch',async()=>{
+  const h=coldHarness();await h.run(async()=>h.stop());h.events.length=0;
+  expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'cold_start_resume_requires_new_plan'}); expect(h.events).toEqual([]);
+});
+it('a cold journal cannot be resumed as a hot run to bypass native admission',async()=>{
+  const h=coldHarness();await h.run(async()=>h.stop()); h.events.length=0;
+  expect(await h.supervisor().run(async()=>false,async()=>{})).toMatchObject({phase:'blocked',startMode:'cold',errorCode:'cold_start_resume_requires_new_plan'});
+  expect(h.events).toEqual([]);
+});
+it('requires the real cold exit and new shared probes before opening a cold journal',async()=>{
+  const h=harness();await expect(h.supervisor().run(async()=>false,async()=>{},{startMode:'cold'})).rejects.toThrow('Cold start requires');expect(h.events).toEqual([]);
+});
+it('cold recovery restores the desktop even when no automatic close was attempted',async()=>{
+  const h=coldHarness();await h.run();const state=JSON.parse(await readFile(h.path,'utf8'));
+  state.phase='running';await writeFile(h.path,JSON.stringify(state),'utf8');
+  Object.assign(h.inventory,{legacy:[],desktop:[identity(5)],host:[identity(4)],broker:[identity(3)],listener:[identity(6)]});h.events.length=0;
+  expect(await h.run()).toMatchObject({phase:'restored',startMode:'cold',desktopCloseAttempted:false,desktopRestoreRequired:true});
+  expect(h.events.some(e=>e.startsWith('start'))).toBe(false);expect(h.events.indexOf('ordinary')).toBeLessThan(h.events.indexOf('restoreLegacy'));
+});
+it('blocks listener startup when the final shared proof becomes stale during inventory',async()=>{
+  const h=coldHarness(), inventory=h.port.inventory;let proofs=0;
+  const idle=h.port.sharedIdle!;h.port.sharedIdle=async()=>{proofs++;return idle();};
+  h.port.inventory=async()=>{if(proofs===2){h.advance(6000);proofs++;}return inventory();};
+  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'cold_shared_proof_stale_or_changed'});expect(h.events).not.toContain('startListener');
+});

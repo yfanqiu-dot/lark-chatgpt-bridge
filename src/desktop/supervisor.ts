@@ -27,7 +27,14 @@ export interface IdleProof {
 }
 export interface SupervisorBinding { threadId: string; projectId: string; projectRoot: string }
 export interface OrdinaryProof { desktop: ProcessIdentity; verifiedAt: number; packageIdentityVerified: boolean; toolsExact: boolean }
-export type SupervisorPhase = 'preflight' | 'pausing_legacy' | 'closing_desktop' | 'starting_broker' | 'starting_host' | 'starting_listener' | 'running'
+export interface ColdExitProof {
+  verifiedAt: number;
+  /** Includes every desktop process, its descendants and all App Servers,
+   * including foreign installs. Missing/unreadable inventory fails closed. */
+  desktopRelated: ProcessIdentity[];
+  complete: boolean;
+}
+export type SupervisorPhase = 'preflight' | 'waiting_desktop_exit' | 'pausing_legacy' | 'closing_desktop' | 'starting_broker' | 'starting_host' | 'starting_listener' | 'running'
   | 'stopping_listener' | 'stopping_host' | 'restoring_desktop' | 'restoring_legacy' | 'stopping_broker' | 'restored' | 'blocked';
 export interface SupervisorState {
   version: 1;
@@ -35,11 +42,14 @@ export interface SupervisorState {
   phase: SupervisorPhase;
   revision: number;
   updatedAt: string;
+  startMode?: 'hot' | 'cold'; // Missing means the historical hot workflow.
   baseline?: { legacy: ProcessIdentity; desktop: ProcessIdentity; legacyTaskEnabled: boolean; launchDefinitionSha256: string };
   owned: Partial<Record<'host' | 'listener' | 'broker', ProcessIdentity>>;
   /** Intent is durable before every potentially destructive call. */
   legacyPauseAttempted: boolean;
   desktopCloseAttempted: boolean;
+  desktopRestoreRequired?: boolean;
+  lastColdExitProof?: ColdExitProof;
   errorCode?: string;
   rollbackErrorCode?: string;
   ordinaryProof?: OrdinaryProof;
@@ -64,8 +74,12 @@ export interface SupervisorPort {
   restoreLegacy(baseline: NonNullable<SupervisorState['baseline']>): Promise<void>;
   stopBroker(identity: ProcessIdentity): Promise<void>;
   verifyBindings(): Promise<void>;
+  /** Cold mode only: the supervisor observes a human's normal exit. It never
+   * calls closeDesktop or claims that the old desktop was natively idle. */
+  coldExit?(): Promise<ColdExitProof>;
+  sharedIdle?(): Promise<IdleProof>;
 }
-const phases: SupervisorPhase[] = ['preflight', 'pausing_legacy', 'closing_desktop', 'starting_broker', 'starting_host', 'starting_listener', 'running', 'stopping_listener', 'stopping_host', 'restoring_desktop', 'restoring_legacy', 'stopping_broker', 'restored', 'blocked'];
+const phases: SupervisorPhase[] = ['preflight', 'waiting_desktop_exit', 'pausing_legacy', 'closing_desktop', 'starting_broker', 'starting_host', 'starting_listener', 'running', 'stopping_listener', 'stopping_host', 'restoring_desktop', 'restoring_legacy', 'stopping_broker', 'restored', 'blocked'];
 function validIdentity(p: ProcessIdentity): boolean {
   return !!p && Number.isSafeInteger(p.pid) && p.pid > 0 && Number.isSafeInteger(p.parentPid) && p.parentPid >= 0
     && typeof p.createdAt === 'string' && Number.isFinite(Date.parse(p.createdAt)) && typeof p.executable === 'string' && isAbsolute(p.executable) && /^[a-f0-9]{64}$/.test(p.commandLineSha256);
@@ -102,10 +116,11 @@ export class SupervisorJournal {
       try { state = JSON.parse(await readFile(this.path, 'utf8')); }
       catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
       if (state.version !== 1 || !/^[a-f0-9-]{36}$/.test(state.runId) || !phases.includes(state.phase) || !Number.isSafeInteger(state.revision) || state.revision < 0
+        || (state.startMode !== undefined && !['hot','cold'].includes(state.startMode)) || (state.desktopRestoreRequired !== undefined && typeof state.desktopRestoreRequired !== 'boolean')
         || typeof state.legacyPauseAttempted !== 'boolean' || typeof state.desktopCloseAttempted !== 'boolean' || !state.owned
         || Object.entries(state.owned).some(([role, identity]) => !['broker','host','listener'].includes(role) || !validIdentity(identity))) fail('journal_invalid');
       if (state.baseline && (!validIdentity(state.baseline.legacy) || !validIdentity(state.baseline.desktop) || typeof state.baseline.legacyTaskEnabled !== 'boolean' || !/^[a-f0-9]{64}$/.test(state.baseline.launchDefinitionSha256))) fail('journal_baseline_invalid');
-      if ((state.legacyPauseAttempted || state.desktopCloseAttempted || Object.keys(state.owned).length) && !state.baseline) fail('journal_baseline_missing');
+      if ((state.legacyPauseAttempted || state.desktopCloseAttempted || state.desktopRestoreRequired || Object.keys(state.owned).length) && !state.baseline) fail('journal_baseline_missing');
       return state;
     } catch (e) { await this.close(); throw e; }
   }
@@ -128,8 +143,8 @@ export class DesktopSupervisor {
     if (['legacy','desktop','host','listener','broker'].some(role => !Array.isArray(i[role as keyof SupervisorInventory]) || i[role as keyof SupervisorInventory].some(p => !validIdentity(p)))) fail('inventory_invalid');
     return i;
   }
-  private async idle(desktop: ProcessIdentity, state: SupervisorState): Promise<void> {
-    const p = await this.port.idle();
+  private async idle(desktop: ProcessIdentity, state: SupervisorState, shared = false): Promise<void> {
+    const p = await (shared ? this.port.sharedIdle!() : this.port.idle());
     if (!Number.isFinite(p.verifiedAt) || p.verifiedAt > this.now() + 1000 || this.now() - p.verifiedAt > 5000 || !sameProcess(p.desktop, desktop)
       || p.allDesktopTasksIdle !== true || p.toolsExact !== true || !Array.isArray(p.tasks) || new Set(p.tasks.map(t => t.threadId)).size !== p.tasks.length
       || p.tasks.some(t => !['idle','notLoaded'].includes(t.status) || t.queueCount !== 0 || t.waitingApproval !== false)
@@ -138,11 +153,26 @@ export class DesktopSupervisor {
       tasks: p.tasks.map(t => ({ threadId: t.threadId, projectId: t.projectId, projectRoot: t.projectRoot, status: t.status, queueCount: t.queueCount, waitingApproval: t.waitingApproval })) };
     await this.journal.save(state);
   }
+  private async coldExit(s: SupervisorState): Promise<boolean> {
+    const p = await this.port.coldExit!(), i = await this.inventory();
+    if (p.complete !== true || !Number.isFinite(p.verifiedAt) || p.verifiedAt > this.now() + 1000 || this.now() - p.verifiedAt > 5000
+      || !Array.isArray(p.desktopRelated) || p.desktopRelated.some(identity => !validIdentity(identity))) fail('cold_exit_proof_rejected');
+    if (i.legacy.length !== (s.legacyPauseAttempted ? 0 : 1) || (!s.legacyPauseAttempted && !sameProcess(i.legacy[0]!, s.baseline!.legacy))
+      || i.host.length || i.listener.length || i.broker.length !== (s.owned.broker ? 1 : 0) || (s.owned.broker && !sameProcess(i.broker[0]!, s.owned.broker))
+      || i.desktop.length > 1 || (i.desktop.length && !sameProcess(i.desktop[0]!, s.baseline!.desktop))) fail('cold_exit_inventory_changed');
+    // The second inventory must also report no desktop. Never accept a stale
+    // disappearance proof when the user has reopened the app during the scan.
+    const exited = !p.desktopRelated.length && !i.desktop.length;
+    if (exited) { s.lastColdExitProof = { verifiedAt:p.verifiedAt,complete:true,desktopRelated:[] }; await this.journal.save(s); }
+    return exited;
+  }
   private async phase(s: SupervisorState, phase: SupervisorPhase): Promise<void> { s.phase = phase; await this.journal.save(s); }
   private async launch(s: SupervisorState, role: 'broker' | 'host' | 'listener'): Promise<void> {
     await this.phase(s, `starting_${role}`);
     const before = await this.inventory();
     if (before[role].length || (role === 'listener' && before.legacy.length)) fail('consumer_or_role_conflict');
+    if (role === 'listener' && s.startMode === 'cold' && (!s.lastIdleProof || this.now() - s.lastIdleProof.verifiedAt > 5000
+      || before.desktop.length !== 1 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop))) fail('cold_shared_proof_stale_or_changed');
     const identity = await (role === 'broker' ? this.port.startBroker(s.runId) : role === 'host' ? this.port.startHost(s.runId) : this.port.startListener(s.runId));
     if (!validIdentity(identity)) fail('launch_identity_invalid');
     s.owned[role] = structuredClone(identity); await this.journal.save(s);
@@ -168,7 +198,7 @@ export class DesktopSupervisor {
       await this.phase(s, 'stopping_host'); await this.stopOwned(s, 'host');
       const stopped = await this.inventory();
       if (stopped.host.length || stopped.listener.length) fail('new_runtime_not_stopped');
-      if (s.desktopCloseAttempted) {
+      if (s.desktopCloseAttempted || s.desktopRestoreRequired) {
         await this.phase(s, 'restoring_desktop');
         const proof = await this.port.ordinary(), observed = await this.inventory();
         if (proof.packageIdentityVerified !== true || proof.toolsExact !== true || !Number.isFinite(proof.verifiedAt) || proof.verifiedAt > this.now() + 1000 || this.now() - proof.verifiedAt > 60_000
@@ -192,37 +222,74 @@ export class DesktopSupervisor {
   }
   /** The caller supplies an independent stop source. No automatic Feishu
    * message, approval decision, task creation or model submit exists here. */
-  async run(stopRequested: () => Promise<boolean>, pause: () => Promise<void>): Promise<SupervisorState> {
+  async run(stopRequested: () => Promise<boolean>, pause: () => Promise<void>, options: { startMode?: 'hot' | 'cold'; exitTimeoutMs?: number } = {}): Promise<SupervisorState> {
+    const mode = options.startMode ?? 'hot', timeout = options.exitTimeoutMs ?? 600_000;
+    if (!['hot','cold'].includes(mode) || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2_700_000) throw new Error('Invalid supervisor start mode or exit timeout');
+    if (mode === 'cold' && (!this.port.coldExit || !this.port.sharedIdle)) throw new Error('Cold start requires exit inventory and shared native idle probes');
     let s = await this.journal.open();
     try {
-      if (s && s.phase !== 'restored') { await this.rollback(s); return s; }
-      s = { version: 1, runId: randomUUID(), phase: 'preflight', revision: 0, updatedAt: new Date().toISOString(), owned: {}, legacyPauseAttempted: false, desktopCloseAttempted: false };
+      if (s && s.phase !== 'restored') {
+        if (s.startMode === 'cold' && !s.legacyPauseAttempted && !s.desktopCloseAttempted && !s.desktopRestoreRequired && !Object.keys(s.owned).length) {
+          s.errorCode = 'cold_start_resume_requires_new_plan'; await this.phase(s,'blocked');
+        } else await this.rollback(s);
+        return s;
+      }
+      s = { version: 1, runId: randomUUID(), startMode:mode, phase: 'preflight', revision: 0, updatedAt: new Date().toISOString(), owned: {}, legacyPauseAttempted: false, desktopCloseAttempted: false };
       await this.journal.save(s);
       try {
         await this.port.verifyBindings();
         const baseline = await this.inventory();
         if (baseline.legacy.length !== 1 || baseline.desktop.length !== 1 || baseline.host.length || baseline.listener.length || baseline.broker.length) fail('baseline_not_unique');
-        await this.idle(baseline.desktop[0]!, s);
+        if (mode === 'hot') await this.idle(baseline.desktop[0]!, s);
         const backup = await this.port.backup();
         if (typeof backup.legacyTaskEnabled !== 'boolean' || !/^[a-f0-9]{64}$/.test(backup.launchDefinitionSha256)) fail('backup_unverified');
         s.baseline = { legacy: structuredClone(baseline.legacy[0]!), desktop: structuredClone(baseline.desktop[0]!), legacyTaskEnabled: backup.legacyTaskEnabled, launchDefinitionSha256: backup.launchDefinitionSha256 }; await this.journal.save(s);
         if (await stopRequested()) { await this.phase(s, 'restored'); return s; }
-        await this.idle(s.baseline.desktop, s);
+        if (mode === 'cold') {
+          await this.phase(s,'waiting_desktop_exit');
+          const deadline = this.now() + timeout;
+          for (;;) {
+            if (await stopRequested()) { await this.phase(s,'blocked'); s.errorCode = 'stop_requested'; await this.journal.save(s); return s; }
+            if (this.now() >= deadline) fail('cold_exit_timeout');
+            if (await this.coldExit(s)) break;
+            await pause();
+          }
+          await this.port.verifyBindings();
+          if (!await this.coldExit(s)) fail('cold_desktop_reappeared');
+          if (await stopRequested()) fail('stop_requested');
+          // Human already closed the ordinary desktop; recovery after any
+          // legacy pause attempt must restore it even if host launch fails.
+          s.desktopRestoreRequired = true;
+        } else await this.idle(s.baseline.desktop, s);
         s.legacyPauseAttempted = true; await this.phase(s, 'pausing_legacy');
         await this.port.pauseLegacy(structuredClone(s.baseline.legacy));
         if ((await this.inventory()).legacy.length) fail('legacy_not_stopped');
         if (await stopRequested()) fail('stop_requested');
-        // A task may start while the legacy consumer is being stopped.
-        await this.idle(s.baseline.desktop, s);
-        s.desktopCloseAttempted = true; await this.phase(s, 'closing_desktop');
-        await this.port.closeDesktop(structuredClone(s.baseline.desktop));
-        if ((await this.inventory()).desktop.length) fail('desktop_reappeared');
+        if (mode === 'cold') {
+          if (!await this.coldExit(s)) fail('cold_desktop_reappeared');
+        } else {
+          // A task may start while the legacy consumer is being stopped.
+          await this.idle(s.baseline.desktop, s);
+          s.desktopCloseAttempted = true; await this.phase(s, 'closing_desktop');
+          await this.port.closeDesktop(structuredClone(s.baseline.desktop));
+          if ((await this.inventory()).desktop.length) fail('desktop_reappeared');
+        }
         if (await stopRequested()) fail('stop_requested');
         await this.launch(s, 'broker');
         if (await stopRequested()) fail('stop_requested');
+        if (mode === 'cold' && !await this.coldExit(s)) fail('cold_desktop_reappeared');
         await this.launch(s, 'host');
         await this.port.ready();
         if (await stopRequested()) fail('stop_requested');
+        if (mode === 'cold') {
+          const shared = await this.inventory();
+          if (shared.desktop.length !== 1 || sameProcess(shared.desktop[0]!, s.baseline.desktop)) fail('cold_shared_desktop_not_unique');
+          await this.idle(shared.desktop[0]!, s, true);
+          await this.port.verifyBindings();
+          if (await stopRequested()) fail('stop_requested');
+          // Recheck after bindings so that the listener uses a fresh proof.
+          await this.idle(shared.desktop[0]!, s, true);
+        }
         await this.launch(s, 'listener'); await this.port.ready();
         await this.phase(s, 'running');
         while (!await stopRequested()) {

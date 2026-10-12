@@ -48,6 +48,8 @@ node bin/lark-chatgpt-deploy.mjs ordinary-check D:\bridge-local\stage-001 D:\bri
     "D:\\bridge\\dist\\desktop-supervisor.js",
     "D:\\bridge\\dist\\desktop-supervisor-windows.js",
     "D:\\bridge\\dist\\desktop-ordinary-idle.js",
+    "D:\\bridge\\dist\\desktop-shared-idle.js",
+    "D:\\bridge\\dist\\desktop-shared-inspector.js",
     "D:\\bridge\\dist\\desktop-broker-lease.js",
     "D:\\bridge\\dist\\desktop-standalone.js",
     "D:\\bridge\\bin\\lark-chatgpt-supervisor.mjs",
@@ -123,6 +125,30 @@ node bin/lark-chatgpt-deploy.mjs ordinary-check D:\bridge-local\stage-001 D:\bri
 broker实际核对CIM进程的PID、父PID、创建时间、二进制路径和命令行SHA；绑定初始监督身份及运行编号，拒绝版本倒退、过期或伪造租约。租约失效后不可重新变为就绪：进入 `draining`，写入共享host的停止请求，拒绝新的共享桌面启动，在默认180秒内保留普通桌面恢复与释放入口。普通桌面已释放且无活动子进程，或期限到达后退出。`drainTimedOut=true` 必须保留为失败，不能据此声称普通桌面或旧消费者已恢复。
 
 包装进程也核对新鲜的就绪回执、运行编号及完整broker身份，不用PID存在作为恢复证明。生产启动器仍须接入独立监督进程、持续续租、停止与回退，并确保外部启动定义没有限时执行设置。当前没有注册生产启动任务，也没有在真实包内启用持续模式；不能把纯租约/策略测试记为现场常驻或自动回退通过。
+
+### 本人正常退出后的冷启动流程（2026-10-12确认）
+
+本人已接受开发冷启动流程：先自行完成或取消桌面工作，再正常退出Codex。此确认用于开发验收流程，不表示已授权立即切换生产服务。普通桌面原生读取的 `-32602` 仍保留为未通过的热切换证据，不将人的退出操作写成原生空闲证明。
+
+监督状态机新增显式 `startMode=cold`，缺省仍执行原热切换。新冷启动运行先核对原进程、绑定和启动备份，再进入 `waiting_desktop_exit`。默认等候10分钟，调用者可设置不超过45分钟的期限；取消、到期或完整身份变化均不继续启动。同一未完成记录重启仅向后恢复，等待阶段若尚未操作服务则保持blocked，须用新计划重新准入。
+
+Windows新增只读 `ColdSnapshot`，清点全部桌面主进程、renderer等子进程及递归后代，以及其他安装目录或孤立的Codex App Server。潜在桌面、后台或相关后代的身份不可读时拒绝放行。监督器另读实际角色清点，核对旧消费者身份；桌面、后台未全部退出，或者桌面在扫描后重新出现，不能停止旧消费者。冷启动不会调用 `closeDesktop`，也没有强制关闭桌面的后备路径。
+
+```powershell
+node bin/lark-chatgpt-deploy.mjs cold-check D:\bridge-local\stage-001 D:\bridge-local\cold-check-001
+```
+
+此命令只创建新的本机证据目录并清点进程，不等待退出、不启停任何服务。桌面或后台仍在时返回退出码2；即使证明已退出，也始终返回 `productionReady=false`、`oldDesktopNativeIdleVerified=false`，不能据此跳过新实例的原生检查。
+
+通过退出证明后，状态机再次核对绑定、停止唯一旧消费者、复查退出状态，才依次启动broker和host。新共享实例必须通过 `sharedIdle` 的两次证明，且在监听启动前核对证明时效和新桌面的完整身份。`inspectSharedIdle`只允许项目、已完成历史、全部已加载任务、原绑定任务和分页队列的读取；任何任务活动、队列非空、待审批、归属错误、项目或历史不匹配、通知变化、协议拒绝或超过5秒都阻止监听。完整工具目录来自新实例的已验证租约，不能用普通桌面的旧目录替代。
+
+`readOwnedSharedContext`连接实际Windows清点、租约和管道检查：只接受监督器持有完整启动回执的host与broker；App Server须是该host的自有子进程和锁定二进制；两个实际监听端点的唯一进程及loopback地址须分别对应host和App Server。原生检查前测量实际桌面管道的完整工具目录，并在读取期间重复核对身份、端点及租约。其他桌面或孤立后台、陌生端点、租约PID不符或旧租约缺少新的host/backend归属字段都被拒绝。
+
+当前已完成状态机、只读进程入口和上述新实例检查模块；持续broker及生产启停适配器尚未接通，现场正常退出、真实共享启动及灰度切换仍待验。模拟端口或内存证明只算代码回归。
+
+冷启动故障回退单独保存 `desktopRestoreRequired`，即使没有自动关闭动作、或者旧消费者暂停失败且host未启动，也先核对普通桌面恢复证明，再恢复旧消费者。启动回执不明确、进程身份变化时仍阻止猜测性停止和旧消费者恢复；不重投模型输入、不复制原账本、不清理历史uncertain。
+
+本轮新增51项冷启动/共享检查回归（状态机18、共享原生读取15、实际归属检查15、Windows进程清点3）。最终本机全仓130个文件、913项通过，类型与构建通过。首次全仓的隔离进程夹具提前以0退出，原失败日志保留；发现其身份JSON存在写入未完成即被读取的风险，改为原子发布并让夹具错误退出可见。原失败的具体底层异常未捕获，不将该风险推断写为已证实根因；后续独立进程恢复和最终全仓均通过。
 
 ### 独立预检进程（2026-10-12）
 

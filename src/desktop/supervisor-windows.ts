@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { verifyDeployment } from './deployment';
-import type { ProcessIdentity, SupervisorInventory } from './supervisor';
+import type { ColdExitProof, ProcessIdentity, SupervisorInventory } from './supervisor';
 import { windowsPowerShellEnvironment } from './windows-tools';
 
 const exec = promisify(execFile);
@@ -20,18 +20,20 @@ export class WindowsSupervisorControl {
     if (!snapshot.files.some(f => f.path === resolve(script))) throw new Error('Runtime control script must be included in deployment artifact proofs');
     await mkdir(evidence, { recursive: false, mode: 0o700 });
     const configFile = join(evidence, 'control.json');
-    const data = JSON.stringify({ version: 1, desktopExe: host.desktopExe, legacy: snapshot.spec.legacy });
+    const data = JSON.stringify({ version: 1, desktopExe: host.desktopExe, endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,legacy: snapshot.spec.legacy });
     await writeFile(configFile, data, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations);
   }
   private async call(action: string, extra: string[] = []): Promise<any> {
-    if (!['Snapshot','TestIdentity','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require a verified native idle gate and explicit runtime wiring');
+    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
     await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
     const result = await exec('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra], { windowsHide: true, timeout: 35_000, encoding: 'utf8',env:windowsPowerShellEnvironment(process.env) });
     return JSON.parse(result.stdout);
   }
   async inventory(): Promise<SupervisorInventory> { return this.call('Snapshot'); }
+  async coldSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory }> { return this.call('ColdSnapshot'); }
+  async sharedSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory; endpointOwners:Array<{endpoint:string;listeners:Array<{address:string;pid:number}>}> }> { return this.call('SharedSnapshot'); }
   async backupTask(directory: string): Promise<{ definitionSha256: string; enabled: boolean }> {
     if (!isAbsolute(directory)) throw new Error('Backup directory must be absolute');
     await mkdir(directory, { recursive: false, mode: 0o700 });

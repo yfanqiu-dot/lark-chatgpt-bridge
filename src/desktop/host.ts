@@ -238,7 +238,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
           const match=matches[0]!;
           const definition=JSON.parse(await readFile(join(pluginDir,'.mcp.json'),'utf8')).mcpServers.codex_app;
           const mcpServer={...definition,command:process.execPath,args:[join(pluginDir,'server.mjs')],cwd:cfg.projectRoot};
-          const lease=JSON.stringify({version:1,endpoint:cfg.endpoint,verifiedAt:Date.now(),desktopPid:desktop.pid,pipeServerPid:match.serverPid,pipe:match.pipe,toolNames:match.toolNames,mcpServer,desktopVersion:cfg.desktopVersion,codexSha256:cfg.codexSha256});
+          const lease=JSON.stringify({version:1,endpoint:cfg.endpoint,backendEndpoint:cfg.backendEndpoint,hostPid:process.pid,backendPid:server.pid,verifiedAt:Date.now(),desktopPid:desktop.pid,pipeServerPid:match.serverPid,pipe:match.pipe,toolNames:match.toolNames,mcpServer,desktopVersion:cfg.desktopVersion,codexSha256:cfg.codexSha256});
           leaseWrites=leaseWrites.then(async()=>{
             if(!readiness.canLease(revision) || stopping)return;
             await writeFileAtomic(cfg.connectionFile,lease);

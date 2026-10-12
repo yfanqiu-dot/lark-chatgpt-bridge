@@ -4,11 +4,14 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DesktopSupervisor, SupervisorJournal, type ProcessIdentity, type SupervisorInventory, type SupervisorPort } from '../../src/desktop/supervisor';
+import { writeFileAtomic } from '../../src/platform/atomic-write';
 
 const [dir, mode, role] = process.argv.slice(2) as [string,string,string];
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const read = async (file: string) => JSON.parse(await readFile(join(dir, file), 'utf8'));
-const save = async (file: string, value: unknown) => writeFile(join(dir, file), JSON.stringify(value), 'utf8');
+// Parent reads worker identity as soon as the file exists. Publish complete
+// JSON atomically, including under a heavily concurrent full-suite run.
+const save = async (file: string, value: unknown) => writeFileAtomic(join(dir, file), JSON.stringify(value));
 const exists = async (file: string) => { try { await readFile(join(dir, file)); return true; } catch { return false; } };
 const fake = (pid: number): ProcessIdentity => ({ pid, parentPid: 1, createdAt: '2026-10-11T00:00:00.000Z', executable: process.execPath, commandLineSha256: 'a'.repeat(64) });
 async function worker(): Promise<void> {
@@ -54,6 +57,8 @@ async function supervisor(): Promise<void> {
   };
   const state = await new DesktopSupervisor(new SupervisorJournal(join(dir, 'supervisor.json'), 2000), port, bindings).run(
     () => exists('request-stop'), async () => { console.log('RUNNING'); await delay(100); });
-  console.log(state.phase.toUpperCase()); if (state.phase !== 'restored') process.exitCode = 1;
+  console.log(state.phase.toUpperCase());
+  if (state.errorCode || state.rollbackErrorCode) console.error(`FIXTURE_ERROR ${state.errorCode ?? ''} ${state.rollbackErrorCode ?? ''}`);
+  if (state.phase !== 'restored' || state.errorCode || state.rollbackErrorCode) process.exitCode = 1;
 }
 void (mode === 'worker' ? worker() : supervisor()).catch(e => { console.error(e.message); process.exitCode = 1; });

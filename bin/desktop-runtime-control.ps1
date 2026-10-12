@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','TestIdentity','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask')][string]$Action,
+  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask')][string]$Action,
   [Parameter(Mandatory=$true)][string]$ConfigFile,
   [string]$IdentityFile,
   [ValidateSet('legacy','desktop','host','listener')][string]$Role,
@@ -33,6 +33,22 @@ function Get-Role($process){
 function Get-Identity($process){
   if(!$process.ExecutablePath -or !$process.CommandLine){throw 'Process identity is not readable'}
   return @{pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;createdAt=$process.CreationDate.ToUniversalTime().ToString('o');executable=[string]$process.ExecutablePath;commandLineSha256=(Get-Sha $process.CommandLine)}
+}
+function Get-ColdRelated($processes){
+  $taskRelated=[Collections.Generic.HashSet[int]]::new()
+  foreach($taskProcess in $processes){
+    if($taskProcess.Name -in @('ChatGPT.exe','codex.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){throw 'Potential desktop or App Server is unreadable'}
+    # Count every desktop child and any Codex App Server, not just the selected
+    # install. A renderer left after main-window exit is not a cold baseline.
+    if($taskProcess.Name -eq 'ChatGPT.exe' -or ($taskProcess.Name -eq 'codex.exe' -and (Has-Argument $taskProcess.CommandLine 'app-server'))){[void]$taskRelated.Add([int]$taskProcess.ProcessId)}
+  }
+  do{
+    $taskAdded=$false
+    foreach($taskProcess in $processes){
+      if($taskRelated.Contains([int]$taskProcess.ParentProcessId) -and $taskRelated.Add([int]$taskProcess.ProcessId)){$taskAdded=$true}
+    }
+  }while($taskAdded)
+  return @($processes | Where-Object {$taskRelated.Contains([int]$_.ProcessId)} | ForEach-Object {Get-Identity $_})
 }
 function Assert-Identity($expected,$expectedRole){
   if(!$expected -or !$expectedRole -or [int]$expected.pid -le 0){throw 'Missing expected process identity'}
@@ -76,12 +92,31 @@ function Read-TaskDefinition {
   if($null -eq $taskScheduled.Settings.Enabled){throw 'Legacy task enabled state is missing'}
   return Normalize-TaskDefinition $taskXml ([bool]$taskScheduled.Settings.Enabled)
 }
-if($Action -eq 'Snapshot'){
+if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
+  $taskObservedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $taskProcesses=@(Get-CimInstance Win32_Process)
   $taskResult=@{legacy=@();desktop=@();host=@();listener=@();broker=@()}
-  foreach($taskProcess in @(Get-CimInstance Win32_Process | Where-Object {$_.Name -in @('node.exe','ChatGPT.exe','powershell.exe','pwsh.exe')})){
+  foreach($taskProcess in @($taskProcesses | Where-Object {$_.Name -in @('node.exe','ChatGPT.exe','powershell.exe','pwsh.exe')})){
     if($taskProcess.Name -in @('node.exe','ChatGPT.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){throw 'A potential runtime process cannot be identified'}
     $taskRole=Get-Role $taskProcess
     if($taskRole){$taskResult[$taskRole]+=,(Get-Identity $taskProcess)}
+  }
+  if($Action -in @('ColdSnapshot','SharedSnapshot')){
+    $taskColdResult=@{verifiedAt=$taskObservedAt;complete=$true;desktopRelated=@(Get-ColdRelated $taskProcesses);inventory=$taskResult}
+    if($Action -eq 'SharedSnapshot'){
+      $taskOwners=@()
+      foreach($taskEndpoint in @($taskConfig.endpoint,$taskConfig.backendEndpoint)){
+        $taskUri=[Uri]$taskEndpoint
+        if($taskUri.Scheme -ne 'ws' -or $taskUri.Host -notin @('127.0.0.1','[::1]','::1') -or $taskUri.Port -le 0 -or $taskUri.UserInfo -or $taskUri.Query -or $taskUri.Fragment -or $taskUri.AbsolutePath -ne '/'){throw 'Invalid shared endpoint'}
+        $taskTcp=@(Get-NetTCPConnection -State Listen -LocalPort $taskUri.Port -ErrorAction Stop)
+        # Wildcard or another listening address/owner cannot establish the
+        # expected exclusive loopback endpoint, even if its PID exists.
+        $taskOwners+=@{endpoint=[string]$taskEndpoint;listeners=@($taskTcp | ForEach-Object {@{address=[string]$_.LocalAddress;pid=[int]$_.OwningProcess}})}
+      }
+      $taskColdResult.endpointOwners=$taskOwners
+    }
+    $taskColdResult | ConvertTo-Json -Depth 8 -Compress
+    exit 0
   }
   $taskResult | ConvertTo-Json -Depth 6 -Compress
   exit 0
