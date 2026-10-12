@@ -12,7 +12,7 @@ const digest = (data: string | Buffer) => createHash('sha256').update(data).dige
 /** Windows adapter primitives. The native idle gate and production launch
  * lifecycle are deliberately required before wiring destructive operations. */
 export class WindowsSupervisorControl {
-  private constructor(private readonly stage: string, private readonly script: string, private readonly configFile: string, private readonly configSha256: string, private readonly evidence: string, private readonly allowMutations: boolean) {}
+  private constructor(private readonly stage: string, private readonly script: string, private readonly configFile: string, private readonly configSha256: string, private readonly evidence: string, private readonly allowMutations: boolean,private readonly scriptSha256:string) {}
   static async prepare(stage: string, script: string, evidence: string, allowMutations = false): Promise<WindowsSupervisorControl> {
     if (process.platform !== 'win32') throw new Error('Windows supervisor control requires Windows');
     if (![stage,script,evidence].every(isAbsolute)) throw new Error('Windows supervisor control paths must be absolute');
@@ -22,11 +22,12 @@ export class WindowsSupervisorControl {
     const configFile = join(evidence, 'control.json');
     const data = JSON.stringify({ version: 1, desktopExe: host.desktopExe, endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,legacy: snapshot.spec.legacy });
     await writeFile(configFile, data, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations);
+    return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations,snapshot.files.find(f=>f.path===resolve(script))!.sha256);
   }
-  private async call(action: string, extra: string[] = [], input?:string, raw=false): Promise<any> {
+  private async call(action: string, extra: string[] = [], input?:string, raw=false,boundedRead=false): Promise<any> {
     if (!['Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
-    await verifyDeployment(this.stage);
+    if(boundedRead){if(action!=='SharedSnapshot' || digest(await readFile(this.script))!==this.scriptSha256)throw new Error('Bounded native reader changed');}
+    else await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
     const args=['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra];
     const options={windowsHide:true,timeout:35_000,encoding:'utf8' as const,env:windowsPowerShellEnvironment(process.env),maxBuffer:2*1024*1024};
@@ -46,6 +47,9 @@ export class WindowsSupervisorControl {
   async startOrdinary():Promise<void>{await this.call('StartOrdinary');}
   async coldSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory }> { return this.call('ColdSnapshot'); }
   async sharedSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory; endpointOwners:Array<{endpoint:string;listeners:Array<{address:string;pid:number}>}> }> { return this.call('SharedSnapshot'); }
+  /** For an already pinned <=5s admission scan only. Still hashes the sealed
+   * reader/config and queries live CIM/TCP. Never permits a mutation. */
+  async boundedSharedSnapshot():ReturnType<WindowsSupervisorControl['sharedSnapshot']>{return this.call('SharedSnapshot',[],undefined,false,true);}
   async backupTask(directory: string): Promise<{ definitionSha256: string; enabled: boolean }> {
     if (!isAbsolute(directory)) throw new Error('Backup directory must be absolute');
     await mkdir(directory, { recursive: false, mode: 0o700 });

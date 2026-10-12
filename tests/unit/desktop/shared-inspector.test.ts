@@ -3,20 +3,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readOwnedSharedContext,inspectOwnedShared } from '../../../src/desktop/shared-inspector';
 import type { WindowsSupervisorControl } from '../../../src/desktop/supervisor-windows';
-const mocked=vi.hoisted(()=>({verify:vi.fn(),tools:vi.fn(),read:vi.fn(),pipes:vi.fn(),catalog:vi.fn(),connect:vi.fn(),calls:vi.fn(),close:vi.fn()}));
+const mocked=vi.hoisted(()=>({verify:vi.fn(),tools:vi.fn(),read:vi.fn(),pipes:vi.fn(),catalog:vi.fn(),connect:vi.fn(),calls:vi.fn(),close:vi.fn(),listen:vi.fn()}));
 vi.mock('../../../src/desktop/deployment',()=>({verifyDeployment:mocked.verify}));
 vi.mock('../../../src/desktop/backend',()=>({readDesktopToolConfig:mocked.tools}));
 vi.mock('node:fs/promises',()=>({readFile:mocked.read}));
 vi.mock('../../../src/desktop/windows-tools',()=>({desktopPipes:mocked.pipes,desktopToolCatalog:mocked.catalog}));
 vi.mock('../../../src/desktop/rpc',async importOriginal=>{
   const original=await importOriginal<typeof import('../../../src/desktop/rpc')>();
-  return {...original,DesktopRpc:class {connect=mocked.connect;call=mocked.calls;close=mocked.close;onMessage(){} }};
+  return {...original,DesktopRpc:class {connect=mocked.connect;call=mocked.calls;close=mocked.close;onMessage(fn:unknown){mocked.listen(fn);} }};
 });
 const identity=(pid:number,parentPid=1,executable=process.execPath)=>({pid,parentPid,createdAt:'2026-10-12T00:00:00.000Z',executable,commandLineSha256:'a'.repeat(64)});
 const owned={host:identity(42),broker:identity(41)};
 const host={endpoint:'ws://127.0.0.1:9998/',backendEndpoint:'ws://127.0.0.1:9999/',connectionFile:join(tmpdir(),'lease.json'),desktopExe:join(tmpdir(),'ChatGPT.exe'),codexBinary:join(tmpdir(),'codex.exe'),desktopVersion:'fixture',codexSha256:'b'.repeat(64)};
 let lease:any,scan:any;
-const control={sharedSnapshot:async()=>structuredClone(scan)} as WindowsSupervisorControl;
+const control={sharedSnapshot:async()=>structuredClone(scan),boundedSharedSnapshot:async()=>structuredClone(scan)} as WindowsSupervisorControl;
 beforeEach(()=>{
   vi.resetAllMocks();
   lease={version:1,endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,hostPid:42,backendPid:43,desktopPid:44,pipeServerPid:44,pipe:'pipe',verifiedAt:Date.now(),desktopVersion:host.desktopVersion,codexSha256:host.codexSha256,toolNames:['list_projects']};
@@ -55,4 +55,11 @@ it('measures the real desktop catalog, then performs only native deployment read
 });
 it('rejects catalog mismatch before opening the native connection',async()=>{
   mocked.catalog.mockResolvedValue(['list_projects','unexpected']);await expect(inspectOwnedShared(tmpdir(),control,owned)).rejects.toThrow('catalog mismatch');expect(mocked.connect).not.toHaveBeenCalled();
+});
+it('starts the activity window after initialization and still rejects notifications during native scans',async()=>{
+  mocked.connect.mockImplementation(async()=>{mocked.listen.mock.calls.at(-1)![0]({method:'session/initialized'});});
+  expect((await inspectOwnedShared(tmpdir(),control,owned)).verified).toBe(true);
+  const original=mocked.calls.getMockImplementation()!;
+  mocked.calls.mockImplementation(async(method,params)=>{if(method==='thread/read')mocked.listen.mock.calls.at(-1)![0]({method:'thread/status/changed'});return original(method,params);});
+  expect((await inspectOwnedShared(tmpdir(),control,owned)).verified).toBe(false);
 });

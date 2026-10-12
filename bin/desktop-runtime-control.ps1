@@ -141,10 +141,11 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
     $taskColdResult=@{verifiedAt=$taskObservedAt;complete=$true;desktopRelated=@(Get-ColdRelated $taskProcesses);inventory=$taskResult}
     if($Action -eq 'SharedSnapshot'){
       $taskOwners=@()
+      $taskListening=@(Get-NetTCPConnection -State Listen -ErrorAction Stop)
       foreach($taskEndpoint in @($taskConfig.endpoint,$taskConfig.backendEndpoint)){
         $taskUri=[Uri]$taskEndpoint
         if($taskUri.Scheme -ne 'ws' -or $taskUri.Host -notin @('127.0.0.1','[::1]','::1') -or $taskUri.Port -le 0 -or $taskUri.UserInfo -or $taskUri.Query -or $taskUri.Fragment -or $taskUri.AbsolutePath -ne '/'){throw 'Invalid shared endpoint'}
-        $taskTcp=@(Get-NetTCPConnection -State Listen -LocalPort $taskUri.Port -ErrorAction Stop)
+        $taskTcp=@($taskListening | Where-Object {$_.LocalPort -eq $taskUri.Port})
         # Wildcard or another listening address/owner cannot establish the
         # expected exclusive loopback endpoint, even if its PID exists.
         $taskOwners+=@{endpoint=[string]$taskEndpoint;listeners=@($taskTcp | ForEach-Object {@{address=[string]$_.LocalAddress;pid=[int]$_.OwningProcess}})}

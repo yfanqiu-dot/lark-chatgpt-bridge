@@ -11,11 +11,11 @@ import type { WindowsSupervisorControl } from './supervisor-windows';
 /** Actual OS/lease/pipe proof for cold admission. Caller must supply durable
  * receipts for its launched host and broker. No production launch here. */
 export async function readOwnedSharedContext(stage:string, control:WindowsSupervisorControl,
-  owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},verifyPipe=true):Promise<SharedContext> {
-  const {host}=await verifyDeployment(stage);
+  owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},verifyPipe=true,pinned?:Awaited<ReturnType<typeof verifyDeployment>>):Promise<SharedContext> {
+  const {host}=pinned??await verifyDeployment(stage);
   await readDesktopToolConfig(host);
   const lease=JSON.parse(await readFile(host.connectionFile,'utf8'));
-  const scan=await control.sharedSnapshot(),i=scan.inventory;
+  const scan=await (pinned?control.boundedSharedSnapshot():control.sharedSnapshot()),i=scan.inventory;
   if(scan.complete!==true || !Number.isFinite(scan.verifiedAt) || scan.verifiedAt>Date.now()+1000 || Date.now()-scan.verifiedAt>5000
     || i.legacy.length || i.listener.length!==(owned.listener?1:0) || (owned.listener && !sameProcess(i.listener[0]!,owned.listener)) || i.host.length!==1 || i.broker.length!==1 || i.desktop.length!==1
     || !sameProcess(i.host[0]!,owned.host) || !sameProcess(i.broker[0]!,owned.broker) || i.desktop[0]!.executable!==host.desktopExe
@@ -46,7 +46,7 @@ export async function readOwnedSharedContext(stage:string, control:WindowsSuperv
     packageIdentityVerified:true,endpointOwnershipVerified:true};
 }
 export async function inspectOwnedShared(stage:string,control:WindowsSupervisorControl,owned:{host:ProcessIdentity;broker:ProcessIdentity}) {
-  const {snapshot,host}=await verifyDeployment(stage);
+  const pinned=await verifyDeployment(stage),{snapshot,host}=pinned;
   const context=await readOwnedSharedContext(stage,control,owned);
   const lease=JSON.parse(await readFile(host.connectionFile,'utf8'));
   // Measure the actual catalog on the already OS/package verified pipe; do
@@ -57,8 +57,11 @@ export async function inspectOwnedShared(stage:string,control:WindowsSupervisorC
   rpc.onMessage(()=>{changed=true;});
   try {
     await rpc.connect();
+    // The bounded admission window starts after initialize. Activity during
+    // the handshake is accounted for by the following full native scan.
+    changed=false;
     return await inspectSharedIdle({get changed(){return changed;},call:(method,params)=>rpc.call(method,params),close:()=>rpc.close()},context,
       snapshot.bindings,{desktopVersion:host.desktopVersion,codexSha256:host.codexSha256,toolNames:snapshot.spec.expectedToolNames},
-      ()=>readOwnedSharedContext(stage,control,owned,false));
+      ()=>readOwnedSharedContext(stage,control,owned,false,pinned));
   } finally {rpc.close();}
 }
