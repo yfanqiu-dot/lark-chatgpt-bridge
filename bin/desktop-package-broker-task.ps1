@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$ConnectionFile,
-  [Parameter(Mandatory=$true)][string]$TokenFile,
+  [string]$TokenFile,
+  [string]$ProtectedTokenFile,
   [ValidateRange(60,43200)][int]$DeadlineSeconds=5400,
   [ValidateRange(60,43200)][int]$BrokerDeadlineSeconds=3600,
   [string]$OwnerLeaseFile
@@ -29,10 +30,13 @@ function Test-WatchedBroker($expected){
   return $true
 }
 try {
-  foreach($path in @($ConnectionFile,$TokenFile)){if(![IO.Path]::IsPathRooted($path) -or $path.Contains('"')){throw 'Invalid broker runtime path'}}
+  if((!!$TokenFile) -eq (!!$ProtectedTokenFile)){throw 'Exactly one capability source is required'}
+  $taskCapabilityPath=if($ProtectedTokenFile){$ProtectedTokenFile}else{$TokenFile}
+  foreach($path in @($ConnectionFile,$taskCapabilityPath)){if(![IO.Path]::IsPathRooted($path) -or $path -match '["\r\n]'){throw 'Invalid broker runtime path'}}
   $taskActivatedAt=[DateTime]::UtcNow
   $taskExpectedRun=$null
-  $taskArgs='-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "'+$taskBroker+'" -ConnectionFile "'+$ConnectionFile+'" -TokenFile "'+$TokenFile+'" -DeadlineSeconds '+$BrokerDeadlineSeconds
+  $taskCapabilityArgument=if($ProtectedTokenFile){' -ProtectedTokenFile "'+$ProtectedTokenFile+'"'}else{' -TokenFile "'+$TokenFile+'"'}
+  $taskArgs='-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "'+$taskBroker+'" -ConnectionFile "'+$ConnectionFile+'"'+$taskCapabilityArgument+' -DeadlineSeconds '+$BrokerDeadlineSeconds
   if($OwnerLeaseFile){
     if(![IO.Path]::IsPathRooted($OwnerLeaseFile) -or $OwnerLeaseFile.Contains('"')){throw 'Invalid broker lease path'}
     $taskArgs+=' -OwnerLeaseFile "'+$OwnerLeaseFile+'"'

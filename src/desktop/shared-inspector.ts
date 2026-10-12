@@ -11,13 +11,13 @@ import type { WindowsSupervisorControl } from './supervisor-windows';
 /** Actual OS/lease/pipe proof for cold admission. Caller must supply durable
  * receipts for its launched host and broker. No production launch here. */
 export async function readOwnedSharedContext(stage:string, control:WindowsSupervisorControl,
-  owned:{host:ProcessIdentity;broker:ProcessIdentity}):Promise<SharedContext> {
+  owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},verifyPipe=true):Promise<SharedContext> {
   const {host}=await verifyDeployment(stage);
   await readDesktopToolConfig(host);
   const lease=JSON.parse(await readFile(host.connectionFile,'utf8'));
   const scan=await control.sharedSnapshot(),i=scan.inventory;
   if(scan.complete!==true || !Number.isFinite(scan.verifiedAt) || scan.verifiedAt>Date.now()+1000 || Date.now()-scan.verifiedAt>5000
-    || i.legacy.length || i.listener.length || i.host.length!==1 || i.broker.length!==1 || i.desktop.length!==1
+    || i.legacy.length || i.listener.length!==(owned.listener?1:0) || (owned.listener && !sameProcess(i.listener[0]!,owned.listener)) || i.host.length!==1 || i.broker.length!==1 || i.desktop.length!==1
     || !sameProcess(i.host[0]!,owned.host) || !sameProcess(i.broker[0]!,owned.broker) || i.desktop[0]!.executable!==host.desktopExe
     || lease.hostPid!==owned.host.pid || lease.desktopPid!==i.desktop[0]!.pid || lease.backendEndpoint!==host.backendEndpoint
     || lease.endpoint!==host.endpoint || lease.desktopVersion!==host.desktopVersion || lease.codexSha256!==host.codexSha256
@@ -37,8 +37,10 @@ export async function readOwnedSharedContext(stage:string, control:WindowsSuperv
     const owners=scan.endpointOwners.filter(p=>p.endpoint===endpoint), address=new URL(endpoint).hostname.replace(/[\[\]]/g,'');
     if(owners.length!==1 || owners[0]!.listeners.length!==1 || owners[0]!.listeners[0]!.pid!==pid || owners[0]!.listeners[0]!.address!==address) throw new Error('Owned endpoint unverified');
   }
-  const pipes=await desktopPipes(i.desktop[0]!.pid,host.desktopExe);
-  if(pipes.filter(p=>p.pipe===lease.pipe && p.serverPid===lease.desktopPid).length!==1) throw new Error('Owned tool pipe unverified');
+  if(verifyPipe){
+    const pipes=await desktopPipes(i.desktop[0]!.pid,host.desktopExe);
+    if(pipes.filter(p=>p.pipe===lease.pipe && p.serverPid===lease.desktopPid).length!==1) throw new Error('Owned tool pipe unverified');
+  }
   return {host:owned.host,backend:candidates[0]!,desktop:i.desktop[0]!,endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,
     leaseVerifiedAt:lease.verifiedAt,desktopVersion:lease.desktopVersion,codexSha256:lease.codexSha256,toolNames:lease.toolNames,
     packageIdentityVerified:true,endpointOwnershipVerified:true};
@@ -57,6 +59,6 @@ export async function inspectOwnedShared(stage:string,control:WindowsSupervisorC
     await rpc.connect();
     return await inspectSharedIdle({get changed(){return changed;},call:(method,params)=>rpc.call(method,params),close:()=>rpc.close()},context,
       snapshot.bindings,{desktopVersion:host.desktopVersion,codexSha256:host.codexSha256,toolNames:snapshot.spec.expectedToolNames},
-      ()=>readOwnedSharedContext(stage,control,owned));
+      ()=>readOwnedSharedContext(stage,control,owned,false));
   } finally {rpc.close();}
 }

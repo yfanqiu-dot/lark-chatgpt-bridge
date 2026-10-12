@@ -1,6 +1,12 @@
-param([Parameter(Mandatory=$true)][string]$ConnectionFile,[Parameter(Mandatory=$true)][string]$TokenFile,[ValidateRange(60,43200)][int]$DeadlineSeconds=3600,[string]$OwnerLeaseFile,[ValidateRange(90,300)][int]$DrainSeconds=180)
+param([Parameter(Mandatory=$true)][string]$ConnectionFile,[string]$TokenFile,[string]$ProtectedTokenFile,[ValidateRange(60,43200)][int]$DeadlineSeconds=3600,[string]$OwnerLeaseFile,[ValidateRange(90,300)][int]$DrainSeconds=180)
 $ErrorActionPreference='Stop'
-$taskToken=[IO.File]::ReadAllText($TokenFile,[Text.Encoding]::UTF8)
+if((!!$TokenFile) -eq (!!$ProtectedTokenFile)){throw 'Exactly one capability source is required'}
+if($ProtectedTokenFile){
+  Add-Type -AssemblyName System.Security
+  $taskCipher=[Convert]::FromBase64String([IO.File]::ReadAllText($ProtectedTokenFile,[Text.Encoding]::UTF8))
+  $taskClear=[Security.Cryptography.ProtectedData]::Unprotect($taskCipher,[Text.Encoding]::UTF8.GetBytes('lark-chatgpt-bridge broker capability v1'),[Security.Cryptography.DataProtectionScope]::CurrentUser)
+  try{$taskToken=[Text.Encoding]::UTF8.GetString($taskClear)}finally{[Array]::Clear($taskClear,0,$taskClear.Length)}
+}else{$taskToken=[IO.File]::ReadAllText($TokenFile,[Text.Encoding]::UTF8)}
 if($taskToken -notmatch '^[a-f0-9]{64}$'){throw 'Package broker token is missing'}
 $taskRoot=Split-Path -Parent $ConnectionFile
 $taskStatus=Join-Path $taskRoot 'package-broker.status.json'

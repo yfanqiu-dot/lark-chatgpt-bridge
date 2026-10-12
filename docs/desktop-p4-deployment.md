@@ -1,6 +1,6 @@
 # P4 部署开发与灰度运行手册
 
-更新：2026-10-12。P3 已在本人确认的范围内关闭；P4 已实现部署基础、监督状态机、只读预检及持续broker租约协议，尚未切换常驻消费者。
+更新：2026-10-12。P3 已在本人确认的范围内关闭；P4 已接通独立冷启动运行入口、实际启停适配器及持续broker租约，尚未实施真实灰度或切换常驻消费者。
 
 ## 首批实现
 
@@ -149,6 +149,36 @@ node bin/lark-chatgpt-deploy.mjs cold-check D:\bridge-local\stage-001 D:\bridge-
 冷启动故障回退单独保存 `desktopRestoreRequired`，即使没有自动关闭动作、或者旧消费者暂停失败且host未启动，也先核对普通桌面恢复证明，再恢复旧消费者。启动回执不明确、进程身份变化时仍阻止猜测性停止和旧消费者恢复；不重投模型输入、不复制原账本、不清理历史uncertain。
 
 本轮新增51项冷启动/共享检查回归（状态机18、共享原生读取15、实际归属检查15、Windows进程清点3）。最终本机全仓130个文件、913项通过，类型与构建通过。首次全仓的隔离进程夹具提前以0退出，原失败日志保留；发现其身份JSON存在写入未完成即被读取的风险，改为原子发布并让夹具错误退出可见。原失败的具体底层异常未捕获，不将该风险推断写为已证实根因；后续独立进程恢复和最终全仓均通过。
+
+### 独立冷启动运行入口（后续续接）
+
+`cold-prepare`只创建新的候选目录，复制经过白名单验证的非敏感host/topics配置；连接租约、运行记录、启动回执和能力恢复副本位于新目录。群绑定、项目、原账本、审批journal仍引用原位置，不复制为新业务资源。九项直接启动程序及完整部署文件锁定SHA，计划有效期10分钟，不覆盖旧目录。
+
+```powershell
+node bin/lark-chatgpt-deploy.mjs cold-prepare D:\bridge-local\stage-001 D:\bridge-local\runtime-001
+node bin/lark-chatgpt-runtime-supervisor.mjs --preflight D:\bridge-local\runtime-001\plan.json <planSha256>
+node bin/lark-chatgpt-runtime-supervisor.mjs --status D:\bridge-local\runtime-001\plan.json <planSha256>
+```
+
+准备、预检和状态命令不启停服务。预检备份经过校验的原启动任务定义，清点进程、检查包激活命令可用性及普通桌面的完整工具目录；不会尝试激活包，也不将普通桌面任务判为空闲。状态命令读取历史记录，不能代替实际就绪证明。
+
+以下命令只在本人批准具体灰度窗口后调用；本轮开发未调用：
+
+```powershell
+node bin/lark-chatgpt-runtime-supervisor.mjs --launch D:\bridge-local\runtime-001\plan.json <planSha256>
+node bin/lark-chatgpt-runtime-supervisor.mjs --stop D:\bridge-local\runtime-001\plan.json <planSha256>
+node bin/lark-chatgpt-runtime-supervisor.mjs --launch-recovery D:\bridge-local\runtime-001\plan.json <planSha256>
+```
+
+原生隐藏启动使用WMI独立进程和受限环境，无新计划任务；原生返回码、完整进程身份及一次启动意图均留存。同一计划不重试启动或模糊回执。恢复入口先等原journal写锁自然可用，并拒绝仍存在的原监督进程，只执行同一记录的回退，不能启动新的前向迁移。当前首个灰度计划等待退出最多10分钟、总运行窗口45分钟，包含准备后的等待与实际启动，不自动延长或开始长时观察。
+
+实际适配器在暂停旧消费者前再次核对所有原群没有新的活动请求、审批关闭并读取原凭据服务；应用密钥只进入监听子进程内存，不复制到文件。启动器的临时能力恢复副本用Windows CurrentUser DPAPI加密，owner租约只含能力SHA，运行时解密供host恢复使用。既有包内启动请求仍使用原临时能力协议，不能据此宣称全链路不存在能力明文；该临时能力不是飞书账户凭据。
+
+监听回执包含runId、PID、选中群及SDK连接状态，每2.5秒更新；断开或回执超过10秒、运行锁丢失、监督失租、进程身份改变均使健康检查失败。消费者未真正完成SDK连接与控制器启动时不发布就绪。停止通过原graceful请求等待退出，无按PID强制停止host/监听的后备路径。原消费者有活动子进程时拒绝停止。
+
+回退先停监听和host，再验证唯一普通桌面的包身份及完整工具目录，才恢复原任务启用状态并一次启动旧消费者。原包内恢复失败保存固定分类和错误SHA；另一次系统入口恢复单独记录，不替代首路径成功。模糊激活、陌生进程、工具不符或broker排空超时都保留blocked，不用进程消失表示恢复通过。已有同身份停止意图可继续等待，不重复启动、队列提交或应用输入。
+
+本轮新增32项：实际适配器14、独立计划/启动保护11、监听连接回执5、Windows DPAPI2。本机全仓134个文件、945项通过，类型与构建通过。DPAPI测试真实加解密一次性测试能力；其他服务角色联动为隔离/模拟回归，不是实际包内持续运行、Cold WMI启动或飞书灰度通过。
 
 ### 独立预检进程（2026-10-12）
 

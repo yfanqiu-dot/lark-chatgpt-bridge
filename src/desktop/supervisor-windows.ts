@@ -24,14 +24,26 @@ export class WindowsSupervisorControl {
     await writeFile(configFile, data, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations);
   }
-  private async call(action: string, extra: string[] = []): Promise<any> {
-    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
+  private async call(action: string, extra: string[] = [], input?:string, raw=false): Promise<any> {
+    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
     await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
-    const result = await exec('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra], { windowsHide: true, timeout: 35_000, encoding: 'utf8',env:windowsPowerShellEnvironment(process.env) });
-    return JSON.parse(result.stdout);
+    const args=['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra];
+    const options={windowsHide:true,timeout:35_000,encoding:'utf8' as const,env:windowsPowerShellEnvironment(process.env),maxBuffer:2*1024*1024};
+    const stdout=input===undefined ? (await exec('powershell.exe',args,options)).stdout : await new Promise<string>((done,reject)=>{
+      const child=execFile('powershell.exe',args,options,(error,output)=>error ? reject(new Error('Capability protection failed')) : done(output));
+      child.stdin?.end(input);
+    });
+    return raw ? stdout : JSON.parse(stdout);
   }
   async inventory(): Promise<SupervisorInventory> { return this.call('Snapshot'); }
+  async ownerIdentity(pid:number):Promise<ProcessIdentity>{return this.call('ReadOwner',['-ProcessId',String(pid)]);}
+  async protectCapability(path:string,token:string):Promise<void>{await this.call('ProtectCapability',['-CapabilityFile',path],token);}
+  async unprotectCapability(path:string):Promise<string>{
+    const token=await this.call('UnprotectCapability',['-CapabilityFile',path],undefined,true);
+    if(typeof token!=='string' || !/^[a-f0-9]{64}$/.test(token))throw new Error('Protected capability unavailable');return token;
+  }
+  async startOrdinary():Promise<void>{await this.call('StartOrdinary');}
   async coldSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory }> { return this.call('ColdSnapshot'); }
   async sharedSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory; endpointOwners:Array<{endpoint:string;listeners:Array<{address:string;pid:number}>}> }> { return this.call('SharedSnapshot'); }
   async backupTask(directory: string): Promise<{ definitionSha256: string; enabled: boolean }> {
@@ -48,6 +60,7 @@ export class WindowsSupervisorControl {
   async testIdentity(role: 'legacy' | 'desktop' | 'host' | 'listener', identity: ProcessIdentity): Promise<void> { await this.identityCall('TestIdentity', role, identity); }
   async pauseTask(backupDirectory: string): Promise<void> { await this.call('DisableTask', ['-BackupDirectory',backupDirectory]); }
   async restoreTaskSetting(backupDirectory: string): Promise<void> { await this.call('RestoreTask', ['-BackupDirectory',backupDirectory]); }
+  async startLegacy(backupDirectory:string):Promise<void>{await this.call('StartLegacy',['-BackupDirectory',backupDirectory]);}
   async stopOwned(role: 'legacy' | 'listener', identity: ProcessIdentity): Promise<void> { await this.identityCall('StopOwned', role, identity); }
   async closeDesktop(identity: ProcessIdentity): Promise<void> { await this.identityCall('CloseDesktop', 'desktop', identity); }
 }

@@ -1,9 +1,11 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask')][string]$Action,
+  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
   [Parameter(Mandatory=$true)][string]$ConfigFile,
   [string]$IdentityFile,
   [ValidateSet('legacy','desktop','host','listener')][string]$Role,
-  [string]$BackupDirectory
+  [string]$BackupDirectory,
+  [string]$CapabilityFile,
+  [int]$ProcessId
 )
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
@@ -34,6 +36,32 @@ function Get-Identity($process){
   if(!$process.ExecutablePath -or !$process.CommandLine){throw 'Process identity is not readable'}
   return @{pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;createdAt=$process.CreationDate.ToUniversalTime().ToString('o');executable=[string]$process.ExecutablePath;commandLineSha256=(Get-Sha $process.CommandLine)}
 }
+if($Action -eq 'ReadOwner'){
+  $taskOwner=Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$ProcessId)
+  $taskEntry=Join-Path $PSScriptRoot 'lark-chatgpt-runtime-supervisor.mjs'
+  if(!$taskOwner -or $taskOwner.ExecutablePath -ne $taskConfig.legacy.executable -or !(Has-Argument $taskOwner.CommandLine $taskEntry)){throw 'Runtime supervisor identity is not verified'}
+  Get-Identity $taskOwner | ConvertTo-Json -Compress
+  exit 0
+}
+if($Action -in @('ProtectCapability','UnprotectCapability')){
+  if(!$CapabilityFile -or ![IO.Path]::IsPathRooted($CapabilityFile)){throw 'Protected capability path must be absolute'}
+  Add-Type -AssemblyName System.Security
+  $taskEntropy=[Text.Encoding]::UTF8.GetBytes('lark-chatgpt-bridge broker capability v1')
+  if($Action -eq 'ProtectCapability'){
+    $taskToken=[Console]::In.ReadToEnd()
+    if($taskToken -notmatch '^[a-f0-9]{64}$'){throw 'Invalid capability input'}
+    $taskClear=[Text.Encoding]::UTF8.GetBytes($taskToken)
+    try{$taskCipher=[Security.Cryptography.ProtectedData]::Protect($taskClear,$taskEntropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)}finally{[Array]::Clear($taskClear,0,$taskClear.Length);$taskToken=$null}
+    $taskStream=[IO.File]::Open($CapabilityFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$taskBytes=[Text.Encoding]::UTF8.GetBytes([Convert]::ToBase64String($taskCipher));$taskStream.Write($taskBytes,0,$taskBytes.Length)}finally{$taskStream.Dispose()}
+    @{ok=$true;protected=$true} | ConvertTo-Json -Compress
+  }else{
+    $taskCipher=[Convert]::FromBase64String([IO.File]::ReadAllText($CapabilityFile,[Text.Encoding]::UTF8))
+    $taskClear=[Security.Cryptography.ProtectedData]::Unprotect($taskCipher,$taskEntropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+    try{[Console]::Out.Write([Text.Encoding]::UTF8.GetString($taskClear))}finally{[Array]::Clear($taskClear,0,$taskClear.Length)}
+  }
+  exit 0
+}
 function Get-ColdRelated($processes){
   $taskRelated=[Collections.Generic.HashSet[int]]::new()
   foreach($taskProcess in $processes){
@@ -49,6 +77,14 @@ function Get-ColdRelated($processes){
     }
   }while($taskAdded)
   return @($processes | Where-Object {$taskRelated.Contains([int]$_.ProcessId)} | ForEach-Object {Get-Identity $_})
+}
+if($Action -eq 'StartOrdinary'){
+  # This is a separate recovery attempt; never close an existing app.
+  $taskProcesses=@(Get-CimInstance Win32_Process)
+  if(@(Get-ColdRelated $taskProcesses).Count){throw 'Desktop or App Server already exists'}
+  Start-Process (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList 'shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App' -WindowStyle Hidden
+  @{ok=$true;action='StartOrdinary'} | ConvertTo-Json -Compress
+  exit 0
 }
 function Assert-Identity($expected,$expectedRole){
   if(!$expected -or !$expectedRole -or [int]$expected.pid -le 0){throw 'Missing expected process identity'}
@@ -121,7 +157,7 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   $taskResult | ConvertTo-Json -Depth 6 -Compress
   exit 0
 }
-if($Action -in @('BackupTask','DisableTask','RestoreTask')){
+if($Action -in @('BackupTask','DisableTask','RestoreTask','StartLegacy')){
   if(!$BackupDirectory -or ![IO.Path]::IsPathRooted($BackupDirectory)){throw 'Task backup directory must be absolute'}
   $taskBackup=Join-Path $BackupDirectory 'legacy-task.json'
   $taskDefinition=Read-TaskDefinition
@@ -142,6 +178,11 @@ if($Action -in @('BackupTask','DisableTask','RestoreTask')){
   if($taskSaved.version -ne 1 -or $taskSaved.taskName -ne $taskConfig.legacy.scheduledTaskName -or $taskSaved.definitionSha256 -cne $taskDefinition.sha256 -or $taskSaved.xmlSha256 -cne (Get-Sha ([IO.File]::ReadAllText((Join-Path $BackupDirectory 'legacy-task.xml'),[Text.Encoding]::UTF8)))){throw 'Legacy task definition changed; refusing mutation'}
   if($Action -eq 'DisableTask'){
     Disable-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName | Out-Null
+  }elseif($Action -eq 'StartLegacy'){
+    if(!$taskSaved.enabled -or !$taskDefinition.enabled){throw 'Legacy startup task is disabled'}
+    $taskProcesses=@(Get-CimInstance Win32_Process)
+    foreach($taskProcess in $taskProcesses){if((Get-Role $taskProcess) -in @('legacy','host','listener')){throw 'Consumer or host already exists'}}
+    Start-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName
   }else{
     if($taskSaved.enabled){Enable-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName | Out-Null}else{Disable-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName | Out-Null}
   }

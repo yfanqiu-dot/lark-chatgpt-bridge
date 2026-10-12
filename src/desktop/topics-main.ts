@@ -17,6 +17,7 @@ import { CodexTopicResources, topicResources } from './topic-resources';
 import { TopicRouter } from './topic-router';
 import { TopicArchive } from './topic-archive';
 import { ApprovalJournal } from './approval-journal';
+import { publishListenerReady } from './listener-ready';
 
 async function main(): Promise<void> {
   const [configPath, mode, requestId, resourceId] = process.argv.slice(2);
@@ -87,14 +88,17 @@ async function main(): Promise<void> {
     error:e=>console.error('Feishu channel error:',e.message),
   });
   let stopWatcher:ReturnType<typeof setInterval>|undefined,archiveWatcher:ReturnType<typeof setInterval>|undefined,shutdownPromise:Promise<void>|undefined;
+  let clearReady=async()=>{};
   const shutdown=()=>shutdownPromise??=(async()=>{
     clearInterval(stopWatcher);clearInterval(archiveWatcher);
+    try{await clearReady();}catch{console.error('Listener readiness cleanup failed');process.exitCode=1;}
     try{await router.shutdown();}finally{try{await archive.shutdown();}finally{try{await cards.shutdown();}finally{try{await channel.disconnect();}finally{await rm(`${config.registryFile}.stop`,{force:true});await release();}}}}
   })();
   const onSignal=()=>{void shutdown().catch(e=>{console.error(String(e));process.exitCode=1;});};
   try{
     await rm(`${config.registryFile}.stop`,{force:true});
-    await channel.connect();await cards.start();await router.start();readyResolve();
+    await channel.connect();await cards.start();await router.start();
+    clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>channel.getConnectionStatus()?.state??'unknown');readyResolve();
     process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);
     stopWatcher=setInterval(()=>{void readFile(`${config.registryFile}.stop`,'utf8').then(shutdown).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT'){console.error('Topic bridge shutdown failed:',String(e));process.exitCode=1;}});},1000);
     let syncing=false;

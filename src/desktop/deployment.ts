@@ -117,7 +117,7 @@ async function ledger(config: TopicConfig, binding: Binding): Promise<LedgerSumm
 }
 const proof = async (path: string): Promise<FileProof> => ({ path, sha256: digest(await readFile(path)) });
 
-async function pendingApprovalChats(topics: TopicConfig): Promise<string[]> {
+export async function pendingApprovalChats(topics: TopicConfig): Promise<string[]> {
   try {
     const cards = await json(`${topics.registryFile}.approvals.json`), tokens = new Set<string>();
     if (cards.version !== 1 || cards.binding?.appId !== topics.appId || cards.binding?.ownerOpenId !== topics.ownerOpenId || cards.binding?.entryChatId !== topics.entryChatId || !Array.isArray(cards.cards)) throw new Error('Invalid approval journal');
