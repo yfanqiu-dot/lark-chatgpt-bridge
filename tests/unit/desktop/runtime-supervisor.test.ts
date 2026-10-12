@@ -3,8 +3,9 @@ import { mkdir,mkdtemp,readFile,rm,writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-const mocked=vi.hoisted(()=>({verify:vi.fn(),prepare:vi.fn(),exec:vi.fn()}));
+const mocked=vi.hoisted(()=>({verify:vi.fn(),prepare:vi.fn(),exec:vi.fn(),control:vi.fn(),permissions:vi.fn()}));
 vi.mock('../../../src/desktop/deployment',()=>({verifyDeployment:mocked.verify,prepareDeployment:mocked.prepare}));
+vi.mock('../../../src/desktop/supervisor-windows',()=>({WindowsSupervisorControl:{prepare:mocked.control}}));
 vi.mock('node:child_process',async original=>{
   const actual=await original<typeof import('node:child_process')>();const fn:any=()=>{};fn[Symbol.for('nodejs.util.promisify.custom')]=mocked.exec;return {...actual,execFile:fn};
 });
@@ -18,6 +19,8 @@ beforeEach(async()=>{
   input={host:{connectionFile:join(root,'source-connection.json')},topics:{connectionFile:join(root,'source-connection.json'),registryFile:join(root,'original-registry.json'),enabledChatIds:['oc_c'],allowTopicCreation:false},snapshot:{files:await Promise.all(files.map(async path=>({path,sha256:sha(await readFile(path))}))),spec:{codeRevision:'a'.repeat(40),legacy:{executable:files[0]}}}};
   mocked.verify.mockImplementation(async stage=>stage===join(directory,'stage')?{...input,host:JSON.parse(await readFile(join(directory,'host.json'),'utf8')),topics:JSON.parse(await readFile(join(directory,'topics.json'),'utf8'))}:input);
   mocked.prepare.mockImplementation(async(_spec,stage)=>{await mkdir(stage);});
+  mocked.control.mockResolvedValue({taskPermissions:mocked.permissions});
+  mocked.permissions.mockResolvedValue({version:1,writeAllowed:true,executeAllowed:true,descriptorSha256:'e'.repeat(64)});
 });
 afterEach(async()=>{await rm(root,{recursive:true,force:true});});
 const prepare=()=>prepareColdRuntime(join(root,'source-stage'),directory,root);
@@ -51,4 +54,10 @@ it.skipIf(process.platform!=='win32')('checks complete native identity and retur
 it.skipIf(process.platform!=='win32')('blocks recovery while the original journal writer is alive',async()=>{
   const r=await prepare();const {SupervisorJournal}=await import('../../../src/desktop/supervisor');const j=new SupervisorJournal(join(directory,'supervisor.json'));await j.open();
   await writeFile(join(directory,'supervisor.json'),JSON.stringify({phase:'running'}),'utf8');try{await expect(launchColdRuntime(r.planFile,r.planSha256,true)).rejects.toThrow('still owns');expect(mocked.exec).not.toHaveBeenCalled();}finally{await j.close();}
+});
+it.skipIf(process.platform!=='win32')('blocks a read-only legacy task before creating a launch intent or process',async()=>{
+  const r=await prepare();mocked.permissions.mockResolvedValue({version:1,writeAllowed:false,executeAllowed:false,descriptorSha256:'e'.repeat(64)});
+  await expect(launchColdRuntime(r.planFile,r.planSha256)).rejects.toThrow('desktop must remain open');expect(mocked.exec).not.toHaveBeenCalled();
+  await expect(readFile(join(directory,'launch.intent.json'))).rejects.toMatchObject({code:'ENOENT'});
+  expect(JSON.parse(await readFile(join(directory,'launch.admission.json'),'utf8'))).toMatchObject({allowed:false});
 });

@@ -25,19 +25,33 @@ export class WindowsSupervisorControl {
     return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations,snapshot.files.find(f=>f.path===resolve(script))!.sha256);
   }
   private async call(action: string, extra: string[] = [], input?:string, raw=false,boundedRead=false): Promise<any> {
-    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
+    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
     if(boundedRead){if(action!=='SharedSnapshot' || digest(await readFile(this.script))!==this.scriptSha256)throw new Error('Bounded native reader changed');}
     else await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
     const args=['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra];
     const options={windowsHide:true,timeout:35_000,encoding:'utf8' as const,env:windowsPowerShellEnvironment(process.env),maxBuffer:2*1024*1024};
-    const stdout=input===undefined ? (await exec('powershell.exe',args,options)).stdout : await new Promise<string>((done,reject)=>{
-      const child=execFile('powershell.exe',args,options,(error,output)=>error ? reject(new Error('Capability protection failed')) : done(output));
-      child.stdin?.end(input);
-    });
+    let stdout:string;
+    try{
+      stdout=input===undefined ? (await exec('powershell.exe',args,options)).stdout : await new Promise<string>((done,reject)=>{
+        const child=execFile('powershell.exe',args,options,(error,output)=>error ? reject(new Error('Capability protection failed')) : done(output));
+        child.stdin?.end(input);
+      });
+    }catch(error){
+      const native=error as {code?:unknown;stderr?:unknown;signal?:unknown};
+      const stderr=typeof native.stderr==='string'?native.stderr:'';
+      const errorCode=stderr.includes('0x80070005')?'native_task_access_denied':'native_control_failed';
+      try{const directory=await mkdtemp(join(this.evidence,'operation-failure-'));await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action,errorCode,exitCode:typeof native.code==='number'?native.code:null,signal:typeof native.signal==='string'?native.signal:null,stderrBytes:Buffer.byteLength(stderr),stderrSha256:digest(stderr),observedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx'});}catch{}
+      throw error;
+    }
     return raw ? stdout : JSON.parse(stdout);
   }
   async inventory(): Promise<SupervisorInventory> { return this.call('Snapshot'); }
+  async taskPermissions():Promise<{version:1;writeAllowed:boolean;executeAllowed:boolean;descriptorSha256:string}>{
+    const result=await this.call('TaskPermissions');
+    if(result.version!==1 || typeof result.writeAllowed!=='boolean' || typeof result.executeAllowed!=='boolean' || !/^[a-f0-9]{64}$/.test(result.descriptorSha256))throw new Error('Legacy task permission proof invalid');
+    return result;
+  }
   async ownerIdentity(pid:number):Promise<ProcessIdentity>{return this.call('ReadOwner',['-ProcessId',String(pid)]);}
   async protectCapability(path:string,token:string):Promise<void>{await this.call('ProtectCapability',['-CapabilityFile',path],token);}
   async unprotectCapability(path:string):Promise<string>{

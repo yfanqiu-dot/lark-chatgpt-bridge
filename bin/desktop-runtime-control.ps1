@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
+  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
   [Parameter(Mandatory=$true)][string]$ConfigFile,
   [string]$IdentityFile,
   [ValidateSet('legacy','desktop','host','listener')][string]$Role,
@@ -128,6 +128,55 @@ function Read-TaskDefinition {
   if($null -eq $taskScheduled.Settings.Enabled){throw 'Legacy task enabled state is missing'}
   return Normalize-TaskDefinition $taskXml ([bool]$taskScheduled.Settings.Enabled)
 }
+function Restore-TaskEnabled([bool]$savedEnabled,[bool]$currentEnabled,$taskName){
+  if($savedEnabled -ne $currentEnabled){
+    if($savedEnabled){Enable-ScheduledTask -TaskName $taskName | Out-Null}else{Disable-ScheduledTask -TaskName $taskName | Out-Null}
+  }
+}
+function Test-TaskAccess($sddl,[uint32]$desired){
+  # Task Scheduler uses file access rights. Check the actual filtered token,
+  # including deny-only groups; membership in Administrators is not sufficient.
+  if(!('BridgeTaskAccess' -as [type])){
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+public static class BridgeTaskAccess {
+  [StructLayout(LayoutKind.Sequential)] public struct Mapping { public uint Read,Write,Execute,All; }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateToken(IntPtr token,int level,out IntPtr copy);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool AccessCheck(byte[] sd,IntPtr token,uint desired,ref Mapping mapping,IntPtr privileges,ref uint length,out uint granted,out bool allowed);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static bool Check(string sddl,uint desired){
+    var descriptor=new RawSecurityDescriptor(sddl);
+    var bytes=new byte[descriptor.BinaryLength];descriptor.GetBinaryForm(bytes,0);
+    using(var identity=WindowsIdentity.GetCurrent()){
+      IntPtr copy;
+      if(!DuplicateToken(identity.Token,2,out copy))throw new Win32Exception(Marshal.GetLastWin32Error());
+      IntPtr privileges=IntPtr.Zero;
+      try{
+        uint length=1024,granted;bool allowed;
+        privileges=Marshal.AllocHGlobal((int)length);
+        var mapping=new Mapping{Read=0x120089,Write=0x120116,Execute=0x1200a0,All=0x1f01ff};
+        if(!AccessCheck(bytes,copy,desired,ref mapping,privileges,ref length,out granted,out allowed))throw new Win32Exception(Marshal.GetLastWin32Error());
+        return allowed;
+      }finally{if(privileges!=IntPtr.Zero)Marshal.FreeHGlobal(privileges);CloseHandle(copy);}
+    }
+  }
+}
+'@
+  }
+  return [BridgeTaskAccess]::Check($sddl,$desired)
+}
+if($Action -eq 'TaskPermissions'){
+  $null=Read-TaskDefinition
+  $taskService=New-Object -ComObject 'Schedule.Service';$taskService.Connect()
+  $taskRegistered=$taskService.GetFolder('\').GetTask($taskConfig.legacy.scheduledTaskName)
+  $taskSddl=$taskRegistered.GetSecurityDescriptor(7)
+  @{version=1;writeAllowed=(Test-TaskAccess $taskSddl 0x120116);executeAllowed=(Test-TaskAccess $taskSddl 0x1200a0);descriptorSha256=(Get-Sha $taskSddl)} | ConvertTo-Json -Compress
+  exit 0
+}
 if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   $taskObservedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $taskProcesses=@(Get-CimInstance Win32_Process)
@@ -185,7 +234,9 @@ if($Action -in @('BackupTask','DisableTask','RestoreTask','StartLegacy')){
     foreach($taskProcess in $taskProcesses){if((Get-Role $taskProcess) -in @('legacy','host','listener')){throw 'Consumer or host already exists'}}
     Start-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName
   }else{
-    if($taskSaved.enabled){Enable-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName | Out-Null}else{Disable-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName | Out-Null}
+    # An unchanged setting is already restored. Avoid requiring write access
+    # after a failed disable operation that never changed the task.
+    Restore-TaskEnabled ([bool]$taskSaved.enabled) ([bool]$taskDefinition.enabled) $taskConfig.legacy.scheduledTaskName
   }
   @{ok=$true;action=$Action;startedConsumer=$false} | ConvertTo-Json -Compress
   exit 0

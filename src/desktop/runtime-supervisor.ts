@@ -57,6 +57,12 @@ export async function verifyColdRuntimePlan(path:string,proof:string,fresh=true)
 export async function launchColdRuntime(path:string,proof:string,recover=false){
   if(process.platform!=='win32')throw new Error('Cold runtime launch requires Windows');
   const p=await verifyColdRuntimePlan(path,proof,!recover);
+  if(!recover){
+    const control=await WindowsSupervisorControl.prepare(p.stage,join(p.root,'bin/desktop-runtime-control.ps1'),join(p.directory,'launch-permission-check'));
+    const permissions=await control.taskPermissions();
+    await writeFile(join(p.directory,'launch.admission.json'),JSON.stringify({version:1,planId:p.planId,permissions,allowed:permissions.writeAllowed&&permissions.executeAllowed}),{encoding:'utf8',flag:'wx'});
+    if(!permissions.writeAllowed || !permissions.executeAllowed)throw new Error('Legacy task permissions unavailable; desktop must remain open');
+  }
   if(recover){const s=await json(join(p.directory,'supervisor.json'));if(s.phase==='restored')throw new Error('Completed runtime cannot be recovered');
     if(!await new SupervisorJournal(join(p.directory,'supervisor.json')).waitUntilAvailable(0))throw new Error('Runtime supervisor still owns its journal');}
   const name=recover?'recovery':'launch';await writeFile(join(p.directory,`${name}.intent.json`),JSON.stringify({version:1,planId:p.planId,planSha256:proof,workerMode:recover?'Recover':'Run',requestedAt:Date.now()}),{encoding:'utf8',flag:'wx',mode:0o600});
@@ -90,6 +96,7 @@ export async function preflightColdRuntime(path:string,proof:string){
   if(before.legacy.length!==1 || before.desktop.length!==1 || before.host.length || before.listener.length || before.broker.length)throw new Error('Runtime preflight inventory conflict');
   await control.testIdentity('legacy',before.legacy[0]!);await control.testIdentity('desktop',before.desktop[0]!);
   const backup=await control.backupTask(join(evidence,'legacy-backup'));
+  const taskPermissions=await control.taskPermissions();
   const cold=await control.coldSnapshot();
   const {stdout}=await exec('powershell.exe',['-NoProfile','-NonInteractive','-Command',"[bool](Get-Command Invoke-CommandInDesktopPackage -ErrorAction SilentlyContinue)"],{windowsHide:true,env:windowsPowerShellEnvironment(process.env),encoding:'utf8',timeout:15_000});
   const packageCommandAvailable=stdout.trim()==='True';let exact=0;
@@ -100,7 +107,7 @@ export async function preflightColdRuntime(path:string,proof:string){
   const unchanged=(['legacy','desktop','host','listener','broker'] as const).every(role=>before[role].length===after[role].length && before[role].every(v=>after[role].some(w=>sameProcess(v,w))))
     && d.ledgers.every(l=>current.ledgers.some(n=>n.file===l.file && n.sha256===l.sha256));
   const report={version:1,planId:p.planId,observedAt:new Date().toISOString(),packageCommandAvailable,exactToolCatalogs:exact,expectedToolCount:d.snapshot.spec.expectedToolNames.length,
-    legacyTaskBackedUp:true,legacyTaskEnabled:backup.enabled,desktopRelatedCount:cold.desktopRelated.length,originalProcessesAndLedgersUnchanged:unchanged,
+    legacyTaskBackedUp:true,legacyTaskEnabled:backup.enabled,taskPermissions,readyForColdWindow:packageCommandAvailable&&exact===1&&unchanged&&taskPermissions.writeAllowed&&taskPermissions.executeAllowed,desktopRelatedCount:cold.desktopRelated.length,originalProcessesAndLedgersUnchanged:unchanged,
     servicesChanged:false,productionReady:false,coldExitVerified:false,packageActivationTested:false,credentialProviderRead:false};
   await writeFile(join(evidence,'summary.json'),JSON.stringify(report,null,2),{encoding:'utf8',flag:'wx',mode:0o600});
   return report;

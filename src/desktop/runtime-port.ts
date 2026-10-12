@@ -12,7 +12,7 @@ import { execFile,spawn,type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 
 type Deployment=Awaited<ReturnType<typeof verifyDeployment>>;
-type Control=Pick<WindowsSupervisorControl,'inventory'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'>;
+type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'>;
 export interface RuntimeEffects {
   control:Control;
   verify():Promise<Deployment>;
@@ -63,6 +63,9 @@ export class DesktopRuntimePort implements SupervisorPort {
     }
   }
   async backup(){
+    const permissions=await this.effects.control.taskPermissions();
+    await writeFile(join(this.directory,'legacy-permissions.json'),JSON.stringify(permissions),{encoding:'utf8',flag:'wx'});
+    if(!permissions.writeAllowed || !permissions.executeAllowed)throw new Error('Legacy task permissions unavailable before desktop exit');
     const b=await this.effects.control.backupTask(join(this.directory,'legacy-backup'));
     return {legacyTaskEnabled:b.enabled,launchDefinitionSha256:b.definitionSha256};
   }

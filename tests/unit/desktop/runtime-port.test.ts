@@ -23,7 +23,7 @@ function harness(recovery=false){
     try{await readFile(join(dir,'package-broker.stop'));inventory.broker=[];await writeFile(join(dir,'package-broker.status.json'),JSON.stringify({phase:'stopped',pid:3,runId:runtimeRun}),'utf8');}catch{}
   };
   const effects:RuntimeEffects={
-    control:{async inventory(){await checkStop();return structuredClone(inventory);},async coldSnapshot(){return {verifiedAt:clock,complete:true,desktopRelated:[...inventory.desktop],inventory:structuredClone(inventory)};},
+    control:{async taskPermissions(){return {version:1,writeAllowed:true,executeAllowed:true,descriptorSha256:'e'.repeat(64)};},async inventory(){await checkStop();return structuredClone(inventory);},async coldSnapshot(){return {verifiedAt:clock,complete:true,desktopRelated:[...inventory.desktop],inventory:structuredClone(inventory)};},
       async testIdentity(role,p){events.push(`identity:${role}`);expect(p.pid).toBe(inventory[role as 'legacy'|'desktop'|'host'|'listener'][0]!.pid);},
       async backupTask(){events.push('backup');return {enabled:true,definitionSha256:'b'.repeat(64)};},async pauseTask(){events.push('pauseTask');},async restoreTaskSetting(){events.push('restoreTask');},
       async startLegacy(){events.push('startLegacy');inventory.legacy=[ids.legacy];},async stopOwned(role){events.push(`stop:${role}`);inventory[role]=[];},
@@ -61,6 +61,12 @@ it.each(['selectedUncertain','outsideActive','approval'])('retains %s and refuse
 });
 it('does not pause the old consumer when the credential provider fails',async()=>{
   const h=harness();h.badSecret();await expect(h.port.pauseLegacy(h.ids.legacy)).rejects.toThrow();expect(h.events).not.toContain('pauseTask');expect(h.inventory.legacy).toHaveLength(1);
+});
+it('refuses cold admission before requesting desktop exit when legacy task permissions are insufficient',async()=>{
+  const h=harness();h.effects.control.taskPermissions=async()=>({version:1,writeAllowed:false,executeAllowed:false,descriptorSha256:'e'.repeat(64)});
+  const state=await new DesktopSupervisor(new SupervisorJournal(join(dir,'journal.json')),h.port,h.bindings,h.clock).run(async()=>false,async()=>{throw Error('Must not wait for desktop exit');},{startMode:'cold'});
+  expect(state.errorCode).toBeDefined();expect(h.events).not.toContain('pauseTask');expect(h.events).not.toContain('secret');expect(state.lastColdExitProof).toBeUndefined();expect(h.inventory.desktop).toHaveLength(1);
+  expect(JSON.parse(await readFile(join(dir,'legacy-permissions.json'),'utf8'))).toMatchObject({writeAllowed:false,executeAllowed:false});
 });
 it('does not repeat an ambiguous host launch',async()=>{
   const h=harness();await h.port.startBroker(runId);h.effects.launch=async()=>{h.events.push('AMBIGUOUS');throw new Error('PRIVATE_FAILURE');};
