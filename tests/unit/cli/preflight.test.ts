@@ -1214,7 +1214,10 @@ describe('lark-cli preflight', () => {
       'profile-config-persist-failed',
       expect.objectContaining({ profile: 'codex' }),
     );
-  });
+  // This test includes real atomic config/projection writes. Windows CI took
+  // ~7s and timed out during setup; cleanup restored mocks before it continued.
+  // Its contract is error handling/state preservation, not a 5s I/O deadline.
+  }, 15_000);
 });
 
 async function writeRootConfig(configPath: string, profile: string): Promise<RootConfig['profiles'][string]> {
