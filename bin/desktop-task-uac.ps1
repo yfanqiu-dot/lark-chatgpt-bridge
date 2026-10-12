@@ -7,6 +7,22 @@ function Write-NewJson($path,$value){
   $temporary=$path+'.tmp-'+[Guid]::NewGuid().ToString();$bytes=[Text.Encoding]::UTF8.GetBytes(($value|ConvertTo-Json -Depth 12 -Compress))
   try{$stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()};[IO.File]::Move($temporary,$path)}finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
+function New-TaskLaunchFailure($record,$stage){
+  $exception=$record.Exception;$nativeCode=$null
+  for($depth=0;$exception -and $depth -lt 8;$depth++){
+    if($exception -is [ComponentModel.Win32Exception]){$nativeCode=$exception.NativeErrorCode;break}
+    $exception=$exception.InnerException
+  }
+  $code=switch($nativeCode){1223{'administrator_consent_cancelled'};5{'administrator_launch_access_denied'};740{'administrator_elevation_required'};default{'administrator_launch_not_confirmed'}}
+  return @{version=1;stage=$stage;errorCode=$code;nativeErrorCode=$nativeCode;hresult=$record.Exception.HResult;errorSha256=(Hash-Bytes ([Text.Encoding]::UTF8.GetBytes([string]$record.Exception.Message)));authenticated=$false}
+}
+$taskLaunchStage='read_request';$taskFailureDirectory=$null
+trap {
+  if($Mode -eq 'Launch' -and $taskFailureDirectory){
+    try{Write-NewJson (Join-Path $taskFailureDirectory 'native.launch.failure.json') (New-TaskLaunchFailure $_ $taskLaunchStage)}catch{}
+  }
+  exit 1
+}
 function Check-Request($request,$path){
   if($request.version -ne 1 -or $request.requestId -notmatch '^[a-f0-9-]{36}$' -or $request.planId -notmatch '^[a-f0-9-]{36}$' -or $request.action -notin @('TaskPermissions','DisableTask','RestoreTask','StartLegacy')){throw 'Invalid scoped task request'}
   if([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path)) -ne [IO.Path]::GetFullPath($request.directory) -or [IO.Path]::GetFileName($request.helperFile) -ne 'desktop-task-uac.ps1' -or [IO.Path]::GetFileName($request.nativeFile) -ne 'desktop-runtime-control.ps1'){throw 'Task action paths changed'}
@@ -18,7 +34,9 @@ $requestBytes=Read-SealedBytes $RequestFile $RequestSha256
 $request=[Text.Encoding]::UTF8.GetString($requestBytes)|ConvertFrom-Json
 Check-Request $request $RequestFile
 $helperBytes=Read-SealedBytes $request.helperFile $request.helperSha256
+$taskFailureDirectory=$request.directory
 if($Mode -eq 'Launch'){
+  $taskLaunchStage='entry_identity'
   if([IO.Path]::GetFullPath($PSCommandPath) -ne [IO.Path]::GetFullPath($request.helperFile)){throw 'Task helper entry changed'}
   # Load exactly the hashed bytes in the elevated process, avoiding a second
   # unchecked -File read. The only elevated program is this fixed task helper.
@@ -26,12 +44,15 @@ if($Mode -eq 'Launch'){
   $loader="`$b=[IO.File]::ReadAllBytes('$pathLiteral');`$h=[Security.Cryptography.SHA256]::Create();try{`$s=([BitConverter]::ToString(`$h.ComputeHash(`$b))).Replace('-','').ToLowerInvariant()}finally{`$h.Dispose()};if(`$s -cne '$($request.helperSha256)'){throw 'Task helper changed'};& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString(`$b))) -Mode Execute -RequestFile '$requestLiteral' -RequestSha256 '$RequestSha256'"
   $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
   $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $taskLaunchStage='administrator_start'
   $process=Start-Process $powershell -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Verb RunAs -WindowStyle Hidden -PassThru
   try{
+    $taskLaunchStage='native_identity'
     $native=Get-CimInstance Win32_Process -Filter ('ProcessId = '+$process.Id)
     if(!$native -or $native.ExecutablePath -ne $powershell -or $native.CommandLine -notmatch [regex]::Escape($encoded)){throw 'Elevated task identity unavailable'}
     $identity=@{pid=[int]$native.ProcessId;parentPid=[int]$native.ParentProcessId;createdAt=$native.CreationDate.ToUniversalTime().ToString('o');executable=[string]$native.ExecutablePath;commandLineSha256=(Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($native.CommandLine)))}
     Write-NewJson (Join-Path $request.directory 'native.json') @{version=1;requestId=$request.requestId;identity=$identity}
+    $taskLaunchStage='helper_exit'
     $remaining=[Math]::Max(1,[int]($request.expiresAt-[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()+10000))
     if(!$process.WaitForExit($remaining)){throw 'Elevated task result not confirmed'}
     $process.Refresh();if($process.ExitCode -ne 0){throw 'Elevated task helper rejected the action'}
