@@ -7,8 +7,10 @@ $taskPlan=Get-Content -LiteralPath $PlanFile -Encoding UTF8 | ConvertFrom-Json
 if($taskPlan.version -ne 1 -or $taskPlan.mode -ne 'cold' -or $taskPlan.planId -notmatch '^[a-f0-9-]{36}$' -or ($WorkerMode -eq 'Run' -and $taskPlan.expiresAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())){throw 'Invalid runtime plan'}
 foreach($path in @($taskPlan.directory,$taskPlan.root,$taskPlan.nodeExecutable,$PlanFile)){if(![IO.Path]::IsPathRooted($path) -or $path -match '["\r\n]'){throw 'Invalid runtime path'}}
 if([IO.Path]::GetFullPath($taskPlan.directory) -ne [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($PlanFile)) -or [IO.Path]::GetFullPath($taskPlan.root) -ne (Split-Path -Parent $PSScriptRoot) -or [IO.Path]::GetFileName($taskPlan.nodeExecutable) -ne 'node.exe'){throw 'Runtime program path changed'}
-if(@($taskPlan.files).Count -ne 9){throw 'Runtime program proofs missing'}
+if($taskPlan.taskControl -and $taskPlan.taskControl -ne 'uac'){throw 'Unsupported scoped task control'}
+if(@($taskPlan.files).Count -ne (9+[int](!!$taskPlan.taskControl))){throw 'Runtime program proofs missing'}
 $taskRequired=@($taskPlan.nodeExecutable,(Join-Path $PSScriptRoot 'lark-chatgpt-runtime-supervisor.mjs'),$PSCommandPath,(Join-Path $PSScriptRoot '..\dist\desktop-runtime-supervisor.js'),(Join-Path $PSScriptRoot 'desktop-runtime-control.ps1'),(Join-Path $PSScriptRoot 'lark-chatgpt-host.mjs'),(Join-Path $PSScriptRoot 'lark-chatgpt-topics.mjs'),(Join-Path $PSScriptRoot 'desktop-package-broker.ps1'),(Join-Path $PSScriptRoot 'desktop-package-broker-task.ps1'))
+if($taskPlan.taskControl -eq 'uac'){$taskRequired+=(Join-Path $PSScriptRoot 'desktop-task-uac.ps1')}
 foreach($required in $taskRequired){if(@($taskPlan.files|Where-Object{[IO.Path]::GetFullPath($_.path) -eq [IO.Path]::GetFullPath($required)}).Count -ne 1){throw 'Runtime proof incomplete'}}
 foreach($file in $taskPlan.files){if((Get-FileHash -LiteralPath $file.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256){throw 'Runtime program changed'}}
 $taskName=if($WorkerMode -eq 'Run'){'launch'}else{'recovery'}

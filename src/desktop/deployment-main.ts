@@ -11,13 +11,13 @@ import { prepareColdRuntime } from './runtime-supervisor';
 
 async function main(): Promise<void> {
   const [mode, path, directory, ...extra] = process.argv.slice(2);
-  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check','cold-check','cold-prepare','standalone-prepare'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check|cold-check <stage> <new-evidence-directory> | standalone-prepare|cold-prepare <stage> <new-plan-directory>');
+  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check','cold-check','cold-prepare','cold-prepare-uac','standalone-prepare'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check|cold-check <stage> <new-evidence-directory> | standalone-prepare|cold-prepare|cold-prepare-uac <stage> <new-plan-directory>');
   if (mode === 'prepare') {
     if (!directory) throw new Error('A new staging directory is required');
     const snapshot = await prepareDeployment(JSON.parse(await readFile(path, 'utf8')), directory);
     console.log(JSON.stringify({ staged: true, codeRevision: snapshot.spec.codeRevision, grayChatCount: 1, servicesChanged: false }));
-  } else if (mode === 'cold-prepare') {
-    if(!directory)throw new Error('A new cold runtime directory is required');console.log(JSON.stringify(await prepareColdRuntime(path,directory),null,2));
+  } else if (mode === 'cold-prepare'||mode==='cold-prepare-uac') {
+    if(!directory)throw new Error('A new cold runtime directory is required');console.log(JSON.stringify(await prepareColdRuntime(path,directory,undefined,mode==='cold-prepare-uac'?'uac':undefined),null,2));
   } else if (mode === 'standalone-prepare') {
     if (!directory) throw new Error('A new standalone plan directory is required');
     console.log(JSON.stringify({ ...await prepareStandalone(path,directory),servicesChanged:false,productionReady:false },null,2));

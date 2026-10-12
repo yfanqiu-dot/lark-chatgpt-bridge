@@ -259,3 +259,15 @@ P3 已接受的反向输入归属保护限制保持：群任务运行时桌面�
 后续先解决原任务管理的管理员操作入口并复核启动及恢复权限，再准备新的有限窗口；不得为了通过检查自动修改任务ACL、注册新任务、放宽身份核验或绕过拒绝。原首恢复错误、首次系统入口恢复未确认及原C群闭环继续待验；长时观察未启动。
 
 本轮5项新增回归通过；Windows本机全仓135文件、951项通过，类型及构建通过。真实权限只读探测为写入/执行均拒绝，原任务已启用时的免写恢复原生调用通过；新共享启动与灰度没有因此重试。新提交三平台CI须独立核对。
+
+## 原任务的单次管理员入口
+
+通过 `cold-prepare-uac <source-stage> <new-runtime-directory>` 显式准备 `taskControl=uac` 计划，额外锁定 `bin/desktop-task-uac.ps1`；默认计划仍要求普通用户本身具备任务管理权限。只读 `--preflight` 对UAC候选给出 `requiresAdministratorConsent=true` 和候选准入条件，`readyForColdWindow=false`，不能将此作为已获管理员权限的证明。
+
+入口仅允许 `TaskPermissions / DisableTask / RestoreTask / StartLegacy`，目标必须为原profile的 `LarkChannelBridge.Bot.<profile>`。每次单独通过 Windows `RunAs` 请求本人确认；管理员进程只加载锁定脚本字节中的固定任务函数，禁止任意命令、任务注册或ACL修改。新监督器、Host、监听和桌面仍由普通用户启动。原旧消费进程的停止权限单独通过只读句柄检查，权限不足则在退出前拒绝，不扩大管理员入口的作用范围。机制分别基于[微软Start-Process说明](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process)和[OpenProcess权限说明](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess)。
+
+每次请求限定120秒，保存独立请求ID、计划ID、完整Owner身份、任务定义/ACL及程序SHA；临时能力只保存CurrentUser DPAPI密文。普通进程取得真实管理员PID回执并核对签名后才发单次授权。握手文件原子发布且拒绝覆盖，防止半截JSON被误判；动作请求保留独占意图，取消、超时、身份或任务变化均不自动重复。恢复前核对普通桌面及自有broker，启动前拒绝已有旧消费者。原生错误保留固定分类、退出码及SHA，原始签名结果单独保留，不覆盖先前失败。
+
+`--task-uac-probe <plan.json> <plan-sha>` 仅请求管理员读取原任务权限，不启停服务；必须本人确认Windows提示。通过后仍需新的明确现场窗口：先启动普通权限监督器并确认管理员只读核验及 `waiting_desktop_exit`，再由本人正常退出，后续任务动作可能再次出现确认窗口。UAC窗口总计45分钟，包含等待和初始化，最迟第35分钟停止前向测试并预留10分钟回退，写入 `runtime.window.json`；到期未获授权则保留 `blocked/uncertain`，不能宣称恢复。显式仅恢复运行限10分钟，不启动新灰度或重放原模型输入。
+
+当前Windows只读检查已证明原任务运行等级为Limited，普通用户可打开原旧消费者的停止权限句柄并关闭，未终止进程。137文件、972项全仓回归、类型/构建及三份PS语法检查通过；实际Windows与Node HMAC一致。原生策略回归使用真实PS函数和隔离任务替身，不替代真实UAC、DPAPI跨权限级别、原任务启停、新共享准入、C群闭环或同窗口恢复；这些仍待本人配合现场验证。

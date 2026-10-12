@@ -10,9 +10,10 @@ import { inspectOwnedShared,readOwnedSharedContext } from './shared-inspector';
 import { desktopPipes,desktopToolCatalog,cleanDesktopEnvironment,windowsPowerShellEnvironment } from './windows-tools';
 import { execFile,spawn,type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
+import { TaskUacController } from './task-uac';
 
 type Deployment=Awaited<ReturnType<typeof verifyDeployment>>;
-type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'>;
+type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'canStopLegacy'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'>;
 export interface RuntimeEffects {
   control:Control;
   verify():Promise<Deployment>;
@@ -63,6 +64,8 @@ export class DesktopRuntimePort implements SupervisorPort {
     }
   }
   async backup(){
+    const inventory=await this.inventory();
+    if(inventory.legacy.length!==1 || !await this.effects.control.canStopLegacy(inventory.legacy[0]!))throw new Error('Old consumer stop permission unavailable before desktop exit');
     const permissions=await this.effects.control.taskPermissions();
     await writeFile(join(this.directory,'legacy-permissions.json'),JSON.stringify(permissions),{encoding:'utf8',flag:'wx'});
     if(!permissions.writeAllowed || !permissions.executeAllowed)throw new Error('Legacy task permissions unavailable before desktop exit');
@@ -209,19 +212,27 @@ export class DesktopRuntimePort implements SupervisorPort {
 }
 
 const exec=promisify(execFile);
-export async function createWindowsRuntimePort(stage:string,directory:string,root:string,recovery?:SupervisorState){
+export async function createWindowsRuntimePort(stage:string,directory:string,root:string,recovery?:SupervisorState,taskUac?:{planId:string;deadline:number;forwardDeadline:number}){
   const input=await verifyDeployment(stage),script=join(root,'bin/desktop-runtime-control.ps1');
   if(process.platform!=='win32' || resolve(directory)!==dirname(input.host.connectionFile))throw new Error('Windows runtime location invalid');
   const control=await WindowsSupervisorControl.prepare(stage,script,join(directory,`control-${process.pid}`),true);
   const owner=await control.ownerIdentity(process.pid);
   if(owner.pid!==process.pid || owner.executable.toLowerCase()!==process.execPath.toLowerCase())throw new Error('Runtime worker identity mismatch');
   const {host,topics,snapshot}=input;
+  const uac=taskUac?new TaskUacController(stage,directory,root,owner,taskUac.planId,taskUac.deadline,control,undefined,taskUac.forwardDeadline):undefined;
   for(const relative of ['bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker-task.ps1','bin/desktop-package-broker.ps1','dist/desktop-runtime-supervisor.js','bin/lark-chatgpt-runtime-supervisor.mjs']){
     if(!snapshot.files.some(f=>f.path===resolve(root,relative)))throw new Error('Runtime program missing from pinned files');
   }
   const children=new Map<string,ChildProcess>();
   const effects:RuntimeEffects={
-    control,verify:()=>verifyDeployment(stage),now:Date.now,pause:()=>sleep(500),
+    control:uac?{
+      inventory:()=>control.inventory(),coldSnapshot:()=>control.coldSnapshot(),testIdentity:(role,identity)=>control.testIdentity(role,identity),canStopLegacy:identity=>control.canStopLegacy(identity),
+      taskPermissions:async()=>{const permissions=await uac.call('TaskPermissions');if(!permissions)throw new Error('Task UAC permission proof missing');return permissions;},
+      backupTask:path=>control.backupTask(path),pauseTask:async path=>{await uac.call('DisableTask',path);},
+      restoreTaskSetting:async path=>{if(await control.taskRestoreNeeded(path))await uac.call('RestoreTask',path);else await control.restoreTaskSetting(path);},
+      startLegacy:async path=>{await uac.call('StartLegacy',path);},stopOwned:(role,identity)=>control.stopOwned(role,identity),
+      protectCapability:(path,token)=>control.protectCapability(path,token),unprotectCapability:path=>control.unprotectCapability(path),startOrdinary:()=>control.startOrdinary(),
+    }:control,verify:()=>verifyDeployment(stage),now:Date.now,pause:()=>sleep(500),
     async launch(role,runId,extra){
       const started=Date.now();
       const args=role==='broker'?['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',join(root,'bin/desktop-package-broker-task.ps1'),'-ConnectionFile',host.connectionFile,'-ProtectedTokenFile',join(directory,'broker-capability.dpapi'),'-OwnerLeaseFile',join(directory,'broker-owner.json')]:

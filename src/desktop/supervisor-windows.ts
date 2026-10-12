@@ -25,7 +25,7 @@ export class WindowsSupervisorControl {
     return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations,snapshot.files.find(f=>f.path===resolve(script))!.sha256);
   }
   private async call(action: string, extra: string[] = [], input?:string, raw=false,boundedRead=false): Promise<any> {
-    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
+    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
     if(boundedRead){if(action!=='SharedSnapshot' || digest(await readFile(this.script))!==this.scriptSha256)throw new Error('Bounded native reader changed');}
     else await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
@@ -76,7 +76,17 @@ export class WindowsSupervisorControl {
     await this.call(action, ['-Role',role,'-IdentityFile',file]);
   }
   async testIdentity(role: 'legacy' | 'desktop' | 'host' | 'listener', identity: ProcessIdentity): Promise<void> { await this.identityCall('TestIdentity', role, identity); }
+  async canStopLegacy(identity:ProcessIdentity):Promise<boolean>{
+    const directory=await mkdtemp(join(this.evidence,'stop-permission-')),file=join(directory,'expected.json');
+    await writeFile(file,JSON.stringify(identity),{encoding:'utf8',flag:'wx'});
+    const result=await this.call('StopPermission',['-Role','legacy','-IdentityFile',file]);
+    if(result.version!==1 || typeof result.allowed!=='boolean' || result.processTerminated!==false)throw new Error('Old consumer stop permission proof invalid');return result.allowed;
+  }
   async pauseTask(backupDirectory: string): Promise<void> { await this.call('DisableTask', ['-BackupDirectory',backupDirectory]); }
+  async taskRestoreNeeded(backupDirectory:string):Promise<boolean>{
+    const result=await this.call('TaskRestoreNeeded',['-BackupDirectory',backupDirectory]);
+    if(result.version!==1 || typeof result.needed!=='boolean')throw new Error('Task restoration setting proof invalid');return result.needed;
+  }
   async restoreTaskSetting(backupDirectory: string): Promise<void> { await this.call('RestoreTask', ['-BackupDirectory',backupDirectory]); }
   async startLegacy(backupDirectory:string):Promise<void>{await this.call('StartLegacy',['-BackupDirectory',backupDirectory]);}
   async stopOwned(role: 'legacy' | 'listener', identity: ProcessIdentity): Promise<void> { await this.identityCall('StopOwned', role, identity); }

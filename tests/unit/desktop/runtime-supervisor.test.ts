@@ -16,10 +16,10 @@ beforeEach(async()=>{
   vi.resetAllMocks();root=await mkdtemp(join(tmpdir(),'cold-plan-'));directory=join(root,'runtime');await mkdir(join(root,'bin'));await mkdir(join(root,'dist'));
   const files=['node.exe','bin/lark-chatgpt-runtime-supervisor.mjs','bin/desktop-cold-launch.ps1','dist/desktop-runtime-supervisor.js','bin/desktop-runtime-control.ps1','bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker.ps1','bin/desktop-package-broker-task.ps1'].map(p=>join(root,p));
   for(const f of files)await writeFile(f,'TEST ONLY','utf8');
-  input={host:{connectionFile:join(root,'source-connection.json')},topics:{connectionFile:join(root,'source-connection.json'),registryFile:join(root,'original-registry.json'),enabledChatIds:['oc_c'],allowTopicCreation:false},snapshot:{files:await Promise.all(files.map(async path=>({path,sha256:sha(await readFile(path))}))),spec:{codeRevision:'a'.repeat(40),legacy:{executable:files[0]}}}};
+  input={host:{connectionFile:join(root,'source-connection.json')},topics:{connectionFile:join(root,'source-connection.json'),registryFile:join(root,'original-registry.json'),enabledChatIds:['oc_c'],allowTopicCreation:false},snapshot:{files:await Promise.all(files.map(async path=>({path,sha256:sha(await readFile(path))}))),spec:{codeRevision:'a'.repeat(40),legacy:{executable:files[0],profile:'fixture',scheduledTaskName:'LarkChannelBridge.Bot.fixture'}}}};
   mocked.verify.mockImplementation(async stage=>stage===join(directory,'stage')?{...input,host:JSON.parse(await readFile(join(directory,'host.json'),'utf8')),topics:JSON.parse(await readFile(join(directory,'topics.json'),'utf8'))}:input);
   mocked.prepare.mockImplementation(async(_spec,stage)=>{await mkdir(stage);});
-  mocked.control.mockResolvedValue({taskPermissions:mocked.permissions});
+  mocked.control.mockResolvedValue({taskPermissions:mocked.permissions,inventory:async()=>({legacy:[{pid:1}]}),canStopLegacy:async()=>true});
   mocked.permissions.mockResolvedValue({version:1,writeAllowed:true,executeAllowed:true,descriptorSha256:'e'.repeat(64)});
 });
 afterEach(async()=>{await rm(root,{recursive:true,force:true});});
@@ -60,4 +60,16 @@ it.skipIf(process.platform!=='win32')('blocks a read-only legacy task before cre
   await expect(launchColdRuntime(r.planFile,r.planSha256)).rejects.toThrow('desktop must remain open');expect(mocked.exec).not.toHaveBeenCalled();
   await expect(readFile(join(directory,'launch.intent.json'))).rejects.toMatchObject({code:'ENOENT'});
   expect(JSON.parse(await readFile(join(directory,'launch.admission.json'),'utf8'))).toMatchObject({allowed:false});
+});
+it('pins the additional task helper only for an explicitly prepared UAC plan',async()=>{
+  await expect(prepareColdRuntime(join(root,'source-stage'),directory,root,'uac')).rejects.toThrow('source proofs');
+  const path=join(root,'bin/desktop-task-uac.ps1');await writeFile(path,'TEST UAC ONLY','utf8');input.snapshot.files.push({path,sha256:sha('TEST UAC ONLY')});
+  const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,'uac'),p=await verifyColdRuntimePlan(r.planFile,r.planSha256);
+  expect(p.taskControl).toBe('uac');expect(p.files).toHaveLength(10);expect(mocked.exec).not.toHaveBeenCalled();
+});
+it.skipIf(process.platform!=='win32')('retains denied ordinary permissions and requires explicit administrator consent in a UAC launch',async()=>{
+  const path=join(root,'bin/desktop-task-uac.ps1');await writeFile(path,'TEST UAC ONLY','utf8');input.snapshot.files.push({path,sha256:sha('TEST UAC ONLY')});
+  const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,'uac');mocked.permissions.mockResolvedValue({version:1,writeAllowed:false,executeAllowed:false,descriptorSha256:'e'.repeat(64)});
+  mocked.exec.mockResolvedValue({stdout:JSON.stringify({version:1,planId:r.planId,workerMode:'Run',identity:{pid:100,parentPid:1,createdAt:new Date().toISOString(),executable:join(root,'node.exe'),commandLineSha256:'b'.repeat(64)}})});
+  await launchColdRuntime(r.planFile,r.planSha256);expect(JSON.parse(await readFile(join(directory,'launch.admission.json'),'utf8'))).toMatchObject({requiresAdministratorConsent:true,permissions:{writeAllowed:false,executeAllowed:false}});
 });

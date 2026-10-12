@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
+  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
   [Parameter(Mandatory=$true)][string]$ConfigFile,
   [string]$IdentityFile,
   [ValidateSet('legacy','desktop','host','listener')][string]$Role,
@@ -98,6 +98,17 @@ function Assert-Identity($expected,$expectedRole){
   if($expectedRole -eq 'legacy' -and $taskCurrent.ExecutablePath -ne $taskConfig.legacy.executable){throw 'Legacy executable changed'}
   if($expectedRole -eq 'desktop' -and $taskCurrent.ExecutablePath -ne $taskConfig.desktopExe){throw 'Desktop executable changed'}
   return $taskCurrent
+}
+function Test-ProcessStopAccess([int]$processId){
+  if(!('BridgeProcessStopAccess' -as [type])){Add-Type -TypeDefinition @'
+using System;using System.Runtime.InteropServices;
+public static class BridgeProcessStopAccess {
+  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static bool Check(int pid){var handle=OpenProcess(1,false,pid);if(handle==IntPtr.Zero)return false;CloseHandle(handle);return true;}
+}
+'@}
+  return [BridgeProcessStopAccess]::Check($processId)
 }
 function Normalize-TaskDefinition($xmlText,[bool]$enabled){
   $taskDocument=[xml]$xmlText
@@ -207,7 +218,7 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   $taskResult | ConvertTo-Json -Depth 6 -Compress
   exit 0
 }
-if($Action -in @('BackupTask','DisableTask','RestoreTask','StartLegacy')){
+if($Action -in @('BackupTask','TaskRestoreNeeded','DisableTask','RestoreTask','StartLegacy')){
   if(!$BackupDirectory -or ![IO.Path]::IsPathRooted($BackupDirectory)){throw 'Task backup directory must be absolute'}
   $taskBackup=Join-Path $BackupDirectory 'legacy-task.json'
   $taskDefinition=Read-TaskDefinition
@@ -226,6 +237,7 @@ if($Action -in @('BackupTask','DisableTask','RestoreTask','StartLegacy')){
   }
   $taskSaved=Get-Content -LiteralPath $taskBackup -Encoding UTF8 | ConvertFrom-Json
   if($taskSaved.version -ne 1 -or $taskSaved.taskName -ne $taskConfig.legacy.scheduledTaskName -or $taskSaved.definitionSha256 -cne $taskDefinition.sha256 -or $taskSaved.xmlSha256 -cne (Get-Sha ([IO.File]::ReadAllText((Join-Path $BackupDirectory 'legacy-task.xml'),[Text.Encoding]::UTF8)))){throw 'Legacy task definition changed; refusing mutation'}
+  if($Action -eq 'TaskRestoreNeeded'){@{version=1;needed=([bool]$taskSaved.enabled -ne [bool]$taskDefinition.enabled)}|ConvertTo-Json -Compress;exit 0}
   if($Action -eq 'DisableTask'){
     Disable-ScheduledTask -TaskName $taskConfig.legacy.scheduledTaskName | Out-Null
   }elseif($Action -eq 'StartLegacy'){
@@ -244,6 +256,11 @@ if($Action -in @('BackupTask','DisableTask','RestoreTask','StartLegacy')){
 if(!$IdentityFile -or !$Role){throw 'Process action requires identity file and role'}
 $taskExpected=Get-Content -LiteralPath $IdentityFile -Encoding UTF8 | ConvertFrom-Json
 $taskMatched=Assert-Identity $taskExpected $Role
+if($Action -eq 'StopPermission'){
+  if($Role -ne 'legacy'){throw 'Stop permission probe only accepts the verified old consumer'}
+  @{version=1;allowed=(Test-ProcessStopAccess ([int]$taskExpected.pid));processTerminated=$false}|ConvertTo-Json -Compress
+  exit 0
+}
 if($Action -eq 'CloseDesktop'){
   if($Role -ne 'desktop'){throw 'CloseDesktop requires desktop role'}
   $taskHandle=Get-Process -Id $taskExpected.pid
