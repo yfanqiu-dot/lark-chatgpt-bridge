@@ -274,4 +274,8 @@ P3 已接受的反向输入归属保护限制保持：群任务运行时桌面�
 
 管理员启动失败另存 `native.launch.failure.json`，只记录固定阶段、Win32错误码、HRESULT及错误SHA，不保存错误正文。该文件未经能力认证，只供诊断，不能代替原生身份、签名ready/result或管理员权限证明；1223、5、740分别分类为取消、拒绝和要求提权，其他错误保持未确认，不自动重试原请求。
 
+Windows PowerShell可能把原生错误展平为本地化的 `InvalidOperationException`。诊断仅与本机安装的系统错误模板进行完整精确匹配，标记 `nativeErrorSource=wrapped_system_message`；直接原生异常则标记 `exception_native_code`，其他文本仍未知。786和1260分类为 `administrator_launch_blocked_by_policy`，不计为用户同意或创建成功。[Windows错误786的官方含义](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--500-999-)为管理员策略限制访问。
+
+2026-10-12 20:03本人从普通PowerShell提交了新的单独只读权限请求；准备时原状态与54工具匹配，仍在 `administrator_start` 失败。原错误SHA与中文系统模板及错误786唯一匹配，未直接取得原生数字错误码，因此记录为文本匹配推断。20:05独立清点确认原任务、桌面、旧消费者、业务文件和工具均未变，辅助进程0。当前查到的应用控制事件未定位到本次具体规则，不将较早的DLL签名事件认定为根因；原PowerShell签名Valid、AppInfo Running也不证明提权可用。该门禁待系统策略核对，不自动换入口重投或更改安全设置。新冷启动窗口尚未开始。
+
 当前Windows只读检查已证明原任务运行等级为Limited，普通用户可打开原旧消费者的停止权限句柄并关闭，未终止进程。137文件、972项全仓回归、类型/构建及三份PS语法检查通过；实际Windows与Node HMAC一致。原生策略回归使用真实PS函数和隔离任务替身，不替代真实UAC、DPAPI跨权限级别、原任务启停、新共享准入、C群闭环或同窗口恢复；这些仍待本人配合现场验证。

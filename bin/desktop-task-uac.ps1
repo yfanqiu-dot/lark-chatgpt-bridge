@@ -8,13 +8,30 @@ function Write-NewJson($path,$value){
   try{$stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()};[IO.File]::Move($temporary,$path)}finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
 function New-TaskLaunchFailure($record,$stage){
-  $exception=$record.Exception;$nativeCode=$null
+  $exception=$record.Exception;$nativeCode=$null;$source='not_available'
   for($depth=0;$exception -and $depth -lt 8;$depth++){
-    if($exception -is [ComponentModel.Win32Exception]){$nativeCode=$exception.NativeErrorCode;break}
+    if($exception -is [ComponentModel.Win32Exception]){$nativeCode=$exception.NativeErrorCode;$source='exception_native_code';break}
     $exception=$exception.InnerException
   }
-  $code=switch($nativeCode){1223{'administrator_consent_cancelled'};5{'administrator_launch_access_denied'};740{'administrator_elevation_required'};default{'administrator_launch_not_confirmed'}}
-  return @{version=1;stage=$stage;errorCode=$code;nativeErrorCode=$nativeCode;hresult=$record.Exception.HResult;errorSha256=(Hash-Bytes ([Text.Encoding]::UTF8.GetBytes([string]$record.Exception.Message)));authenticated=$false}
+  # Windows PowerShell can flatten the native exception into a localized
+  # InvalidOperationException. Match only exact installed system templates;
+  # arbitrary text remains unknown, and the original message is never saved.
+  if($null -eq $nativeCode -and $stage -eq 'administrator_start'){
+    try{
+      $assembly=(Get-Command Microsoft.PowerShell.Management\Start-Process).ImplementingType.Assembly
+      $manager=[Resources.ResourceManager]::new('ProcessResources',$assembly)
+      foreach($locale in @([Globalization.CultureInfo]::CurrentUICulture.Name,'en-US','zh-CN')){
+        $template=$manager.GetString('InvalidStartProcess',[Globalization.CultureInfo]::new($locale))
+        foreach($candidate in @(786,1260,1223,5,740)){
+          $expected=[string]::Format($template,([ComponentModel.Win32Exception]::new($candidate).Message))
+          if([string]$record.Exception.Message -ceq $expected){$nativeCode=$candidate;$source='wrapped_system_message';break}
+        }
+        if($null -ne $nativeCode){break}
+      }
+    }catch{}
+  }
+  $code=switch($nativeCode){786{'administrator_launch_blocked_by_policy'};1260{'administrator_launch_blocked_by_policy'};1223{'administrator_consent_cancelled'};5{'administrator_launch_access_denied'};740{'administrator_elevation_required'};default{'administrator_launch_not_confirmed'}}
+  return @{version=1;stage=$stage;errorCode=$code;nativeErrorCode=$nativeCode;nativeErrorSource=$source;hresult=$record.Exception.HResult;errorSha256=(Hash-Bytes ([Text.Encoding]::UTF8.GetBytes([string]$record.Exception.Message)));authenticated=$false}
 }
 $taskLaunchStage='read_request';$taskFailureDirectory=$null
 trap {

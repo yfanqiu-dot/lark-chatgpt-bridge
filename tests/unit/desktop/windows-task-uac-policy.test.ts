@@ -26,3 +26,10 @@ it.skipIf(process.platform!=='win32').each([[1223,'administrator_consent_cancell
   const raw=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,env:windowsPowerShellEnvironment(process.env)});
   expect(raw).not.toContain('TEST_PRIVATE');expect(JSON.parse(raw)).toMatchObject({stage:'administrator_start',errorCode:expected,nativeErrorCode:nativeCode,authenticated:false});
 });
+it.skipIf(process.platform!=='win32').each(['en-US','zh-CN'])('recognizes an exact flattened policy error in %s without treating it as consent',locale=>{
+  const source=resolve('bin/desktop-task-uac.ps1').replaceAll("'","''");
+  const script=`$ErrorActionPreference='Stop';$ast=[Management.Automation.Language.Parser]::ParseFile('${source}',[ref]$null,[ref]$null);foreach($name in @('Hash-Bytes','New-TaskLaunchFailure')){$fn=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);. ([scriptblock]::Create($fn.Extent.Text))};$manager=[Resources.ResourceManager]::new('ProcessResources',(Get-Command Start-Process).ImplementingType.Assembly);$message=[string]::Format($manager.GetString('InvalidStartProcess',[Globalization.CultureInfo]::new('${locale}')),([ComponentModel.Win32Exception]::new(786).Message));try{throw [InvalidOperationException]::new($message)}catch{New-TaskLaunchFailure $_ 'administrator_start'|ConvertTo-Json -Compress}`;
+  const raw=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,env:windowsPowerShellEnvironment(process.env)});
+  expect(JSON.parse(raw)).toMatchObject({stage:'administrator_start',errorCode:'administrator_launch_blocked_by_policy',nativeErrorCode:786,nativeErrorSource:'wrapped_system_message',authenticated:false});
+  expect(raw).not.toContain('restricted by');expect(raw).not.toContain('Access to');
+});
