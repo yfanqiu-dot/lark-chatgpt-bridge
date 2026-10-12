@@ -32,7 +32,7 @@ const reads = new Set(['project/list','thread/turns/list','thread/loaded/list','
 export async function inspectSharedIdle(rpc: OrdinaryReadRpc, expected: SharedContext,
   bindings: readonly SupervisorBinding[], baseline: { desktopVersion: string; codexSha256: string; toolNames: readonly string[] },
   recheckContext: () => Promise<SharedContext>, now = Date.now): Promise<SharedIdleObservation> {
-  const started = now(); let lastMethod: string | undefined;
+  let started = now(),lastMethod: string | undefined;
   const failed = (finding: string): SharedIdleObservation => ({verified:false,source:'owned_shared_native',findings:[finding]});
   const contextValid = (c: SharedContext) => sameProcess(c.host,expected.host) && sameProcess(c.backend,expected.backend) && sameProcess(c.desktop,expected.desktop)
     && c.backend.parentPid === c.host.pid && c.packageIdentityVerified === true && c.endpointOwnershipVerified === true
@@ -47,6 +47,10 @@ export async function inspectSharedIdle(rpc: OrdinaryReadRpc, expected: SharedCo
   };
   try {
     if (!bindings.length || !contextValid(expected) || !contextValid(await recheckContext())) return failed('shared_context_unverified');
+    // Context/package validation is a prerequisite. Native freshness begins
+    // with the first project/history/task read and includes the final live OS
+    // owner check. All loaded tasks are then scanned twice.
+    started=now();rpc.beginObservation?.();
     const projects: any[] = []; let cursor: string | undefined; const cursors = new Set<string>();
     do {
       if (cursors.size >= 100) return failed('shared_project_pages_invalid');
@@ -74,7 +78,10 @@ export async function inspectSharedIdle(rpc: OrdinaryReadRpc, expected: SharedCo
       return expected.desktop;
     },now);
     if (!observed.verified) return {...failed(observed.findings[0]!.replace(/^ordinary_/,'shared_')),...(observed.failure ? {failure:observed.failure} : {})};
-    if (!contextValid(await recheckContext()) || rpc.changed || now()-started > 5000 || now() < started) return failed('shared_context_changed_or_stale');
+    // inspectOrdinaryIdle already rechecked the complete context immediately
+    // after its last queue scan. No intervening read/mutation needs a third
+    // identical OS query; still use the oldest native-read timestamp.
+    if (rpc.changed || now()-started > 5000 || now() < started) return failed('shared_context_changed_or_stale');
     return {verified:true,source:'owned_shared_native',findings:[],proof:{...observed.proof!,verifiedAt:started}};
   } catch(e) {
     return {...failed('shared_native_read_unavailable'),failure:e instanceof RpcError ? {method:lastMethod,kind:'rpc_error',code:e.code} : {method:lastMethod,kind:'validation_or_transport_failed'}};

@@ -52,7 +52,7 @@ it('retains an actual RPC error code without a raw error or retry',async()=>{
   expect(JSON.stringify(r)).not.toContain('SECRET');expect(h.calls.filter(m=>m==='thread/loaded/list')).toHaveLength(1);
 });
 it('includes project/history scan time in proof freshness and rejects observed activity',async()=>{
-  const h=harness(),c=context();let tick=Date.now();
-  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>{tick+=2000;return c;},()=>tick);expect(r.verified).toBe(false);
+  const c=context();let tick=Date.now();const h=harness(m=>{if(m==='project/list')tick+=6000;});
+  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>c,()=>tick);expect(r.verified).toBe(false);
   const dirty=harness();Object.defineProperty(dirty.rpc,'changed',{value:true});expect((await inspectSharedIdle(dirty.rpc,c,bindings,baseline,async()=>c)).verified).toBe(false);
 });

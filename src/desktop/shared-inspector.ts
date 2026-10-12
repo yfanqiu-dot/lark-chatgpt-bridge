@@ -53,14 +53,11 @@ export async function inspectOwnedShared(stage:string,control:WindowsSupervisorC
   // not trust the persisted list alone, even when the lease is fresh.
   const names=await desktopToolCatalog(join(dirname(host.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),lease.pipe);
   if(JSON.stringify([...names].sort())!==JSON.stringify([...snapshot.spec.expectedToolNames].sort())) throw new Error('Owned tool catalog mismatch');
-  const rpc=new DesktopRpc(host.endpoint,2500);let changed=false;
-  rpc.onMessage(()=>{changed=true;});
+  const rpc=new DesktopRpc(host.endpoint,2500);let changed=false,observing=false;
+  rpc.onMessage(()=>{if(observing)changed=true;});
   try {
     await rpc.connect();
-    // The bounded admission window starts after initialize. Activity during
-    // the handshake is accounted for by the following full native scan.
-    changed=false;
-    return await inspectSharedIdle({get changed(){return changed;},call:(method,params)=>rpc.call(method,params),close:()=>rpc.close()},context,
+    return await inspectSharedIdle({get changed(){return changed;},beginObservation(){changed=false;observing=true;},call:(method,params)=>rpc.call(method,params),close:()=>rpc.close()},context,
       snapshot.bindings,{desktopVersion:host.desktopVersion,codexSha256:host.codexSha256,toolNames:snapshot.spec.expectedToolNames},
       ()=>readOwnedSharedContext(stage,control,owned,false,pinned));
   } finally {rpc.close();}

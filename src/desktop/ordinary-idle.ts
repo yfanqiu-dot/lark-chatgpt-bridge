@@ -5,7 +5,7 @@ import { sameProcess, type IdleProof, type ProcessIdentity, type SupervisorBindi
 
 const methods = new Set(['tools/list', 'thread/loaded/list', 'thread/read', 'thread/queue/list']);
 const maxFrame = 8 * 1024 * 1024;
-export interface OrdinaryReadRpc { readonly changed?: boolean; call(method: string, params: unknown): Promise<any>; close(): void }
+export interface OrdinaryReadRpc { readonly changed?: boolean; beginObservation?():void; call(method: string, params: unknown): Promise<any>; close(): void }
 
 /** The installed app-tools pipe uses a four-byte little-endian frame. This
  * client has a fixed read allowlist and never reconnects or replays a request. */
