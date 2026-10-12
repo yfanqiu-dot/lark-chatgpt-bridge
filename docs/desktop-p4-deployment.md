@@ -174,6 +174,10 @@ node bin/lark-chatgpt-supervisor.mjs --status D:\bridge-local\standalone-001\pla
 
 第二个新计划 `standalone-de05f9e-20261012` 的原生回执为返回码21、PID0，未创建worker，原记录保留且没有重试。随后按[微软Startup参数文档](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-processstartup)改用隐藏的detached进程和Unicode环境参数，仅传递运行必需环境。新增参数策略回归通过；实际新计划复测结果另行记录。
 
+第三个新计划 `standalone-d3c7a0f-20261012` 实際原生启动成功，启动回执与worker自身完整身份匹配，续租3次后关闭租约并退出，同一计划第二次启动被拒。原普通桌面、唯一旧Bridge和全部原账本/registry/审批journal字节均未变。运行时父进程观察为WmiPrvSE，独立复核时父进程已不可读取，审计如实保留此时间边界。证据留 `.p4-local/standalone-d3c7a0f-20261012/independent-audit.json`。本项没有关闭Codex、注册登录任务、激活包内broker或切换消费者。
+
+worker的生产准入仍为 `blocked`：5个自有管道中1个精确匹配54工具，`thread/loaded/list`返回实际RPC错误码 `-32602`，`productionReady=false`。独立预检和租约验证通过不能替代原普通桌面的原生空闲证明。后续准入方案须明确实时接口或本人确认的冷启动边界，当前不自动放宽。
+
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 
 最终编码修复候选 `f8e27e3` 重新完成上述只读检查，并从真实备份文件按字节解析XML成功。最新可用证据为 `.p4-local/supervisor-f8e27e3/verification.json`；旧 `8ccbd7a` 备份存在编码声明问题，作为缺陷原始证据保留，不用作恢复XML文件。全程没有执行旧任务修改、桌面关闭或消费者切换。
