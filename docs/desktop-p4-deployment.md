@@ -180,6 +180,8 @@ node bin/lark-chatgpt-runtime-supervisor.mjs --launch-recovery D:\bridge-local\r
 
 本轮新增32项：实际适配器14、独立计划/启动保护11、监听连接回执5、Windows DPAPI2。本机全仓134个文件、945项通过，类型与构建通过。DPAPI测试真实加解密一次性测试能力；其他服务角色联动为隔离/模拟回归，不是实际包内持续运行、Cold WMI启动或飞书灰度通过。
 
+本机首个只读候选确认包激活命令可用，普通桌面唯一工具管道精确匹配54项，原启动定义已备份，原进程、全部原账本、registry、审批journal及旧启动配置字节未变。没有读取生产凭据、激活包、创建新消费者或关闭桌面。实际共享原生准入每次保存脱敏观察（含固定RPC拒绝方法/代码）；子进程结束保存退出码、信号和stderr字节数/SHA，不保存stderr正文或将其SHA当作根因证明。
+
 ### 独立预检进程（2026-10-12）
 
 新增 `standalone-prepare` 和 `lark-chatgpt-supervisor`。目前仅提供独立的只读预检，不提供生产运行模式。

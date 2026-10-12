@@ -38,6 +38,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   private appSecret?:string;
   private lease?:BrokerOwnerLease;
   private lost=false;
+  private sharedObservation=0;
   constructor(private readonly input:Deployment,readonly directory:string,private readonly owner:ProcessIdentity,
     private readonly effects:RuntimeEffects, recovery?:SupervisorState){
     if(resolve(directory)!==dirname(input.host.connectionFile) || !sameProcess(owner,owner))throw new Error('Runtime directory or owner invalid');
@@ -107,7 +108,11 @@ export class DesktopRuntimePort implements SupervisorPort {
     this.appSecret=undefined;return result;
   }
   private sharedOwned(){if(!this.owned.host || !this.owned.broker)throw new Error('Shared runtime not owned');return {host:this.owned.host,broker:this.owned.broker,...(this.owned.listener?{listener:this.owned.listener}:{})};}
-  async sharedIdle(){const r=await this.effects.shared(this.sharedOwned());if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');return r.proof;}
+  async sharedIdle(){
+    const r=await this.effects.shared(this.sharedOwned());
+    await writeFile(join(this.directory,`shared-idle-${++this.sharedObservation}.json`),JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
+    if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');return r.proof;
+  }
   private async listenerReady(){
     const r=await json(join(this.directory,'listener.ready.json'));
     return r.version===1 && r.runId===this.runId && r.pid===this.owned.listener?.pid && r.phase==='ready'
@@ -218,7 +223,10 @@ export async function createWindowsRuntimePort(stage:string,directory:string,roo
       const started=Date.now();
       const args=role==='broker'?['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',join(root,'bin/desktop-package-broker-task.ps1'),'-ConnectionFile',host.connectionFile,'-ProtectedTokenFile',join(directory,'broker-capability.dpapi'),'-OwnerLeaseFile',join(directory,'broker-owner.json')]:
         [join(root,`bin/lark-chatgpt-${role==='host'?'host':'topics'}.mjs`),role==='host'?snapshot.spec.hostConfigFile:snapshot.spec.topicConfigFile,role==='host'?'--start':'--run'];
-      const child=spawn(role==='broker'?'powershell.exe':snapshot.spec.legacy.executable,args,{cwd:host.projectRoot,windowsHide:true,stdio:'ignore',env:{...(role==='broker'?windowsPowerShellEnvironment(process.env):cleanDesktopEnvironment(process.env)),...extra}});
+      const child=spawn(role==='broker'?'powershell.exe':snapshot.spec.legacy.executable,args,{cwd:host.projectRoot,windowsHide:true,stdio:['ignore','ignore','pipe'],env:{...(role==='broker'?windowsPowerShellEnvironment(process.env):cleanDesktopEnvironment(process.env)),...extra}});
+      const stderrHash=createHash('sha256');let stderrBytes=0;
+      child.stderr?.on('data',(bytes:Buffer)=>{stderrBytes+=bytes.length;stderrHash.update(bytes);});
+      child.once('close',(code,signal)=>{void writeFile(join(directory,`${role}.exit.json`),JSON.stringify({version:1,runId,role,pid:child.pid,code,signal,stderrBytes,stderrSha256:stderrHash.digest('hex'),exitedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx',mode:0o600}).catch(()=>{});});
       children.set(role,child);let error=false;child.on('error',()=>{error=true;});
       const deadline=started+(role==='broker'?30_000:10_000);
       do{
