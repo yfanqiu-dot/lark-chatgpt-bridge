@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { verifyDeployment } from './deployment';
 import type { ProcessIdentity, SupervisorInventory } from './supervisor';
+import { windowsPowerShellEnvironment } from './windows-tools';
 
 const exec = promisify(execFile);
 const digest = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
@@ -27,7 +28,7 @@ export class WindowsSupervisorControl {
     if (!['Snapshot','TestIdentity','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require a verified native idle gate and explicit runtime wiring');
     await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
-    const result = await exec('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra], { windowsHide: true, timeout: 35_000, encoding: 'utf8' });
+    const result = await exec('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',this.script,'-ConfigFile',this.configFile,'-Action',action,...extra], { windowsHide: true, timeout: 35_000, encoding: 'utf8',env:windowsPowerShellEnvironment(process.env) });
     return JSON.parse(result.stdout);
   }
   async inventory(): Promise<SupervisorInventory> { return this.call('Snapshot'); }

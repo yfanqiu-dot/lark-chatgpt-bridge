@@ -7,6 +7,11 @@ const exec = promisify(execFile);
 export function cleanDesktopEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith('NODE_REPL_') && (!key.startsWith('CODEX_') || key === 'CODEX_HOME')));
 }
+/** powershell.exe is Windows PowerShell, not the pwsh that may launch Node.
+ * Let it construct its own module path instead of inheriting pwsh's modules. */
+export function windowsPowerShellEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(cleanDesktopEnvironment(source)).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+}
 const discovery = String.raw`
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
@@ -33,7 +38,7 @@ export async function desktopPipes(pid: number, desktopExe: string): Promise<Arr
   if (process.platform !== 'win32') throw new Error('Shared desktop host currently requires Windows');
   const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', discovery], {
     windowsHide: true, timeout: 20_000, encoding: 'utf8',
-    env: { ...cleanDesktopEnvironment(process.env), BRIDGE_DESKTOP_PID: String(pid), BRIDGE_DESKTOP_EXE: desktopExe },
+    env: { ...windowsPowerShellEnvironment(process.env), BRIDGE_DESKTOP_PID: String(pid), BRIDGE_DESKTOP_EXE: desktopExe },
   });
   return JSON.parse(stdout.trim());
 }

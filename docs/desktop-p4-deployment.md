@@ -168,6 +168,10 @@ node bin/lark-chatgpt-supervisor.mjs --status D:\bridge-local\standalone-001\pla
 
 本轮独立预检新增14项专项。首次全仓回归在既有UI测试出现 `fetch: bad port`，原日志已归档；本机动态端口范围覆盖浏览器禁用端口，具体失败端口未记录。按[Fetch标准](https://fetch.spec.whatwg.org/#port-blocking)加入软件端口避让：随机分配命中禁用端口时关闭后重选，显式端口不自动替换，普通绑定错误不重试。4项确定性端口回归及既有UI测试通过，最终全仓125个文件、859项通过，类型、构建及PowerShell语法检查通过。
 
+独立预检首个现场计划 `standalone-a831ee4-20261012` 未确认启动，保留 `uncertain`，没有重试。目录中没有原生创建或worker回执。同环境只读身份检查复现 `Get-FileHash` 不可用；Windows PowerShell子进程继承了父级pwsh模块路径。新增专用子进程环境，让Windows PowerShell建立自己的模块目录，保留Node/桌面的原环境。2项环境回归通过，其中实际核心哈希/CIM命令读取通过。后续使用新候选和新计划复测，旧计划不改写为成功。
+
+环境修复后本机全仓126个文件、861项通过，类型与构建通过。失败分类仅保存固定错误标签、子进程退出码和stderr的SHA，不复制原始错误正文。旧计划、首次UI失败及环境复现证据均留本机忽略目录。
+
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 
 最终编码修复候选 `f8e27e3` 重新完成上述只读检查，并从真实备份文件按字节解析XML成功。最新可用证据为 `.p4-local/supervisor-f8e27e3/verification.json`；旧 `8ccbd7a` 备份存在编码声明问题，作为缺陷原始证据保留，不用作恢复XML文件。全程没有执行旧任务修改、桌面关闭或消费者切换。

@@ -8,7 +8,7 @@ import { verifyDeployment } from './deployment';
 import { WindowsSupervisorControl } from './supervisor-windows';
 import { sameProcess, type ProcessIdentity, type SupervisorInventory } from './supervisor';
 import { writeFileAtomic } from '../platform/atomic-write';
-import { cleanDesktopEnvironment } from './windows-tools';
+import { cleanDesktopEnvironment, windowsPowerShellEnvironment } from './windows-tools';
 import { BrokerOwnerLease } from './broker-lease';
 
 const exec = promisify(execFile);
@@ -70,10 +70,14 @@ export async function launchStandalone(planFile: string, expectedSha: string): P
   const plan = await verifyStandalone(planFile,expectedSha);
   await reserveStandaloneLaunch(plan,expectedSha);
   try {
-    const { stdout } = await exec('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',plan.launcherScript,'-Action','Launch','-PlanFile',planFile,'-PlanSha256',expectedSha],{windowsHide:true,timeout:20_000,encoding:'utf8',env:cleanDesktopEnvironment(process.env)});
+    const { stdout } = await exec('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',plan.launcherScript,'-Action','Launch','-PlanFile',planFile,'-PlanSha256',expectedSha],{windowsHide:true,timeout:20_000,encoding:'utf8',env:windowsPowerShellEnvironment(process.env)});
     return validateStandaloneReceipt(JSON.parse(stdout),plan);
-  } catch {
-    await writeFileAtomic(join(plan.directory,'launch.failure.json'),JSON.stringify({version:1,planId:plan.planId,phase:'uncertain',errorCode:'native_launch_not_confirmed',servicesChanged:false}));
+  } catch (e) {
+    const failure = e as {code?:unknown;stderr?:unknown};
+    const stderr = typeof failure.stderr === 'string' ? failure.stderr : undefined;
+    const missingHashCommand = stderr?.includes('Get-FileHash') && stderr.includes('CommandNotFound');
+    await writeFileAtomic(join(plan.directory,'launch.failure.json'),JSON.stringify({version:1,planId:plan.planId,phase:'uncertain',errorCode:missingHashCommand ? 'windows_powershell_command_unavailable' : 'native_launch_not_confirmed',
+      ...(typeof failure.code === 'number' ? {childExitCode:failure.code} : {}),...(stderr ? {stderrSha256:sha(stderr)} : {}),servicesChanged:false}));
     throw new Error('Standalone launch uncertain; inspect evidence and do not repeat this plan');
   }
 }
@@ -101,7 +105,7 @@ export async function standalonePreflight(planFile: string, expectedSha: string)
   let ownerLease: BrokerOwnerLease | undefined, leaseLost = false;
   try {
     await verifyStandalone(planFile,expectedSha);
-    const receipt = await exec('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',plan.launcherScript,'-Action','InspectIdentity','-ProcessId',String(process.pid),'-PlanFile',planFile,'-PlanSha256',expectedSha],{windowsHide:true,timeout:20_000,encoding:'utf8',env:cleanDesktopEnvironment(process.env)});
+    const receipt = await exec('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',plan.launcherScript,'-Action','InspectIdentity','-ProcessId',String(process.pid),'-PlanFile',planFile,'-PlanSha256',expectedSha],{windowsHide:true,timeout:20_000,encoding:'utf8',env:windowsPowerShellEnvironment(process.env)});
     identity = JSON.parse(receipt.stdout);
     if (!identity || identity.pid !== process.pid || !sameProcess(identity,identity) || identity.executable.toLowerCase() !== plan.nodeExecutable.toLowerCase()) throw new Error('Standalone identity unavailable');
     await writeFile(join(plan.directory,'worker.identity.json'),JSON.stringify({version:1,planId:plan.planId,identity}),{encoding:'utf8',flag:'wx',mode:0o600});
