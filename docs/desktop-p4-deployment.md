@@ -1,6 +1,6 @@
 # P4 部署开发与灰度运行手册
 
-更新：2026-10-11。P3 已在本人确认的范围内关闭；P4 已实现部署基础、监督状态机和 Windows 只读预备入口，尚未切换常驻消费者。
+更新：2026-10-12。P3 已在本人确认的范围内关闭；P4 已实现部署基础、监督状态机、只读预检及持续broker租约协议，尚未切换常驻消费者。
 
 ## 首批实现
 
@@ -49,6 +49,9 @@ node bin/lark-chatgpt-deploy.mjs ordinary-check D:\bridge-local\stage-001 D:\bri
     "D:\\bridge\\dist\\desktop-supervisor-windows.js",
     "D:\\bridge\\dist\\desktop-ordinary-idle.js",
     "D:\\bridge\\dist\\desktop-broker-lease.js",
+    "D:\\bridge\\dist\\desktop-standalone.js",
+    "D:\\bridge\\bin\\lark-chatgpt-supervisor.mjs",
+    "D:\\bridge\\bin\\desktop-supervisor-launch.ps1",
     "D:\\bridge\\bin\\desktop-runtime-control.ps1",
     "D:\\bridge\\bin\\desktop-package-broker.ps1",
     "D:\\bridge\\bin\\desktop-package-broker-task.ps1"
@@ -121,6 +124,22 @@ broker实际核对CIM进程的PID、父PID、创建时间、二进制路径和�
 
 包装进程也核对新鲜的就绪回执、运行编号及完整broker身份，不用PID存在作为恢复证明。生产启动器仍须接入独立监督进程、持续续租、停止与回退，并确保外部启动定义没有限时执行设置。当前没有注册生产启动任务，也没有在真实包内启用持续模式；不能把纯租约/策略测试记为现场常驻或自动回退通过。
 
+### 独立预检进程（2026-10-12）
+
+新增 `standalone-prepare` 和 `lark-chatgpt-supervisor`。目前仅提供独立的只读预检，不提供生产运行模式。
+
+```powershell
+node bin/lark-chatgpt-deploy.mjs standalone-prepare D:\bridge-local\stage-001 D:\bridge-local\standalone-001
+node bin/lark-chatgpt-supervisor.mjs --launch D:\bridge-local\standalone-001\plan.json <planSha256>
+node bin/lark-chatgpt-supervisor.mjs --status D:\bridge-local\standalone-001\plan.json <planSha256>
+```
+
+准备目录必须不存在。计划只保存白名单字段，锁定源候选提交与七项程序SHA，准入有效期10分钟。启动前复核计划和源候选，先保存唯一启动意图，再由Windows WMI原生创建隐藏Node进程；原生脚本另取独占创建声明。已有意图、超时或身份回执不确定均禁止在同一计划上重试。
+
+回执包含实际PID、父PID、创建时间、二进制路径、命令行SHA和计划编号，原生创建返回码另行保存。进程运行 `ordinary-check`，并用实际身份生成、续租及关闭受控的owner租约；临时能力token只在内存中，租约文件仅保存其SHA。保存脱敏结果后退出。不注册计划任务、不激活包内broker、不启停旧Bridge或桌面、不连接飞书业务接口、不发模型输入。必须实测其身份、续租和结果，不能用“进程创建返回成功”代替预检完成。
+
+原生读取被拒绝时结果为 `blocked`、退出码2，`productionReady=false`；预检成功也仍是 `preflight_only`。源文件在启动后变化会保存失败证据，不能以旧快照回写。`--status`读取与原计划SHA绑定的历史结果，不证明当前环境仍满足准入。独立预检进程只是生产启动基础，持续监督、broker续租和正式切换尚未接入。
+
 1. 完整备份旧启动定义、非敏感配置及受保护凭据恢复方式；保留原账本、审批回执和历史失败，不替换为旧快照。
 2. 准备独立生产监督器和包内启动器，脱离当前桌面会话生命周期；登录启动、正常停止和异常回退均保存实际身份、创建时间及工具证明。
 3. 所有相关桌面任务空闲、原生队列空、审批关闭后停止旧消费者；复核旧消费者为零，再启动唯一新消费者。现有应用锁不能代替跨安装目录的实际进程检查。
@@ -144,6 +163,10 @@ broker实际核对CIM进程的PID、父PID、创建时间、二进制路径和�
 上轮最终提交 `075cbe0` 的CI已核实：Windows/Linux通过，macOS独立进程恢复测试失败于文件锁仍被持有。原失败日志留本机。锁库会向上取整初始文件时间，固定等待2.5秒不能保证自然过期；新增 `waitUntilAvailable` 按实际锁状态等待，仍由 `open` 原子获取，绝不删除活锁。修复后的活锁保护与独立进程恢复测试通过，本轮全仓123个文件、840项通过，另补的续租计时器回归通过（broker租约专项共8项）。类型与构建通过。本轮新增普通桌面探测12项、broker租约8项、Windows broker策略2项及活锁观察1项；新提交的三平台CI仍须独立核对。
 
 核心功能提交 `d2d3ce3` 的[CI](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/actions/runs/38117003406)已独立核对Windows、Linux、macOS全部通过，原失败修复已得到三平台验证。后续仅增加失败诊断分类的提交按其真实CI单独记录，不用本次成功覆盖原失败事实。
+
+2026-10-12已独立核对昨日最终 `dcb5f38` 的[三平台CI](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/actions/runs/38117272410)全部通过。当前旧Bridge配置文件SHA与昨日候选不同，变更原因未推断；只将当前SHA纳入新只读候选，未改写原配置或认证值。桌面仍为锁定版本，旧消费者和普通桌面各1，旧任务仍Running，新host/监听/broker均0。旧候选及SHA差异证据保留，不把新候选称为旧快照验证成功。
+
+本轮独立预检新增14项专项。首次全仓回归在既有UI测试出现 `fetch: bad port`，原日志已归档；本机动态端口范围覆盖浏览器禁用端口，具体失败端口未记录。按[Fetch标准](https://fetch.spec.whatwg.org/#port-blocking)加入软件端口避让：随机分配命中禁用端口时关闭后重选，显式端口不自动替换，普通绑定错误不重试。4项确定性端口回归及既有UI测试通过，最终全仓125个文件、859项通过，类型、构建及PowerShell语法检查通过。
 
 修复后的候选 `8ccbd7a` 已在真实 Windows 环境完成 `supervisor-prepare`：旧消费者1、普通桌面1，新host/监听/broker均0；实际计划任务XML和启用状态已备份。前后原进程身份、任务状态、全部原账本、registry及审批journal字节均未变。错误创建时间的身份自检实际被拒绝。证据保存在本机忽略目录 `.p4-local/supervisor-8ccbd7a/verification.json`；首次失败保留于 `.p4-local/supervisor-bab0889/failure.json`，未执行服务变更。
 

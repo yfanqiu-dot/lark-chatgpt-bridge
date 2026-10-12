@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/yfanqiu-dot/lark-chatgpt-bridge#readme",
   "bin": {
+    "lark-chatgpt-supervisor": "./bin/lark-chatgpt-supervisor.mjs",
     "lark-chatgpt-deploy": "./bin/lark-chatgpt-deploy.mjs",
     "lark-chatgpt-host": "./bin/lark-chatgpt-host.mjs",
     "lark-chatgpt-bridge": "./bin/lark-chatgpt-bridge.mjs",

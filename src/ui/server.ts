@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import type { AddressInfo } from 'node:net';
+import { listenBrowserPort } from './ports';
 import { log } from '../core/logger';
 import { readActiveProfile } from '../config/profile-store';
 import type { MutableProfileState } from '../config/config-ops';
@@ -56,10 +56,7 @@ export async function startUiServer(deps: UiServerDeps): Promise<UiServerHandle>
     });
   });
 
-  const port = await new Promise<number>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(deps.port ?? 0, host, () => resolve((server.address() as AddressInfo).port));
-  });
+  const port = await listenBrowserPort(server,host,deps.port ?? 0);
 
   const url = `http://${host}:${port}/?token=${token}`;
   log.info('ui', 'listening', { url: `http://${host}:${port}` });

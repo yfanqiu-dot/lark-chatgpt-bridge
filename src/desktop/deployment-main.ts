@@ -6,14 +6,18 @@ import { fileURLToPath } from 'node:url';
 import { writeFile } from 'node:fs/promises';
 import { desktopPipes } from './windows-tools';
 import { OrdinaryPipeRpc, inspectOrdinaryIdle } from './ordinary-idle';
+import { prepareStandalone } from './standalone';
 
 async function main(): Promise<void> {
   const [mode, path, directory, ...extra] = process.argv.slice(2);
-  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check <stage> <new-evidence-directory>');
+  if (!path || extra.length || !['prepare', 'verify', 'diagnose', 'rollback-check','supervisor-prepare','ordinary-check','standalone-prepare'].includes(mode ?? '')) throw new Error('Usage: lark-chatgpt-deploy prepare <spec.json> <new-directory> | verify <directory> | diagnose <directory> [--native] | rollback-check <directory> | supervisor-prepare <stage> <new-evidence-directory> | ordinary-check <stage> <new-evidence-directory> | standalone-prepare <stage> <new-plan-directory>');
   if (mode === 'prepare') {
     if (!directory) throw new Error('A new staging directory is required');
     const snapshot = await prepareDeployment(JSON.parse(await readFile(path, 'utf8')), directory);
     console.log(JSON.stringify({ staged: true, codeRevision: snapshot.spec.codeRevision, grayChatCount: 1, servicesChanged: false }));
+  } else if (mode === 'standalone-prepare') {
+    if (!directory) throw new Error('A new standalone plan directory is required');
+    console.log(JSON.stringify({ ...await prepareStandalone(path,directory),servicesChanged:false,productionReady:false },null,2));
   } else if (mode === 'supervisor-prepare' || mode === 'ordinary-check') {
     if (!directory) throw new Error('A new evidence directory is required');
     const script = resolve(dirname(fileURLToPath(import.meta.url)), '../bin/desktop-runtime-control.ps1');
