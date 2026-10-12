@@ -10,6 +10,13 @@ function Get-LaunchSha($text){
   $hash=[Security.Cryptography.SHA256]::Create()
   try{return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
 }
+function New-StandaloneStartup {
+  $names=@('Path','SystemRoot','ComSpec','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','ProgramFiles','ProgramData','CODEX_HOME','LANG')
+  $variables=@(Get-ChildItem Env: | Where-Object {$_.Name -in $names} | ForEach-Object {$_.Name+'='+$_.Value})
+  # Win32_ProcessStartup's documented Detached_Process + Unicode environment.
+  # https://learn.microsoft.com/windows/win32/cimwin32prov/win32-processstartup
+  return New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0;CreateFlags=[uint32]1032;EnvironmentVariables=[string[]]$variables}
+}
 if(![IO.Path]::IsPathRooted($PlanFile) -or (Get-FileHash -LiteralPath $PlanFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $PlanSha256){throw 'Standalone plan changed'}
 $taskPlan=Get-Content -LiteralPath $PlanFile -Encoding UTF8 | ConvertFrom-Json
 if($taskPlan.version -ne 1 -or $taskPlan.mode -ne 'preflight' -or $taskPlan.planId -notmatch '^[a-f0-9-]{36}$' -or $taskPlan.expiresAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()){throw 'Invalid or expired preflight plan'}
@@ -38,7 +45,7 @@ if($taskIntent.planId -cne $taskPlan.planId -or $taskIntent.planSha256 -cne $Pla
 $taskStarted=[DateTime]::UtcNow
 $taskClaim=[IO.File]::Open((Join-Path $taskPlan.directory 'launch.claim.json'),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
 try{$bytes=[Text.Encoding]::UTF8.GetBytes((@{planId=$taskPlan.planId;planSha256=$PlanSha256;claimedAt=$taskStarted.ToString('o')}|ConvertTo-Json -Compress));$taskClaim.Write($bytes,0,$bytes.Length)}finally{$taskClaim.Dispose()}
-$taskStartup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0;CreateFlags=[uint32]0x08000000}
+$taskStartup=New-StandaloneStartup
 $taskCreated=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$taskCommand;CurrentDirectory=$taskPlan.directory;ProcessStartupInformation=$taskStartup}
 $taskNative=@{version=1;planId=$taskPlan.planId;returnValue=[int]$taskCreated.ReturnValue;processId=[int]$taskCreated.ProcessId;observedAt=[DateTime]::UtcNow.ToString('o')}
 $taskBytes=[Text.Encoding]::UTF8.GetBytes(($taskNative|ConvertTo-Json -Compress))
