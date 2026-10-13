@@ -68,8 +68,10 @@ afterEach(async () => {
   vi.useRealTimers();
   sdkMock.channel = undefined;
   sdkMock.createLarkChannel.mockClear();
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
-});
+  // Disconnect the bridge before flushing/removing its temporary profile;
+  // parallel teardown can remove storage while a run is still draining.
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+}, 30_000);
 
 describe('topic message quote handling', () => {
   it('does not quote the topic root when a user directly mentions the bot inside the topic', async () => {
