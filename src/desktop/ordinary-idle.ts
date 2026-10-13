@@ -62,12 +62,23 @@ export class OrdinaryPipeRpc implements OrdinaryReadRpc {
   private rejectAll(): void { for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Ordinary read disconnected')); } this.pending.clear(); }
 }
 
+/** Local rejection evidence only; never persist task text, queue bodies or raw flags. */
+export interface IdleBlocker {
+  threadId: string;
+  status: 'idle' | 'notLoaded' | 'active';
+  pass: number;
+  observedAt: number;
+  waitingApproval: boolean;
+  activeFlagCount: number;
+  queueCount?: number;
+}
 export interface OrdinaryIdleObservation {
   verified: boolean;
   findings: string[];
   toolCount: number;
   loadedThreadCount?: number;
   proof?: IdleProof;
+  blocker?: IdleBlocker;
   failure?: { method?: string; kind: string; code?: number };
 }
 /** The caller must verify the Windows package/pipe owner and the complete
@@ -110,12 +121,13 @@ export async function inspectOrdinaryIdle(rpc: OrdinaryReadRpc, desktop: Process
       for (const threadId of ids) {
         const { thread } = await read('thread/read', { threadId, includeTurns: false });
         if (thread?.id !== threadId || !['idle','notLoaded','active'].includes(thread.status?.type) || (thread.status.activeFlags !== undefined && !Array.isArray(thread.status.activeFlags))) return failure('ordinary_native_state_invalid');
-        if (thread.status.activeFlags?.includes('waitingOnApproval')) return failure('ordinary_waiting_approval');
-        if (!['idle','notLoaded'].includes(thread.status.type) || thread.status.activeFlags?.length) return failure('ordinary_task_active');
+        const blocker: IdleBlocker = {threadId,status:thread.status.type,pass:pass+1,observedAt:now(),waitingApproval:thread.status.activeFlags?.includes('waitingOnApproval')===true,activeFlagCount:thread.status.activeFlags?.length??0};
+        if (blocker.waitingApproval) return {...failure('ordinary_waiting_approval'),blocker};
+        if (!['idle','notLoaded'].includes(thread.status.type) || thread.status.activeFlags?.length) return {...failure('ordinary_task_active'),blocker};
         const binding = bindings.find(b => b.threadId === threadId);
         if (binding && (thread.projectId !== binding.projectId || typeof thread.cwd !== 'string' || resolve(thread.cwd) !== resolve(binding.projectRoot))) return failure('ordinary_binding_mismatch');
         const queue = await pages('thread/queue/list', { threadId });
-        if (queue.length) return failure('ordinary_queue_pending');
+        if (queue.length) return {...failure('ordinary_queue_pending'),blocker:{...blocker,observedAt:now(),queueCount:queue.length}};
         if (binding) tasks.push({ ...binding, status: thread.status.type, queueCount: 0, waitingApproval: false });
       }
       if (JSON.stringify(initial) !== JSON.stringify(await loaded())) return failure('ordinary_loaded_set_changed');

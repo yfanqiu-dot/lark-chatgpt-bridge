@@ -42,6 +42,16 @@ it('fails closed on unsupported native RPC and does not expose raw errors', asyn
   const report = await inspectOrdinaryIdle(h.rpc, desktop, bindings, tools, async () => desktop);
   expect(report).toMatchObject({ verified: false, findings: ['ordinary_native_rpc_unsupported'] }); expect(JSON.stringify(report)).not.toContain('SECRET'); expect(h.closed).toBe(1);
 });
+it('records the exact second-pass blocker without reading its queue or exposing task content', async () => {
+  let readsOfOther=0;
+  const h=reads((m,p)=>{
+    if(m==='thread/read'&&p.threadId==='other-project'&&++readsOfOther===2)return {thread:{id:p.threadId,preview:'SECRET',status:{type:'active',activeFlags:['PRIVATE_FLAG']}}};
+  });
+  const result=await inspectOrdinaryIdle(h.rpc,desktop,bindings,tools,async()=>desktop);
+  expect(result).toMatchObject({verified:false,findings:['ordinary_task_active'],blocker:{threadId:'other-project',status:'active',pass:2,waitingApproval:false,activeFlagCount:1}});
+  expect(result.blocker?.queueCount).toBeUndefined();expect(result.proof).toBeUndefined();expect(JSON.stringify(result)).not.toMatch(/SECRET|PRIVATE_FLAG/);
+  expect(h.calls.filter(m=>m==='thread/queue/list')).toHaveLength(3);expect(h.closed).toBe(1);
+});
 it('rejects repeated queue cursors and changed loaded sets', async () => {
   const h = reads(m => m === 'thread/queue/list' ? { data: [], nextCursor: 'same' } : undefined);
   expect((await inspectOrdinaryIdle(h.rpc, desktop, bindings, tools, async () => desktop)).verified).toBe(false);

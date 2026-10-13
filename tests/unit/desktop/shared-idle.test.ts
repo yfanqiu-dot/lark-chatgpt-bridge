@@ -26,9 +26,13 @@ it('uses only native reads, checks original project/history and every loaded tas
 it.each(['waitingOnApproval','queue','active'])('blocks %s on an unrelated loaded task',async condition=>{
   const h=harness((m,p)=>{
     if(p.threadId!=='other')return;
-    if(condition==='queue' && m==='thread/queue/list')return {data:[{id:'pending'}]};
-    if(condition!=='queue' && m==='thread/read')return {thread:{id:'other',status:{type:'active',activeFlags:condition==='waitingOnApproval'?[condition]:[]}}};
-  }),c=context();expect((await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>c)).verified).toBe(false);
+    if(condition==='queue' && m==='thread/queue/list')return {data:[{id:'pending',text:'SECRET_QUEUE'}]};
+    if(condition!=='queue' && m==='thread/read')return {thread:{id:'other',preview:'SECRET_BODY',status:{type:'active',activeFlags:condition==='waitingOnApproval'?[condition]:['SECRET_FLAG']}}};
+  }),c=context();const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>c);
+  expect(r).toMatchObject({verified:false,blocker:{threadId:'other',pass:1,status:condition==='queue'?'idle':'active',waitingApproval:condition==='waitingOnApproval',activeFlagCount:condition==='queue'?0:1}});
+  expect(r.blocker?.queueCount).toBe(condition==='queue'?1:undefined);
+  expect(r.blocker?.observedAt).toBeGreaterThan(0);expect(r.proof).toBeUndefined();expect(JSON.stringify(r)).not.toContain('SECRET');
+  expect(h.calls.filter(m=>m==='thread/read')).toHaveLength(2);expect(h.closed).toBe(1);
 });
 it.each(['project','history','cursor'])('rejects %s failures without exposing response bodies',async condition=>{
   const h=harness(m=>condition==='project' && m==='project/list'?{data:[{id:'project',roots:[{path:process.execPath}]}]}:

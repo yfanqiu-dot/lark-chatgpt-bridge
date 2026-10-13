@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { inspectOrdinaryIdle, type OrdinaryReadRpc } from './ordinary-idle';
+import { inspectOrdinaryIdle, type OrdinaryReadRpc, type IdleBlocker } from './ordinary-idle';
 import { sameProcess, type ProcessIdentity, type SupervisorBinding, type IdleProof } from './supervisor';
 import { RpcError, loopbackEndpoint } from './rpc';
 
@@ -23,6 +23,7 @@ export interface SharedIdleObservation {
   source: 'owned_shared_native';
   findings: string[];
   proof?: IdleProof;
+  blocker?: IdleBlocker;
   failure?: { method?: string; kind: string; code?: number };
 }
 const reads = new Set(['project/list','thread/turns/list','thread/loaded/list','thread/read','thread/queue/list']);
@@ -77,7 +78,7 @@ export async function inspectSharedIdle(rpc: OrdinaryReadRpc, expected: SharedCo
       if (!contextValid(await recheckContext())) throw new Error('Shared context changed');
       return expected.desktop;
     },now);
-    if (!observed.verified) return {...failed(observed.findings[0]!.replace(/^ordinary_/,'shared_')),...(observed.failure ? {failure:observed.failure} : {})};
+    if (!observed.verified) return {...failed(observed.findings[0]!.replace(/^ordinary_/,'shared_')),...(observed.failure ? {failure:observed.failure} : {}),...(observed.blocker ? {blocker:observed.blocker} : {})};
     // inspectOrdinaryIdle already rechecked the complete context immediately
     // after its last queue scan. No intervening read/mutation needs a third
     // identical OS query; still use the oldest native-read timestamp.
