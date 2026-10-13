@@ -109,6 +109,29 @@ it('keeps abnormal managed health failure on the proven ordinary restoration pat
   const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
   expect(s).toMatchObject({phase:'restored',errorCode:'runtime_health_failed'});expect(s.desktopQuitVerified).toBeUndefined();expect(h.events).toContain('ordinary');
 });
+it('recognizes the original clean GUI receipt when exit begins between the quit precheck and health read, without restarting or retrying health',async()=>{
+  const h=fixture();h.inventory.desktop=[];let exited=false,healthReads=0,quitReads=0;
+  h.port.desktopQuit=async()=>{quitReads++;return exited?id(5):undefined;};
+  h.port.health=async()=>{healthReads++;h.inventory.desktop=[];h.inventory.host=[];exited=true;return false;};
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s).toMatchObject({phase:'closed',desktopQuitVerified:true});expect(s.errorCode).toBeUndefined();expect(healthReads).toBe(1);expect(quitReads).toBe(2);expect(h.events).not.toContain('ordinary');expect(h.events.filter(e=>e.startsWith('start:'))).toEqual(['start:broker','start:host','start:listener']);
+});
+it.each(['missing-receipt','foreign-desktop','listener-lost','broker-lost','retirement-changed','stop-requested'])('does not mask %s behind a concurrent managed GUI exit',async condition=>{
+  const h=fixture();h.inventory.desktop=[];let exited=false,stop=false;
+  h.port.desktopQuit=async()=>exited&&condition!=='missing-receipt'?id(5):undefined;
+  h.port.health=async()=>{exited=true;h.inventory.desktop=condition==='foreign-desktop'?[id(80)]:[];
+    if(condition==='listener-lost')h.inventory.listener=[];if(condition==='broker-lost')h.inventory.broker=[];
+    if(condition==='retirement-changed')h.setRetired(false);if(condition==='stop-requested')stop=true;return false;};
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>stop,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s.phase).not.toBe('closed');expect(s.desktopQuitVerified).toBeUndefined();expect(s.errorCode).toBeDefined();expect(h.events).toContain('ordinary');expect(h.events.filter(e=>e==='start:listener')).toHaveLength(1);
+});
+it('keeps an explicit stop received during the bounded quit observation on the ordinary recovery path',async()=>{
+  const h=fixture();h.inventory.desktop=[];let exited=false,stop=false;
+  h.port.desktopQuit=async()=>{if(!exited)return;stop=true;return id(5);};
+  h.port.health=async()=>{exited=true;h.inventory.desktop=[];return false;};
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>stop,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s).toMatchObject({phase:'restored',errorCode:'runtime_health_failed'});expect(s.desktopQuitVerified).toBeUndefined();expect(h.events).toContain('ordinary');
+});
 it.each(['wrong-desktop','foreign-desktop','appserver-remains'])('refuses managed closed proof for %s',async condition=>{
   const h=fixture();h.inventory.desktop=[];
   h.port.desktopQuit=async()=>{h.inventory.desktop=condition==='foreign-desktop'?[id(80)]:[];return id(condition==='wrong-desktop'?80:5);};

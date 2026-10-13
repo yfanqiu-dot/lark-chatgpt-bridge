@@ -246,6 +246,19 @@ export class DesktopSupervisor {
     if ((await this.inventory())[role].length) fail('owned_process_still_running');
     // Keep the last identity receipt for postmortem/repeated rollback checks.
   }
+  private async managedDesktopQuit(s:SupervisorState,stopRequested:()=>Promise<boolean>):Promise<boolean>{
+    if(!s.serviceMode)return false;
+    const quit=await this.port.desktopQuit!();if(!quit)return false;
+    const q=await this.inventory();
+    if(!s.lastIdleProof || !sameProcess(quit,s.lastIdleProof.desktop) || q.desktop.length || q.legacy.length
+      || q.host.length>1 || q.host.length && !sameProcess(q.host[0]!,s.owned.host!)
+      || q.broker.length!==1 || !sameProcess(q.broker[0]!,s.owned.broker!) || q.listener.length!==1 || !sameProcess(q.listener[0]!,s.owned.listener!))fail('desktop_quit_inventory_changed');
+    // A failed retirement health check cannot become a clean exit merely
+    // because the GUI also exited. Retain the original retirement policy.
+    await this.retired(s);
+    if(await stopRequested())return false;
+    s.desktopQuitVerified=true;await this.journal.save(s);return true;
+  }
   private async rollback(s: SupervisorState): Promise<void> {
     try {
       const initial = await this.inventory();
@@ -369,18 +382,18 @@ export class DesktopSupervisor {
         await this.launch(s, 'listener'); await this.port.ready();
         await this.phase(s, 'running');
         while (!await stopRequested()) {
-          if(s.serviceMode){
-            const quit=await this.port.desktopQuit!();
-            if(quit){
-              const q=await this.inventory();
-              if(!s.lastIdleProof || !sameProcess(quit,s.lastIdleProof.desktop) || q.desktop.length || q.legacy.length
-                || q.host.length>1 || q.host.length && !sameProcess(q.host[0]!,s.owned.host!)
-                || q.broker.length!==1 || !sameProcess(q.broker[0]!,s.owned.broker!) || q.listener.length!==1 || !sameProcess(q.listener[0]!,s.owned.listener!))fail('desktop_quit_inventory_changed');
-              s.desktopQuitVerified=true;await this.journal.save(s);break;
-            }
-          }
+          if(await this.managedDesktopQuit(s,stopRequested))break;
           const i = await this.inventory();
-          if (i.legacy.length || ['broker','host','listener'].some(role => i[role as 'broker'|'host'|'listener'].length !== 1 || !sameProcess(i[role as 'broker'|'host'|'listener'][0]!, s!.owned[role as 'broker'|'host'|'listener']!)) || !await this.port.health()) fail('runtime_health_failed');
+          if (i.legacy.length || ['broker','host','listener'].some(role => i[role as 'broker'|'host'|'listener'].length !== 1 || !sameProcess(i[role as 'broker'|'host'|'listener'][0]!, s!.owned[role as 'broker'|'host'|'listener']!)) || !await this.port.health()) {
+            // GUI exit can begin after the preceding quit check and during
+            // inventory/health reads. Before restoration, observe the same
+            // original clean-exit receipt once more (adapter bound: 20s).
+            // Missing/abnormal receipts still fail; no health retry, stale
+            // readiness allowance, service restart or input replay occurs.
+            if(await stopRequested())fail('runtime_health_failed');
+            if(await this.managedDesktopQuit(s,stopRequested))break;
+            fail('runtime_health_failed');
+          }
           await pause();
         }
       } catch (e) { s.errorCode = codeOf(e, 'supervisor_operation_failed'); await this.journal.save(s); }
