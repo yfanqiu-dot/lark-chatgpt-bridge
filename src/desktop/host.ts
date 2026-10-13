@@ -11,8 +11,12 @@ import { desktopToolOverrides, prepareResumeTools } from './resume-tools';
 import { cleanDesktopEnvironment, desktopPipes, desktopToolCatalog } from './windows-tools';
 import { DesktopReadiness } from './readiness';
 import { launchPackagedDesktop, type PackagedDesktop } from './packaged-desktop';
+import {ListenerOwnerLease} from './listener-owner';
 
-export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; toolBindings?: Array<{threadId: string; projectId: string | null}>; topicRegistryFile?: string; topicProjects?: Array<{projectId: string; projectRoot: string}> }
+export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; desktopQuitPolicy?: 'stop-with-desktop'; toolBindings?: Array<{threadId: string; projectId: string | null}>; topicRegistryFile?: string; topicProjects?: Array<{projectId: string; projectRoot: string}> }
+export function isCleanManagedDesktopExit(policy:HostConfig['desktopQuitPolicy'],verified:boolean,stopping:boolean,desktop:{exitCode:number|null;signalCode:NodeJS.Signals|null},server:{exitCode:number|null;signalCode:NodeJS.Signals|null},serverError?:Error):boolean{
+  return policy==='stop-with-desktop' && verified && !stopping && desktop.exitCode===0 && desktop.signalCode===null && server.exitCode===null && server.signalCode===null && !serverError;
+}
 const exec = promisify(execFile);
 const sleep = (ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
 // The CLI accepts a socket address, while WebSocket clients accept a URL ending in '/'.
@@ -86,6 +90,7 @@ async function stopOwnedChild(child?: ReturnType<typeof spawn>): Promise<boolean
   });
 }
 export async function validateHostConfig(raw: HostConfig): Promise<HostConfig> {
+  if(raw.desktopQuitPolicy!==undefined && raw.desktopQuitPolicy!=='stop-with-desktop')throw new Error('Invalid desktop quit policy');
   for(const key of ['codexBinary','desktopExe','projectRoot','connectionFile'] as const) if(typeof raw[key] !== 'string' || !isAbsolute(raw[key])) throw new Error(`${key} must be an absolute path`);
   const cfg = {...raw, endpoint:loopbackEndpoint(raw.endpoint),backendEndpoint:loopbackEndpoint(raw.backendEndpoint)};
   if(cfg.endpoint===cfg.backendEndpoint)throw new Error('Proxy and backend addresses must differ');
@@ -123,10 +128,14 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   const running=await exec('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" | Where-Object { $_.ExecutablePath -like '*OpenAI.Codex_*' -and $_.CommandLine -notmatch '--type=' }).Count"],{windowsHide:true,env,timeout:20_000});
   if(Number(running.stdout.trim())!==0)throw new Error('Close the ordinary Codex desktop before starting the shared host. No existing process was stopped.');
   await mkdir(dirname(cfg.connectionFile),{recursive:true});
+  if(cfg.desktopQuitPolicy && (!/^[a-f0-9-]{36}$/.test(process.env.BRIDGE_SUPERVISOR_RUN_ID??'') || process.env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE!==join(dirname(cfg.connectionFile),'broker-owner.json')))throw new Error('Managed host requires its supervisor owner lease');
+  const managedOwner=cfg.desktopQuitPolicy?new ListenerOwnerLease(process.env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE!,process.env.BRIDGE_SUPERVISOR_RUN_ID!):undefined;
+  await managedOwner?.assert();
   const release=await lockfile.lock(cfg.connectionFile,{realpath:false,retries:0});
   const backendUrl=new URL(cfg.backendEndpoint),proxyUrl=new URL(cfg.endpoint);
   const children = new Set<WebSocket>();
   let stopping=false;
+  let cleanDesktopQuit=false;
   let leaseWrites: Promise<void> = Promise.resolve();
   const invalidate = () => { leaseWrites = leaseWrites.then(() => rm(cfg.connectionFile,{force:true})); void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; }); };
   const readiness=new DesktopReadiness(invalidate);
@@ -249,7 +258,14 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
       }
       await sleep(10_000);
     }
-    if(!stopping){
+    if(isCleanManagedDesktopExit(cfg.desktopQuitPolicy,verifiedOnce,stopping,desktop,server,appServer.error())){
+      await managedOwner!.assert();
+      // A clean GUI exit is distinct from SIGTERM, a stop request, a failed
+      // initialization, and an App Server fault. Never restore on this path.
+      await writeFileAtomic(`${cfg.connectionFile}.desktop-exit.json`,JSON.stringify({version:1,runId:process.env.BRIDGE_SUPERVISOR_RUN_ID,
+        hostPid:process.pid,desktopPid:desktop.pid,backendPid:server.pid,observedAt:Date.now(),exitCode:0,verifiedOnce:true,backendWasRunning:true}));
+      cleanDesktopQuit=true;
+    }else if(!stopping){
       const reason=server.exitCode!==null || server.signalCode!==null
         ? unexpectedChildExit('Owned App Server',server,appServer.error())
         : unexpectedChildExit('Owned desktop',desktop);
@@ -267,7 +283,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     const serverStopped=await stopOwnedChild(server);
     await rm(`${cfg.connectionFile}.stop`,{force:true});
     try{
-      if(desktop?.pid && desktopStopped && serverStopped)await restoreOrdinaryDesktop(cfg);
+      if(!cleanDesktopQuit && desktop?.pid && desktopStopped && serverStopped)await restoreOrdinaryDesktop(cfg);
       else console.log('Shared host stopped. Check remaining owned processes before opening Codex normally.');
     }finally{await release();}
   }

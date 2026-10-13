@@ -55,6 +55,30 @@ it('runs the concrete new-only port without old task permissions, backup, pause 
 it('rejects explicit legacy mutations through a new-only port',async()=>{
   const h=harness(false,'new-only');await expect(h.port.backup()).rejects.toThrow('does not back up');await expect(h.port.pauseLegacy(h.ids.legacy)).rejects.toThrow('never pauses');await expect(h.port.restoreLegacy(h.saved.baseline!)).rejects.toThrow('never reactivates');expect(h.events).toEqual([]);
 });
+it.each(['run','host','desktop','old','future','abnormal','unready','backend'])('rejects a %s managed quit receipt without granting permission to suppress restoration',async condition=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.sharedIdle();
+  const p:any={version:1,runId,hostPid:4,desktopPid:5,backendPid:88,observedAt:h.clock(),exitCode:0,verifiedOnce:true,backendWasRunning:true};
+  if(condition==='run')p.runId='foreign';if(condition==='host')p.hostPid=99;if(condition==='desktop')p.desktopPid=99;if(condition==='old')p.observedAt-=31000;if(condition==='future')p.observedAt+=2000;if(condition==='abnormal')p.exitCode=1;if(condition==='unready')p.verifiedOnce=false;if(condition==='backend')p.backendWasRunning=false;
+  await writeFile(`${h.input.host.connectionFile}.desktop-exit.json`,JSON.stringify(p),'utf8');await expect(h.port.desktopQuit()).rejects.toThrow('receipt invalid');
+});
+it('retains uncertain results on clean close, while refusing to use them for the next forward startup',async()=>{
+  const h=harness(false,'new-only');h.input.ledgers[0].counts.uncertain=1;await h.port.verifyClosedBindings();await expect(h.port.verifyBindings()).rejects.toThrow('reconciliation');expect(h.input.ledgers[0].counts.uncertain).toBe(1);
+});
+it('waits for the original host refresh after the GUI disappears instead of classifying PID absence as a fault or clean exit',async()=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.sharedIdle();await h.port.startListener(runId);h.inventory.desktop=[];
+  const original=h.effects.pause;let waits=0;h.effects.pause=async()=>{await original();if(++waits===10)await writeFile(`${h.input.host.connectionFile}.desktop-exit.json`,JSON.stringify({version:1,runId,hostPid:4,desktopPid:5,backendPid:88,observedAt:h.clock(),exitCode:0,verifiedOnce:true,backendWasRunning:true}),'utf8');};
+  expect(await h.port.desktopQuit()).toEqual(h.ids.shared);expect(waits).toBe(10);expect(h.events.filter(e=>e==='launch:listener')).toHaveLength(1);
+});
+it('bounds missing clean-exit evidence and grants no permission to skip ordinary restoration',async()=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.sharedIdle();await h.port.startListener(runId);h.inventory.desktop=[];
+  const started=h.clock();expect(await h.port.desktopQuit()).toBeUndefined();expect(h.clock()-started).toBe(20_000);
+});
 it('runs the concrete cold lifecycle with fresh lease, memory-only auth, handshake and ordered restoration',async()=>{
   const h=harness();let stop=false;
   const state=await new DesktopSupervisor(new SupervisorJournal(join(dir,'journal.json')),h.port,h.bindings,h.clock).run(async()=>stop,async()=>{if(h.inventory.desktop[0]?.pid===2&&!h.inventory.host.length)h.inventory.desktop=[];else stop=true;},{startMode:'cold'});

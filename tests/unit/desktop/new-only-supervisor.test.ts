@@ -3,6 +3,7 @@ import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DesktopSupervisor,SupervisorJournal,ColdExitObservationUnavailable,type SupervisorPort,type SupervisorInventory,type LegacyRetirementProof,type SupervisorState} from '../../../src/desktop/supervisor';
+import {isCleanManagedDesktopExit} from '../../../src/desktop/host';
 let dir:string;
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'new-only-'));});
 afterEach(async()=>{await rm(dir,{recursive:true,force:true});});
@@ -90,4 +91,38 @@ it('refuses interpreting a historical legacy journal as a new-only recovery',asy
 });
 it('rejects a tampered new-only journal containing legacy pause intent',async()=>{
   const h=fixture();await writeFile(h.path,JSON.stringify({version:1,runId:'12345678-1234-1234-1234-123456789abc',channelMode:'new-only',startMode:'cold',phase:'blocked',revision:0,owned:{},legacyPauseAttempted:true,desktopCloseAttempted:false}),'utf8');await expect(h.run()).rejects.toThrow('journal_new_only_invalid');expect(h.forbidden).not.toHaveBeenCalled();
+});
+it.each([0,1])('starts managed service with %s ordinary desktops and preserves all native admission gates',async count=>{
+  const h=fixture();if(!count)h.inventory.desktop=[];h.port.desktopQuit=async()=>undefined;
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>!!h.inventory.listener.length,async()=>{h.inventory.desktop=[];},{startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s.phase).toBe('restored');expect(s.lastColdExitProof).toMatchObject({complete:true,desktopRelated:[]});expect(s.lastIdleProof?.allDesktopTasksIdle).toBe(true);expect(h.events.filter(e=>e.startsWith('start:'))).toEqual(['start:broker','start:host','start:listener']);expect(h.forbidden).not.toHaveBeenCalled();
+});
+it('stops all new roles after a verified clean exit without reopening ordinary Codex or restarting on journal resume',async()=>{
+  const h=fixture();h.inventory.desktop=[];
+  h.port.desktopQuit=async()=>{h.inventory.desktop=[];return id(5);};
+  const run=()=>new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  const s=await run();expect(s).toMatchObject({phase:'closed',desktopQuitVerified:true});expect(s.errorCode).toBeUndefined();expect(s.ordinaryProof).toBeUndefined();expect(h.events).not.toContain('ordinary');expect(h.inventory.desktop).toEqual([]);
+  const events=[...h.events];expect((await run()).phase).toBe('closed');expect(h.events).toEqual(events);
+});
+it('keeps abnormal managed health failure on the proven ordinary restoration path',async()=>{
+  const h=fixture();h.inventory.desktop=[];h.badHealth();h.port.desktopQuit=async()=>undefined;
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s).toMatchObject({phase:'restored',errorCode:'runtime_health_failed'});expect(s.desktopQuitVerified).toBeUndefined();expect(h.events).toContain('ordinary');
+});
+it.each(['wrong-desktop','foreign-desktop','appserver-remains'])('refuses managed closed proof for %s',async condition=>{
+  const h=fixture();h.inventory.desktop=[];
+  h.port.desktopQuit=async()=>{h.inventory.desktop=condition==='foreign-desktop'?[id(80)]:[];return id(condition==='wrong-desktop'?80:5);};
+  if(condition==='appserver-remains'){const cold=h.port.coldExit!;h.port.coldExit=async()=>({...await cold(),desktopRelated:h.events.includes('stop:broker')?[id(88)]:[]});}
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s.phase).not.toBe('closed');if(condition==='appserver-remains')expect(s.rollbackErrorCode).toBe('closed_desktop_unverified');else expect(s.errorCode).toBe('desktop_quit_inventory_changed');
+});
+it('does not allow a zero-desktop baseline in historical finite acceptance mode',async()=>{
+  const h=fixture();h.inventory.desktop=[];expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'baseline_not_unique'});expect(h.events).toEqual([]);
+});
+it.each(['not-ready','signal-stop','desktop-crash','backend-crash','backend-error','no-policy'])('does not classify %s as a clean managed GUI exit',condition=>{
+  expect(isCleanManagedDesktopExit(condition==='no-policy'?undefined:'stop-with-desktop',condition!=='not-ready',condition==='signal-stop',
+    {exitCode:condition==='desktop-crash'?1:0,signalCode:null},{exitCode:condition==='backend-crash'?1:null,signalCode:null},condition==='backend-error'?Error('fault'):undefined)).toBe(false);
+});
+it('distinguishes a ready clean GUI exit from faults and supervisor stop requests',()=>{
+  expect(isCleanManagedDesktopExit('stop-with-desktop',true,false,{exitCode:0,signalCode:null},{exitCode:null,signalCode:null})).toBe(true);
 });

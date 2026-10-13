@@ -17,22 +17,24 @@ const sha=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex');
 const json=async(p:string)=>JSON.parse(await readFile(p,'utf8'));
 const programs=['bin/lark-chatgpt-runtime-supervisor.mjs','bin/desktop-cold-launch.ps1','dist/desktop-runtime-supervisor.js',
   'bin/desktop-runtime-control.ps1','bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker.ps1','bin/desktop-package-broker-task.ps1'];
-export interface ColdRuntimePlan {version:1;mode:'cold';taskControl?:'uac';channelMode?:'new-only';planId:string;codeRevision:string;createdAt:string;expiresAt:number;stage:string;directory:string;root:string;nodeExecutable:string;files:Array<{path:string;sha256:string}>;exitTimeoutMs:number;windowMs:number}
-export async function prepareColdRuntime(sourceStage:string,directory:string,packageRoot=root,taskControl?:'uac',channelMode?:'new-only'){
+export interface ColdRuntimePlan {version:1;mode:'cold';taskControl?:'uac';channelMode?:'new-only';serviceMode?:'stop-with-desktop';serviceAcceptanceWindow?:true;planId:string;codeRevision:string;createdAt:string;expiresAt:number;stage:string;directory:string;root:string;nodeExecutable:string;files:Array<{path:string;sha256:string}>;exitTimeoutMs:number;windowMs:number}
+export async function prepareColdRuntime(sourceStage:string,directory:string,packageRoot=root,taskControl?:'uac',channelMode?:'new-only',service?:{mode:'stop-with-desktop';acceptanceWindow?:true}){
   if(![sourceStage,directory,packageRoot].every(isAbsolute) || /["\r\n]/.test(directory+packageRoot))throw new Error('Invalid cold runtime paths');
   const source=await verifyDeployment(sourceStage);
   if((taskControl==='uac'||channelMode==='new-only')&&source.snapshot.spec.legacy.scheduledTaskName!==`LarkChannelBridge.Bot.${source.snapshot.spec.legacy.profile}`)throw new Error('Task control requires the original profile startup task');
   if(taskControl!==undefined && taskControl!=='uac')throw new Error('Unsupported task control mode');
   if(channelMode!==undefined && channelMode!=='new-only' || channelMode && taskControl)throw new Error('New-only plans forbid legacy UAC control');
+  if(service && (service.mode!=='stop-with-desktop' || service.acceptanceWindow!==undefined && service.acceptanceWindow!==true || channelMode!=='new-only' || taskControl))throw new Error('Managed service requires explicit new-only admission');
   const required=[source.snapshot.spec.legacy.executable,...[...programs,...(taskControl?['bin/desktop-task-uac.ps1']:[])].map(p=>resolve(packageRoot,p))];
   const files=required.map(path=>{const f=source.snapshot.files.find(f=>f.path===path);if(!f)throw new Error('Cold runtime program missing from source proofs');return f;});
   await mkdir(directory,{recursive:false,mode:0o700});
   const hostFile=join(directory,'host.json'),topicFile=join(directory,'topics.json'),stage=join(directory,'stage');
-  const host={...source.host,connectionFile:join(directory,'connection.json')},topics={...source.topics,connectionFile:host.connectionFile};
+  if(!service && source.host.desktopQuitPolicy)throw new Error('Finite acceptance host cannot silently inherit a managed quit policy');
+  const host={...source.host,connectionFile:join(directory,'connection.json'),...(service?{desktopQuitPolicy:service.mode}:{})},topics={...source.topics,connectionFile:host.connectionFile};
   for(const [path,value] of [[hostFile,host],[topicFile,topics]] as const)await writeFile(path,JSON.stringify(value,null,2),{encoding:'utf8',flag:'wx',mode:0o600});
   await prepareDeployment({...source.snapshot.spec,hostConfigFile:hostFile,topicConfigFile:topicFile},stage);
   const createdAt=new Date().toISOString();
-  const plan:ColdRuntimePlan={version:1,mode:'cold',...(taskControl?{taskControl}:{}),...(channelMode?{channelMode}:{}),planId:randomUUID(),codeRevision:source.snapshot.spec.codeRevision,createdAt,expiresAt:Date.parse(createdAt)+600_000,
+  const plan:ColdRuntimePlan={version:1,mode:'cold',...(taskControl?{taskControl}:{}),...(channelMode?{channelMode}:{}),...(service?{serviceMode:service.mode,...(service.acceptanceWindow?{serviceAcceptanceWindow:true as const}:{})}:{}),planId:randomUUID(),codeRevision:source.snapshot.spec.codeRevision,createdAt,expiresAt:Date.parse(createdAt)+600_000,
     stage:resolve(stage),directory:resolve(directory),root:resolve(packageRoot),nodeExecutable:source.snapshot.spec.legacy.executable,files,exitTimeoutMs:600_000,windowMs:2_700_000};
   const data=JSON.stringify(plan,null,2)+'\n',path=join(directory,'plan.json');await writeFile(path,data,{encoding:'utf8',flag:'wx',mode:0o600});
   return {planFile:path,planSha256:sha(data),planId:plan.planId,servicesChanged:false,productionReady:false};
@@ -46,15 +48,17 @@ export async function readColdRuntimePlan(path:string,proof:string,fresh=true):P
     || resolve(p.directory)!==dirname(resolve(path)) || resolve(p.stage)!==join(resolve(p.directory),'stage')
     || p.taskControl!==undefined&&p.taskControl!=='uac'
     || p.channelMode!==undefined&&p.channelMode!=='new-only' || p.channelMode!==undefined&&p.taskControl!==undefined
+    || p.serviceMode!==undefined&&(p.serviceMode!=='stop-with-desktop'||p.channelMode!=='new-only') || p.serviceAcceptanceWindow!==undefined&&(p.serviceAcceptanceWindow!==true||!p.serviceMode)
     || !Array.isArray(p.files) || p.files.length!==programs.length+1+(p.taskControl?1:0) || new Set(p.files.map(f=>f.path)).size!==p.files.length)throw new Error('Invalid cold runtime plan');
   const required=[p.nodeExecutable,...[...programs,...(p.taskControl?['bin/desktop-task-uac.ps1']:[])].map(f=>resolve(p.root,f))];
   if(required.some(path=>!p.files.some(f=>f.path===path&&/^[a-f0-9]{64}$/.test(f.sha256))))throw new Error('Cold runtime proof incomplete');
   if(fresh && (p.expiresAt<=Date.now() || Date.parse(p.createdAt)>Date.now()+1000))throw new Error('Cold runtime plan expired');
-  return {version:1,mode:'cold',...(p.taskControl?{taskControl:p.taskControl}:{}),...(p.channelMode?{channelMode:p.channelMode}:{}),planId:p.planId,codeRevision:p.codeRevision,createdAt:p.createdAt,expiresAt:p.expiresAt,stage:resolve(p.stage),directory:resolve(p.directory),root:resolve(p.root),nodeExecutable:resolve(p.nodeExecutable),files:p.files.map(f=>({path:f.path,sha256:f.sha256})),exitTimeoutMs:p.exitTimeoutMs,windowMs:p.windowMs};
+  return {version:1,mode:'cold',...(p.taskControl?{taskControl:p.taskControl}:{}),...(p.channelMode?{channelMode:p.channelMode}:{}),...(p.serviceMode?{serviceMode:p.serviceMode}:{}),...(p.serviceAcceptanceWindow?{serviceAcceptanceWindow:true}:{}),planId:p.planId,codeRevision:p.codeRevision,createdAt:p.createdAt,expiresAt:p.expiresAt,stage:resolve(p.stage),directory:resolve(p.directory),root:resolve(p.root),nodeExecutable:resolve(p.nodeExecutable),files:p.files.map(f=>({path:f.path,sha256:f.sha256})),exitTimeoutMs:p.exitTimeoutMs,windowMs:p.windowMs};
 }
 export async function verifyColdRuntimePlan(path:string,proof:string,fresh=true){
   const p=await readColdRuntimePlan(path,proof,fresh),d=await verifyDeployment(p.stage);
   if(d.snapshot.spec.codeRevision!==p.codeRevision || d.host.connectionFile!==join(p.directory,'connection.json') || d.topics.connectionFile!==d.host.connectionFile)throw new Error('Cold runtime source changed');
+  if(d.host.desktopQuitPolicy!==p.serviceMode)throw new Error('Runtime desktop quit policy changed');
   for(const f of p.files)if(!d.snapshot.files.some(v=>v.path===f.path&&v.sha256===f.sha256) || sha(await readFile(f.path))!==f.sha256)throw new Error('Cold runtime program changed');
   return p;
 }
@@ -67,7 +71,7 @@ export async function launchColdRuntime(path:string,proof:string,recover=false){
     const control=await WindowsSupervisorControl.prepare(p.stage,join(p.root,'bin/desktop-runtime-control.ps1'),join(p.directory,'launch-permission-check'));
     if(p.channelMode==='new-only'){
       const inventory=await control.inventory(),retirement=await control.legacyRetirement();
-      const allowed=inventory.legacy.length===0 && inventory.desktop.length===1 && !inventory.host.length && !inventory.listener.length && !inventory.broker.length
+      const allowed=inventory.legacy.length===0 && (p.serviceMode?inventory.desktop.length<=1:inventory.desktop.length===1) && !inventory.host.length && !inventory.listener.length && !inventory.broker.length
         && validRetirementProof(retirement) && retirement.observedAt<=Date.now()+1000 && Date.now()-retirement.observedAt<=60_000;
       await writeFile(join(p.directory,'launch.admission.json'),JSON.stringify({version:1,planId:p.planId,channelMode:'new-only',retirement,allowed,requiresAdministratorConsent:false}),{encoding:'utf8',flag:'wx'});
       if(!allowed)throw new Error('Legacy retirement unavailable; desktop must remain open');
@@ -78,7 +82,7 @@ export async function launchColdRuntime(path:string,proof:string,recover=false){
     if(p.taskControl!=='uac'&&(!permissions.writeAllowed || !permissions.executeAllowed))throw new Error('Legacy task permissions unavailable; desktop must remain open');
     }
   }
-  if(recover){const s=await json(join(p.directory,'supervisor.json'));if(s.channelMode!==p.channelMode)throw new Error('Recovery channel policy changed');if(s.phase==='restored')throw new Error('Completed runtime cannot be recovered');
+  if(recover){const s=await json(join(p.directory,'supervisor.json'));if(s.channelMode!==p.channelMode || s.serviceMode!==p.serviceMode)throw new Error('Recovery channel policy changed');if(['restored','closed'].includes(s.phase))throw new Error('Completed runtime cannot be recovered');
     if(!await new SupervisorJournal(join(p.directory,'supervisor.json')).waitUntilAvailable(0))throw new Error('Runtime supervisor still owns its journal');}
   const name=recover?'recovery':'launch';await writeFile(join(p.directory,`${name}.intent.json`),JSON.stringify({version:1,planId:p.planId,planSha256:proof,workerMode:recover?'Recover':'Run',requestedAt:Date.now()}),{encoding:'utf8',flag:'wx',mode:0o600});
   try{
@@ -94,16 +98,16 @@ export async function runColdRuntime(path:string,proof:string,recover=false){
   await writeFile(join(p.directory,recover?'recovery.worker.intent.json':'worker.intent.json'),JSON.stringify({version:1,planId:p.planId,recover}),{encoding:'utf8',flag:'wx',mode:0o600});
   const saved=recover?await json(join(p.directory,'supervisor.json')) as SupervisorState:undefined;
   if(!recover){try{await readFile(join(p.directory,'supervisor.json'));throw new Error('Existing runtime journal requires recovery');}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}}
-  const startedAt=Date.now(),windowMs=recover?600_000:p.windowMs,deadline=startedAt+windowMs,testingStopsAt=recover?startedAt:p.taskControl||p.channelMode==='new-only'?deadline-600_000:deadline;
+  const startedAt=Date.now(),session=p.serviceMode&&!p.serviceAcceptanceWindow&&!recover,windowMs=session?null:recover?600_000:p.windowMs,deadline=windowMs===null?null:startedAt+windowMs,testingStopsAt=deadline===null?null:recover?startedAt:p.taskControl||p.channelMode==='new-only'?deadline-600_000:deadline;
   await writeFile(join(p.directory,recover?'recovery.window.json':'runtime.window.json'),JSON.stringify({version:1,planId:p.planId,startedAt,leaseExpiresAt:deadline,testingStopsAt,windowMs,recoveryOnly:recover}),{encoding:'utf8',flag:'wx'});
-  const port=await createWindowsRuntimePort(p.stage,p.directory,p.root,saved,p.taskControl?{planId:p.planId,deadline,forwardDeadline:testingStopsAt}:undefined,p.channelMode),deployment=await verifyDeployment(p.stage);
+  const port=await createWindowsRuntimePort(p.stage,p.directory,p.root,saved,p.taskControl?{planId:p.planId,deadline:deadline!,forwardDeadline:testingStopsAt!}:undefined,p.channelMode),deployment=await verifyDeployment(p.stage);
   let stopped=false;const stop=()=>{stopped=true;};process.once('SIGINT',stop);process.once('SIGTERM',stop);
   try{
     const state=await new DesktopSupervisor(new SupervisorJournal(join(p.directory,'supervisor.json')),port,deployment.snapshot.bindings).run(async()=>{
-      if(stopped || Date.now()>=testingStopsAt)return true;try{await readFile(join(p.directory,'stop.request'));return true;}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return false;throw e;}
-    },()=>new Promise<void>(done=>setTimeout(done,500)),{startMode:'cold',exitTimeoutMs:p.exitTimeoutMs,...(p.channelMode?{channelMode:p.channelMode}:{})});
-    await writeFileAtomic(join(p.directory,recover?'recovery.result.json':'runtime.result.json'),JSON.stringify({version:1,planId:p.planId,runId:state.runId,channelMode:p.channelMode??'legacy-rollback',legacyRecoveryAllowed:p.channelMode!=='new-only',messageServicePaused:p.channelMode==='new-only'?(state.phase==='restored'?true:null):undefined,phase:state.phase,errorCode:state.errorCode,rollbackErrorCode:state.rollbackErrorCode,completedAt:new Date().toISOString(),runtimeActivated:!!state.owned.listener,coldExitObserved:!!state.lastColdExitProof,ordinaryRestoreVerified:!!state.ordinaryProof,productionReady:false}));
-    return state.phase==='restored' && !state.rollbackErrorCode && (recover||!state.errorCode) ? 0 : 2;
+      if(stopped || testingStopsAt!==null && Date.now()>=testingStopsAt)return true;try{await readFile(join(p.directory,'stop.request'));return true;}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return false;throw e;}
+    },()=>new Promise<void>(done=>setTimeout(done,500)),{startMode:'cold',exitTimeoutMs:p.exitTimeoutMs,...(p.channelMode?{channelMode:p.channelMode}:{}),...(p.serviceMode?{serviceMode:p.serviceMode}:{})});
+    await writeFileAtomic(join(p.directory,recover?'recovery.result.json':'runtime.result.json'),JSON.stringify({version:1,planId:p.planId,runId:state.runId,channelMode:p.channelMode??'legacy-rollback',serviceMode:p.serviceMode,desktopQuitVerified:state.desktopQuitVerified,legacyRecoveryAllowed:p.channelMode!=='new-only',messageServicePaused:p.channelMode==='new-only'?(['restored','closed'].includes(state.phase)?true:null):undefined,phase:state.phase,errorCode:state.errorCode,rollbackErrorCode:state.rollbackErrorCode,completedAt:new Date().toISOString(),runtimeActivated:!!state.owned.listener,coldExitObserved:!!state.lastColdExitProof,ordinaryRestoreVerified:!!state.ordinaryProof,productionReady:false}));
+    return ['restored','closed'].includes(state.phase) && !state.rollbackErrorCode && (recover||!state.errorCode) ? 0 : 2;
   }finally{process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);await port.close();}
 }
 export async function preflightColdRuntime(path:string,proof:string){
@@ -141,6 +145,18 @@ export async function preflightColdRuntime(path:string,proof:string){
 }
 export async function runtimeSupervisorMain(){
   const [mode,path,proof,...extra]=process.argv.slice(2);
+  if(mode==='--service-shortcuts-check'||mode==='--service-install-startup'){
+    if(!path || !proof || extra.length)throw new Error('Invalid shortcut arguments');
+    console.log(JSON.stringify(await (await import('./managed-service')).managedServiceShortcuts(path,proof,mode==='--service-shortcuts-check')));return;
+  }
+  if(mode==='--service-prepare'){
+    if(!path || !proof || extra.length)throw new Error('Invalid service preparation arguments');
+    console.log(JSON.stringify(await (await import('./managed-service')).prepareManagedService(path,proof,root)));return;
+  }
+  if(mode==='--service-launch'){
+    if(!path || !proof || extra.length)throw new Error('Invalid service arguments');
+    console.log(JSON.stringify(await (await import('./managed-service')).launchManagedService(path,proof)));return;
+  }
   if(!path || !proof || extra.length || !['--launch','--run','--launch-recovery','--recover','--preflight','--task-uac-probe','--status','--stop'].includes(mode??''))throw new Error('Invalid runtime supervisor arguments');
   if(mode==='--launch'||mode==='--launch-recovery')console.log(JSON.stringify(await launchColdRuntime(path,proof,mode==='--launch-recovery')));
   else if(mode==='--run'||mode==='--recover')process.exitCode=await runColdRuntime(path,proof,mode==='--recover');

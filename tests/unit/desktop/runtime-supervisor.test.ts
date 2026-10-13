@@ -16,6 +16,17 @@ it('seals a new-only plan and refuses combination with legacy UAC',async()=>{
   await expect(prepareColdRuntime(join(root,'source-stage'),directory,root,'uac','new-only')).rejects.toThrow('forbid');
   const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,'new-only');expect(await verifyColdRuntimePlan(r.planFile,r.planSha256)).toMatchObject({channelMode:'new-only'});expect(mocked.exec).not.toHaveBeenCalled();
 });
+it('seals an explicit managed policy with optional finite acceptance window and copies only the owned host configuration',async()=>{
+  const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,'new-only',{mode:'stop-with-desktop',acceptanceWindow:true});
+  expect(await verifyColdRuntimePlan(r.planFile,r.planSha256)).toMatchObject({serviceMode:'stop-with-desktop',serviceAcceptanceWindow:true,windowMs:2700000});
+  expect(JSON.parse(await readFile(join(directory,'host.json'),'utf8')).desktopQuitPolicy).toBe('stop-with-desktop');expect(input.host.desktopQuitPolicy).toBeUndefined();expect(mocked.exec).not.toHaveBeenCalled();
+});
+it('refuses managed mode under legacy rollback and mismatched quit policy before launch',async()=>{
+  await expect(prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,undefined,{mode:'stop-with-desktop'})).rejects.toThrow('explicit');
+  const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,'new-only');
+  const host=join(directory,'host.json');await writeFile(host,JSON.stringify({...JSON.parse(await readFile(host,'utf8')),desktopQuitPolicy:'stop-with-desktop'}),'utf8');
+  await expect(verifyColdRuntimePlan(r.planFile,r.planSha256)).rejects.toThrow('quit policy');expect(mocked.exec).not.toHaveBeenCalled();
+});
 it.skipIf(process.platform!=='win32').each([true,false])('admits new-only launch only with retirement=%s and never requests legacy permissions',async retired=>{
   const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,'new-only');
   mocked.control.mockResolvedValue({inventory:async()=>({legacy:[],desktop:[{pid:1}],host:[],listener:[],broker:[]}),legacyRetirement:async()=>({version:1,observedAt:Date.now(),retired,taskPresent:true,taskEnabled:!retired,taskState:retired?'disabled':'other',definitionSha256:'b'.repeat(64)}),taskPermissions:mocked.permissions});

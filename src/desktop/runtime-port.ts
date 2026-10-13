@@ -47,6 +47,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   private lease?:BrokerOwnerLease;
   private lost=false;
   private sharedObservation=0;
+  private sharedDesktop?:ProcessIdentity;
   private retirementDefinition?:{taskPresent:boolean;definitionSha256:string};
   constructor(private readonly input:Deployment,readonly directory:string,private readonly owner:ProcessIdentity,
     private readonly effects:RuntimeEffects, recovery?:SupervisorState,private readonly channelMode?:'new-only'){
@@ -66,11 +67,12 @@ export class DesktopRuntimePort implements SupervisorPort {
   }
   async idle():Promise<never>{throw new Error('Runtime worker only supports cold admission');}
   async closeDesktop():Promise<never>{throw new Error('Cold runtime never closes the ordinary desktop');}
-  async verifyBindings(){
+  async verifyClosedBindings(){return this.verifyBindings(true);}
+  async verifyBindings(closing=false){
     const current=await this.effects.verify();
     if(JSON.stringify(current.snapshot.bindings)!==JSON.stringify(this.input.snapshot.bindings))throw new Error('Runtime original bindings changed');
     const selected=current.ledgers.filter(l=>current.topics.enabledChatIds?.includes(l.binding.chatId));
-    if(selected.some(l=>l.counts.queued || l.counts.running || l.counts.submitting || l.counts.uncertain))throw new Error('Gray ledger requires reconciliation');
+    if(selected.some(l=>l.counts.queued || l.counts.running || l.counts.submitting || !closing && l.counts.uncertain))throw new Error('Gray ledger requires reconciliation');
     // Historical uncertain outside the gray scope is preserved. Any active
     // queue in any original group still forbids pausing the consumer.
     if(current.ledgers.some(l=>l.counts.queued || l.counts.running || l.counts.submitting))throw new Error('Original group has active work');
@@ -127,7 +129,7 @@ export class DesktopRuntimePort implements SupervisorPort {
     await writeFile(join(this.directory,`${role}.receipt.json`),JSON.stringify({version:1,runId,role,identity}),{encoding:'utf8',flag:'wx',mode:0o600});
     this.owned[role]=structuredClone(identity);return identity;
   }
-  async startHost(runId:string){return this.launch('host',runId,{BRIDGE_PACKAGE_BROKER_TOKEN:await this.capability()});}
+  async startHost(runId:string){return this.launch('host',runId,{BRIDGE_PACKAGE_BROKER_TOKEN:await this.capability(),BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(this.directory,'broker-owner.json')});}
   async startListener(runId:string){
     if(!this.appSecret)this.appSecret=await this.effects.secret();if(!this.appSecret)throw new Error('Secret provider unavailable');
     const result=await this.launch('listener',runId,{[this.input.topics.appSecretEnv]:this.appSecret,BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_READY_FILE:join(this.directory,'listener.ready.json'),BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(this.directory,'broker-owner.json')});
@@ -137,7 +139,27 @@ export class DesktopRuntimePort implements SupervisorPort {
   async sharedIdle(){
     const r=await this.effects.shared(this.sharedOwned());
     await writeFile(join(this.directory,`shared-idle-${++this.sharedObservation}.json`),JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
-    if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');return r.proof;
+    if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');this.sharedDesktop=structuredClone(r.proof.desktop);return r.proof;
+  }
+  async desktopQuit():Promise<ProcessIdentity|undefined>{
+    if(this.channelMode!=='new-only' || this.input.host.desktopQuitPolicy!=='stop-with-desktop' || !this.sharedDesktop || !this.owned.host || this.lost)return;
+    let p:any;
+    const deadline=this.effects.now()+20_000;
+    for(;;){
+      try{p=await json(`${this.input.host.connectionFile}.desktop-exit.json`);break;}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+      const i=await this.inventory();
+      // The GUI may disappear before the host's next refresh (10 seconds).
+      // Wait only for its original receipt; never invent a clean exit from PID
+      // absence, keep old readiness alive, or launch/submit anything here.
+      if(this.lost || i.desktop.length || i.legacy.length || i.host.length!==1 || !sameProcess(i.host[0]!,this.owned.host)
+        || !this.owned.broker || i.broker.length!==1 || !sameProcess(i.broker[0]!,this.owned.broker)
+        || !this.owned.listener || i.listener.length!==1 || !sameProcess(i.listener[0]!,this.owned.listener) || this.effects.now()>=deadline)return;
+      await this.effects.pause();
+    }
+    if(p.version!==1 || p.runId!==this.runId || p.hostPid!==this.owned.host.pid || p.desktopPid!==this.sharedDesktop.pid || !Number.isSafeInteger(p.backendPid) || p.backendPid<1
+      || p.exitCode!==0 || p.verifiedOnce!==true || p.backendWasRunning!==true || !Number.isFinite(p.observedAt)
+      || p.observedAt<Date.parse(this.sharedDesktop.createdAt) || p.observedAt>this.effects.now()+1000 || this.effects.now()-p.observedAt>30_000)throw new Error('Owned desktop quit receipt invalid');
+    return structuredClone(this.sharedDesktop);
   }
   private async listenerReadiness(){
     const r=await json(join(this.directory,'listener.ready.json'));

@@ -9,6 +9,7 @@ foreach($path in @($taskPlan.directory,$taskPlan.root,$taskPlan.nodeExecutable,$
 if([IO.Path]::GetFullPath($taskPlan.directory) -ne [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($PlanFile)) -or [IO.Path]::GetFullPath($taskPlan.root) -ne (Split-Path -Parent $PSScriptRoot) -or [IO.Path]::GetFileName($taskPlan.nodeExecutable) -ne 'node.exe'){throw 'Runtime program path changed'}
 if($taskPlan.taskControl -and $taskPlan.taskControl -ne 'uac'){throw 'Unsupported scoped task control'}
 if($taskPlan.channelMode -and ($taskPlan.channelMode -ne 'new-only' -or $taskPlan.taskControl)){throw 'Unsupported channel policy or legacy control in new-only mode'}
+if($taskPlan.serviceMode -and ($taskPlan.serviceMode -ne 'stop-with-desktop' -or $taskPlan.channelMode -ne 'new-only')){throw 'Unsupported managed service policy'}
 if(@($taskPlan.files).Count -ne (9+[int](!!$taskPlan.taskControl))){throw 'Runtime program proofs missing'}
 $taskRequired=@($taskPlan.nodeExecutable,(Join-Path $PSScriptRoot 'lark-chatgpt-runtime-supervisor.mjs'),$PSCommandPath,(Join-Path $PSScriptRoot '..\dist\desktop-runtime-supervisor.js'),(Join-Path $PSScriptRoot 'desktop-runtime-control.ps1'),(Join-Path $PSScriptRoot 'lark-chatgpt-host.mjs'),(Join-Path $PSScriptRoot 'lark-chatgpt-topics.mjs'),(Join-Path $PSScriptRoot 'desktop-package-broker.ps1'),(Join-Path $PSScriptRoot 'desktop-package-broker-task.ps1'))
 if($taskPlan.taskControl -eq 'uac'){$taskRequired+=(Join-Path $PSScriptRoot 'desktop-task-uac.ps1')}
@@ -19,7 +20,7 @@ $taskIntent=Get-Content -LiteralPath (Join-Path $taskPlan.directory ($taskName+'
 if($taskIntent.planId -cne $taskPlan.planId -or $taskIntent.planSha256 -cne $PlanSha256 -or $taskIntent.workerMode -cne $WorkerMode){throw 'Runtime launch intent missing'}
 if($WorkerMode -eq 'Recover'){
   $taskState=Get-Content -LiteralPath (Join-Path $taskPlan.directory 'supervisor.json') -Encoding UTF8|ConvertFrom-Json
-  if($taskState.phase -eq 'restored'){throw 'Runtime already restored'}
+  if($taskState.phase -in @('restored','closed')){throw 'Runtime already completed'}
   $taskLeasePath=Join-Path $taskPlan.directory 'broker-owner.json'
   if(Test-Path -LiteralPath $taskLeasePath){
     $taskLease=Get-Content -LiteralPath $taskLeasePath -Encoding UTF8|ConvertFrom-Json
