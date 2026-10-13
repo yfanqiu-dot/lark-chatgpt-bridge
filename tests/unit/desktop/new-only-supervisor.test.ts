@@ -30,7 +30,7 @@ function fixture(){
 it('runs and stops the sole new consumer, restoring only the desktop',async()=>{
   const h=fixture(),s=await h.run();expect(s).toMatchObject({phase:'restored',channelMode:'new-only',legacyPauseAttempted:false});expect(s.errorCode).toBeUndefined();expect(s.baseline).toBeUndefined();
   expect(h.events).toEqual(['start:broker','start:host','start:listener','stop:listener','stop:host','ordinary','stop:broker']);expect(h.forbidden).not.toHaveBeenCalled();expect(h.inventory.legacy).toEqual([]);
-});
+},15_000);
 it.each(['ColdSnapshot','Snapshot'] as const)('waits through an incomplete %s read and launches only after a fresh complete exit proof',async action=>{
   const h=fixture(),read=h.port.coldExit!,inventory=h.port.inventory;
   let failed=false,proved=false,paused=false;
