@@ -3,7 +3,7 @@ import { readFile,writeFile } from 'node:fs/promises';
 import { dirname,join,resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { BrokerOwnerLease } from './broker-lease';
-import { sameProcess,type SupervisorPort,type ProcessIdentity,type SupervisorState,type OrdinaryProof } from './supervisor';
+import { sameProcess,validRetirementProof,type SupervisorPort,type ProcessIdentity,type SupervisorState,type OrdinaryProof } from './supervisor';
 import { verifyDeployment,pendingApprovalChats } from './deployment';
 import { WindowsSupervisorControl } from './supervisor-windows';
 import { inspectOwnedShared,readOwnedSharedContext } from './shared-inspector';
@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 import { TaskUacController } from './task-uac';
 
 type Deployment=Awaited<ReturnType<typeof verifyDeployment>>;
-type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'canStopLegacy'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'>;
+type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'canStopLegacy'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'> & Partial<Pick<WindowsSupervisorControl,'legacyRetirement'>>;
 export interface RuntimeEffects {
   control:Control;
   verify():Promise<Deployment>;
@@ -40,13 +40,23 @@ export class DesktopRuntimePort implements SupervisorPort {
   private lease?:BrokerOwnerLease;
   private lost=false;
   private sharedObservation=0;
+  private retirementDefinition?:{taskPresent:boolean;definitionSha256:string};
   constructor(private readonly input:Deployment,readonly directory:string,private readonly owner:ProcessIdentity,
-    private readonly effects:RuntimeEffects, recovery?:SupervisorState){
+    private readonly effects:RuntimeEffects, recovery?:SupervisorState,private readonly channelMode?:'new-only'){
     if(resolve(directory)!==dirname(input.host.connectionFile) || !sameProcess(owner,owner))throw new Error('Runtime directory or owner invalid');
-    if(recovery){this.owned=structuredClone(recovery.owned);this.runId=recovery.runId;}
+    if(channelMode!==undefined && channelMode!=='new-only' || recovery && recovery.channelMode!==channelMode)throw new Error('Runtime channel policy mismatch');
+    if(recovery){this.owned=structuredClone(recovery.owned);this.runId=recovery.runId;if(recovery.newBaseline)this.retirementDefinition=structuredClone(recovery.newBaseline.retirement);}
   }
   inventory(){return this.effects.control.inventory();}
   coldExit(){return this.effects.control.coldSnapshot();}
+  async legacyRetirement(){
+    if(this.channelMode!=='new-only' || !this.effects.control.legacyRetirement)throw new Error('New-only retirement reader unavailable');
+    const i=await this.inventory(),p=await this.effects.control.legacyRetirement();
+    if(i.legacy.length || !validRetirementProof(p) || p.observedAt>this.effects.now()+1000 || this.effects.now()-p.observedAt>60_000)throw new Error('Legacy startup or consumer not retired');
+    if(this.retirementDefinition && (p.taskPresent!==this.retirementDefinition.taskPresent || p.definitionSha256!==this.retirementDefinition.definitionSha256))throw new Error('Retired task definition changed');
+    this.retirementDefinition={taskPresent:p.taskPresent,definitionSha256:p.definitionSha256};
+    return p;
+  }
   async idle():Promise<never>{throw new Error('Runtime worker only supports cold admission');}
   async closeDesktop():Promise<never>{throw new Error('Cold runtime never closes the ordinary desktop');}
   async verifyBindings(){
@@ -64,6 +74,7 @@ export class DesktopRuntimePort implements SupervisorPort {
     }
   }
   async backup(){
+    if(this.channelMode==='new-only')throw new Error('New-only runtime does not back up or manage legacy tasks');
     const inventory=await this.inventory();
     if(inventory.legacy.length!==1 || !await this.effects.control.canStopLegacy(inventory.legacy[0]!))throw new Error('Old consumer stop permission unavailable before desktop exit');
     const permissions=await this.effects.control.taskPermissions();
@@ -73,6 +84,7 @@ export class DesktopRuntimePort implements SupervisorPort {
     return {legacyTaskEnabled:b.enabled,launchDefinitionSha256:b.definitionSha256};
   }
   async pauseLegacy(identity:ProcessIdentity){
+    if(this.channelMode==='new-only')throw new Error('New-only runtime never pauses a legacy consumer');
     await this.verifyBindings();await this.effects.control.testIdentity('legacy',identity);
     this.appSecret=await this.effects.secret();if(!this.appSecret)throw new Error('Secret provider unavailable');
     await this.effects.control.pauseTask(join(this.directory,'legacy-backup'));
@@ -91,6 +103,7 @@ export class DesktopRuntimePort implements SupervisorPort {
     return this.token;
   }
   async startBroker(runId:string){
+    if(this.channelMode==='new-only')await this.legacyRetirement();
     if(this.owned.broker || this.lease)throw new Error('Broker launch already attempted');
     if(this.runId && this.runId!==runId)throw new Error('Runtime run changed');this.runId=runId;
     this.token=randomBytes(32).toString('hex');
@@ -140,7 +153,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   }
   async health(){
     if(this.lost)return false;
-    try{await this.effects.context(this.sharedOwned());return !!this.owned.listener && await this.listenerReady() && await this.effects.locksHeld();}catch{return false;}
+    try{if(this.channelMode==='new-only')await this.legacyRetirement();await this.effects.context(this.sharedOwned());return !!this.owned.listener && await this.listenerReady() && await this.effects.locksHeld();}catch{return false;}
   }
   private async stop(role:'host'|'listener',identity:ProcessIdentity){
     await this.effects.control.testIdentity(role,identity);
@@ -187,6 +200,7 @@ export class DesktopRuntimePort implements SupervisorPort {
     throw new Error('Ordinary tools not verified');
   }
   async restoreLegacy(baseline:NonNullable<SupervisorState['baseline']>){
+    if(this.channelMode==='new-only')throw new Error('New-only runtime never reactivates a legacy consumer');
     await this.effects.verify();const i=await this.inventory();
     if(i.host.length || i.listener.length || i.desktop.length!==1 || i.legacy.length>1)throw new Error('Legacy restore inventory conflict');
     if(!await this.effects.ordinaryTools(i.desktop[0]!))throw new Error('Ordinary tools unavailable before legacy restoration');
@@ -212,10 +226,12 @@ export class DesktopRuntimePort implements SupervisorPort {
 }
 
 const exec=promisify(execFile);
-export async function createWindowsRuntimePort(stage:string,directory:string,root:string,recovery?:SupervisorState,taskUac?:{planId:string;deadline:number;forwardDeadline:number}){
+export async function createWindowsRuntimePort(stage:string,directory:string,root:string,recovery?:SupervisorState,taskUac?:{planId:string;deadline:number;forwardDeadline:number},channelMode?:'new-only'){
+  if(channelMode==='new-only' && taskUac)throw new Error('New-only runtime cannot use legacy UAC actions');
+  if(recovery && recovery.channelMode!==channelMode)throw new Error('Recovery channel policy mismatch');
   const input=await verifyDeployment(stage),script=join(root,'bin/desktop-runtime-control.ps1');
   if(process.platform!=='win32' || resolve(directory)!==dirname(input.host.connectionFile))throw new Error('Windows runtime location invalid');
-  const control=await WindowsSupervisorControl.prepare(stage,script,join(directory,`control-${process.pid}`),true);
+  const control=await WindowsSupervisorControl.prepare(stage,script,join(directory,`control-${process.pid}`),true,channelMode!=='new-only');
   const owner=await control.ownerIdentity(process.pid);
   if(owner.pid!==process.pid || owner.executable.toLowerCase()!==process.execPath.toLowerCase())throw new Error('Runtime worker identity mismatch');
   const {host,topics,snapshot}=input;
@@ -279,5 +295,5 @@ export async function createWindowsRuntimePort(stage:string,directory:string,roo
       }catch{return false;}
     },
   };
-  return new DesktopRuntimePort(input,directory,owner,effects,recovery);
+  return new DesktopRuntimePort(input,directory,owner,effects,recovery,channelMode);
 }

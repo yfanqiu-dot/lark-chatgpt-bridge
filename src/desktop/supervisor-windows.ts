@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { verifyDeployment } from './deployment';
-import type { ColdExitProof, ProcessIdentity, SupervisorInventory } from './supervisor';
+import type { ColdExitProof, ProcessIdentity, SupervisorInventory, LegacyRetirementProof } from './supervisor';
 import { windowsPowerShellEnvironment } from './windows-tools';
 
 const exec = promisify(execFile);
@@ -13,19 +13,19 @@ const digest = (data: string | Buffer) => createHash('sha256').update(data).dige
  * lifecycle are deliberately required before wiring destructive operations. */
 export class WindowsSupervisorControl {
   private constructor(private readonly stage: string, private readonly script: string, private readonly configFile: string, private readonly configSha256: string, private readonly evidence: string, private readonly allowMutations: boolean,private readonly scriptSha256:string) {}
-  static async prepare(stage: string, script: string, evidence: string, allowMutations = false): Promise<WindowsSupervisorControl> {
+  static async prepare(stage: string, script: string, evidence: string, allowMutations = false, legacyTaskOperationsAllowed = true): Promise<WindowsSupervisorControl> {
     if (process.platform !== 'win32') throw new Error('Windows supervisor control requires Windows');
     if (![stage,script,evidence].every(isAbsolute)) throw new Error('Windows supervisor control paths must be absolute');
     const { host, snapshot } = await verifyDeployment(stage);
     if (!snapshot.files.some(f => f.path === resolve(script))) throw new Error('Runtime control script must be included in deployment artifact proofs');
     await mkdir(evidence, { recursive: false, mode: 0o700 });
     const configFile = join(evidence, 'control.json');
-    const data = JSON.stringify({ version: 1, desktopExe: host.desktopExe, endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,legacy: snapshot.spec.legacy });
+    const data = JSON.stringify({ version: 1, desktopExe: host.desktopExe, endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,legacy: snapshot.spec.legacy,...(!legacyTaskOperationsAllowed?{legacyTaskOperationsAllowed:false}:{}) });
     await writeFile(configFile, data, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations,snapshot.files.find(f=>f.path===resolve(script))!.sha256);
   }
   private async call(action: string, extra: string[] = [], input?:string, raw=false,boundedRead=false): Promise<any> {
-    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
+    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TaskRetirement','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
     if(boundedRead){if(action!=='SharedSnapshot' || digest(await readFile(this.script))!==this.scriptSha256)throw new Error('Bounded native reader changed');}
     else await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
@@ -47,6 +47,12 @@ export class WindowsSupervisorControl {
     return raw ? stdout : JSON.parse(stdout);
   }
   async inventory(): Promise<SupervisorInventory> { return this.call('Snapshot'); }
+  async legacyRetirement():Promise<LegacyRetirementProof>{
+    const p=await this.call('TaskRetirement');
+    if(p.version!==1 || !Number.isFinite(p.observedAt) || typeof p.retired!=='boolean' || typeof p.taskPresent!=='boolean' || typeof p.taskEnabled!=='boolean'
+      || !['disabled','absent','other'].includes(p.taskState) || !/^[a-f0-9]{64}$/.test(p.definitionSha256))throw new Error('Legacy retirement observation invalid');
+    return p;
+  }
   async taskPermissions():Promise<{version:1;writeAllowed:boolean;executeAllowed:boolean;descriptorSha256:string}>{
     const result=await this.call('TaskPermissions');
     if(result.version!==1 || typeof result.writeAllowed!=='boolean' || typeof result.executeAllowed!=='boolean' || !/^[a-f0-9]{64}$/.test(result.descriptorSha256))throw new Error('Legacy task permission proof invalid');

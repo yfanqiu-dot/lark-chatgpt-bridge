@@ -9,7 +9,7 @@ beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'runtime-port-'));});
 afterEach(async()=>{for(const p of ports.splice(0))await p.close();await rm(dir,{recursive:true,force:true});});
 const identity=(pid:number):ProcessIdentity=>({pid,parentPid:1,createdAt:new Date().toISOString(),executable:process.execPath,commandLineSha256:'a'.repeat(64)});
 const runId='12345678-1234-1234-1234-123456789abc';
-function harness(recovery=false){
+function harness(recovery=false,channelMode?:'new-only'){
   const events:string[]=[],ids={legacy:identity(1),desktop:identity(2),broker:identity(3),host:identity(4),shared:identity(5),listener:identity(6),ordinary:identity(7)};
   const inventory={legacy:[ids.legacy],desktop:[ids.desktop],host:[] as ProcessIdentity[],listener:[] as ProcessIdentity[],broker:[] as ProcessIdentity[]};
   const registry=join(dir,'registry.json'),bindings=[{threadId:'original',projectId:'project',projectRoot:dir}];
@@ -41,9 +41,19 @@ function harness(recovery=false){
   const saved:SupervisorState={version:1,startMode:'cold',runId,phase:'running',revision:1,updatedAt:'',owned:{broker:ids.broker,host:ids.host,listener:ids.listener},legacyPauseAttempted:true,desktopCloseAttempted:false,desktopRestoreRequired:true,
     baseline:{legacy:ids.legacy,desktop:ids.desktop,legacyTaskEnabled:true,launchDefinitionSha256:'b'.repeat(64)}};
   if(recovery)Object.assign(inventory,{legacy:[],desktop:[],host:[],listener:[],broker:[ids.broker]});
-  const port=new DesktopRuntimePort(input,dir,identity(process.pid),effects,recovery?saved:undefined);ports.push(port);
+  const port=new DesktopRuntimePort(input,dir,identity(process.pid),effects,recovery?saved:undefined,channelMode);ports.push(port);
   return {port,effects,input,events,inventory,ids,saved,bindings,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},packageFails:()=>{packageFails=true;},badTools:()=>{tools=false;},badContext:()=>{context=false;},badLocks:()=>{locks=false;},badSecret:()=>{secret=false;}};
 }
+it('runs the concrete new-only port without old task permissions, backup, pause or restore',async()=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  h.effects.control.taskPermissions=async()=>{throw Error('Legacy permission operation forbidden');};
+  let stop=false;const s=await new DesktopSupervisor(new SupervisorJournal(join(dir,'journal.json')),h.port,h.bindings,h.clock).run(async()=>stop,async()=>{if(h.inventory.desktop[0]?.pid===2&&!h.inventory.host.length)h.inventory.desktop=[];else stop=true;},{startMode:'cold',channelMode:'new-only'});
+  expect(s.phase).toBe('restored');expect(s.errorCode).toBeUndefined();expect(h.inventory.legacy).toHaveLength(0);expect(h.events).not.toContain('backup');expect(h.events).not.toContain('pauseTask');expect(h.events).not.toContain('restoreTask');expect(h.events).not.toContain('startLegacy');
+});
+it('rejects explicit legacy mutations through a new-only port',async()=>{
+  const h=harness(false,'new-only');await expect(h.port.backup()).rejects.toThrow('does not back up');await expect(h.port.pauseLegacy(h.ids.legacy)).rejects.toThrow('never pauses');await expect(h.port.restoreLegacy(h.saved.baseline!)).rejects.toThrow('never reactivates');expect(h.events).toEqual([]);
+});
 it('runs the concrete cold lifecycle with fresh lease, memory-only auth, handshake and ordered restoration',async()=>{
   const h=harness();let stop=false;
   const state=await new DesktopSupervisor(new SupervisorJournal(join(dir,'journal.json')),h.port,h.bindings,h.clock).run(async()=>stop,async()=>{if(h.inventory.desktop[0]?.pid===2&&!h.inventory.host.length)h.inventory.desktop=[];else stop=true;},{startMode:'cold'});

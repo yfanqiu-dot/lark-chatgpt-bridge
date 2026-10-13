@@ -8,6 +8,7 @@ if($taskPlan.version -ne 1 -or $taskPlan.mode -ne 'cold' -or $taskPlan.planId -n
 foreach($path in @($taskPlan.directory,$taskPlan.root,$taskPlan.nodeExecutable,$PlanFile)){if(![IO.Path]::IsPathRooted($path) -or $path -match '["\r\n]'){throw 'Invalid runtime path'}}
 if([IO.Path]::GetFullPath($taskPlan.directory) -ne [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($PlanFile)) -or [IO.Path]::GetFullPath($taskPlan.root) -ne (Split-Path -Parent $PSScriptRoot) -or [IO.Path]::GetFileName($taskPlan.nodeExecutable) -ne 'node.exe'){throw 'Runtime program path changed'}
 if($taskPlan.taskControl -and $taskPlan.taskControl -ne 'uac'){throw 'Unsupported scoped task control'}
+if($taskPlan.channelMode -and ($taskPlan.channelMode -ne 'new-only' -or $taskPlan.taskControl)){throw 'Unsupported channel policy or legacy control in new-only mode'}
 if(@($taskPlan.files).Count -ne (9+[int](!!$taskPlan.taskControl))){throw 'Runtime program proofs missing'}
 $taskRequired=@($taskPlan.nodeExecutable,(Join-Path $PSScriptRoot 'lark-chatgpt-runtime-supervisor.mjs'),$PSCommandPath,(Join-Path $PSScriptRoot '..\dist\desktop-runtime-supervisor.js'),(Join-Path $PSScriptRoot 'desktop-runtime-control.ps1'),(Join-Path $PSScriptRoot 'lark-chatgpt-host.mjs'),(Join-Path $PSScriptRoot 'lark-chatgpt-topics.mjs'),(Join-Path $PSScriptRoot 'desktop-package-broker.ps1'),(Join-Path $PSScriptRoot 'desktop-package-broker-task.ps1'))
 if($taskPlan.taskControl -eq 'uac'){$taskRequired+=(Join-Path $PSScriptRoot 'desktop-task-uac.ps1')}

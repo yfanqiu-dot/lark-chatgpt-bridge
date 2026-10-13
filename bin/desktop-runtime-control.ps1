@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
+  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TaskRetirement','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
   [Parameter(Mandatory=$true)][string]$ConfigFile,
   [string]$IdentityFile,
   [ValidateSet('legacy','desktop','host','listener')][string]$Role,
@@ -11,6 +11,7 @@ $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $taskConfig=Get-Content -LiteralPath $ConfigFile -Encoding UTF8 | ConvertFrom-Json
 if($taskConfig.version -ne 1 -or $taskConfig.legacy.profile -notmatch '^[\w-]+$' -or $taskConfig.legacy.scheduledTaskName -notmatch '^[\w.-]+$'){throw 'Invalid runtime control configuration'}
+if($taskConfig.legacyTaskOperationsAllowed -eq $false -and ($Action -in @('DisableTask','RestoreTask','StartLegacy') -or ($Action -eq 'StopOwned' -and $Role -eq 'legacy'))){throw 'New-only runtime forbids legacy task or process mutations'}
 foreach($taskPath in @($taskConfig.desktopExe,$taskConfig.legacy.executable,$taskConfig.legacy.entryPoint)){
   if(![IO.Path]::IsPathRooted($taskPath)){throw 'Runtime paths must be absolute'}
 }
@@ -179,6 +180,26 @@ public static class BridgeTaskAccess {
 '@
   }
   return [BridgeTaskAccess]::Check($sddl,$desired)
+}
+if($Action -eq 'TaskRetirement'){
+  if($taskConfig.legacy.scheduledTaskName -cne ('LarkChannelBridge.Bot.'+$taskConfig.legacy.profile)){throw 'Retirement target is not the original profile task'}
+  $taskService=New-Object -ComObject 'Schedule.Service';$taskService.Connect()
+  $taskRegistered=$null
+  try{$taskRegistered=$taskService.GetFolder('\').GetTask($taskConfig.legacy.scheduledTaskName)}catch{
+    $taskException=$_.Exception;$taskAbsent=$false
+    for($taskDepth=0;$taskException -and $taskDepth -lt 8;$taskDepth++){
+      if($taskException.HResult -eq -2147024894){$taskAbsent=$true;break};$taskException=$taskException.InnerException
+    }
+    if(!$taskAbsent){throw}
+  }
+  if(!$taskRegistered){
+    @{version=1;observedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();retired=$true;taskPresent=$false;taskEnabled=$false;taskState='absent';definitionSha256=(Get-Sha ('absent:'+$taskConfig.legacy.scheduledTaskName))}|ConvertTo-Json -Compress
+  }else{
+    $taskDefinition=Read-TaskDefinition
+    $taskEnabled=[bool]$taskRegistered.Enabled;$taskDisabled=(!$taskEnabled -and [int]$taskRegistered.State -eq 1 -and !$taskDefinition.enabled)
+    @{version=1;observedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();retired=$taskDisabled;taskPresent=$true;taskEnabled=$taskEnabled;taskState=$(if($taskDisabled){'disabled'}else{'other'});definitionSha256=$taskDefinition.sha256}|ConvertTo-Json -Compress
+  }
+  exit 0
 }
 if($Action -eq 'TaskPermissions'){
   $null=Read-TaskDefinition

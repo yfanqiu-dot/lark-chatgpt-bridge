@@ -12,6 +12,17 @@ vi.mock('node:child_process',async original=>{
 import { prepareColdRuntime,readColdRuntimePlan,verifyColdRuntimePlan,launchColdRuntime } from '../../../src/desktop/runtime-supervisor';
 let root:string,directory:string,input:any;
 const sha=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex');
+it('seals a new-only plan and refuses combination with legacy UAC',async()=>{
+  await expect(prepareColdRuntime(join(root,'source-stage'),directory,root,'uac','new-only')).rejects.toThrow('forbid');
+  const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,'new-only');expect(await verifyColdRuntimePlan(r.planFile,r.planSha256)).toMatchObject({channelMode:'new-only'});expect(mocked.exec).not.toHaveBeenCalled();
+});
+it.skipIf(process.platform!=='win32').each([true,false])('admits new-only launch only with retirement=%s and never requests legacy permissions',async retired=>{
+  const r=await prepareColdRuntime(join(root,'source-stage'),directory,root,undefined,'new-only');
+  mocked.control.mockResolvedValue({inventory:async()=>({legacy:[],desktop:[{pid:1}],host:[],listener:[],broker:[]}),legacyRetirement:async()=>({version:1,observedAt:Date.now(),retired,taskPresent:true,taskEnabled:!retired,taskState:retired?'disabled':'other',definitionSha256:'b'.repeat(64)}),taskPermissions:mocked.permissions});
+  mocked.exec.mockResolvedValue({stdout:JSON.stringify({version:1,planId:r.planId,workerMode:'Run',identity:{pid:100,parentPid:1,createdAt:new Date().toISOString(),executable:join(root,'node.exe'),commandLineSha256:'b'.repeat(64)}})});
+  if(retired)expect(await launchColdRuntime(r.planFile,r.planSha256)).toMatchObject({planId:r.planId});else{await expect(launchColdRuntime(r.planFile,r.planSha256)).rejects.toThrow('retirement');expect(mocked.exec).not.toHaveBeenCalled();}
+  expect(mocked.permissions).not.toHaveBeenCalled();
+});
 beforeEach(async()=>{
   vi.resetAllMocks();root=await mkdtemp(join(tmpdir(),'cold-plan-'));directory=join(root,'runtime');await mkdir(join(root,'bin'));await mkdir(join(root,'dist'));
   const files=['node.exe','bin/lark-chatgpt-runtime-supervisor.mjs','bin/desktop-cold-launch.ps1','dist/desktop-runtime-supervisor.js','bin/desktop-runtime-control.ps1','bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker.ps1','bin/desktop-package-broker-task.ps1'].map(p=>join(root,p));
