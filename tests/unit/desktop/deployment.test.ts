@@ -11,6 +11,7 @@ import { TopicRouter, type TopicController } from '../../../src/desktop/topic-ro
 import { TopicProvisioner } from '../../../src/desktop/topic-provisioner';
 import { ApprovalJournal } from '../../../src/desktop/approval-journal';
 import type { Approval } from '../../../src/desktop/backend';
+import {prepareColdRuntime,verifyColdRuntimePlan} from '../../../src/desktop/runtime-supervisor';
 
 let dir: string;
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-p4-'))); });
@@ -88,6 +89,22 @@ describe('P4 gray group scope', () => {
 const jsonFile = async (file: string) => JSON.parse(await readFile(file, 'utf8'));
 
 describe('P4 offline deployment and rollback guards', () => {
+  it('preserves the managed quit policy through the actual source, copied host and cold plan chain',async()=>{
+    const {spec,stage}=await fixture();spec.legacy.scheduledTaskName='LarkChannelBridge.Bot.codex';
+    await mkdir(join(dir,'bin'));await mkdir(join(dir,'dist'));
+    for(const relative of ['bin/lark-chatgpt-runtime-supervisor.mjs','bin/desktop-cold-launch.ps1','dist/desktop-runtime-supervisor.js','bin/desktop-runtime-control.ps1','bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker.ps1','bin/desktop-package-broker-task.ps1']){
+      const path=join(dir,relative);await writeFile(path,'FIXTURE_PROGRAM','utf8');spec.artifactFiles.push(path);
+    }
+    await prepareDeployment(spec,stage);
+    const p=await prepareColdRuntime(stage,join(dir,'managed-runtime'),dir,undefined,'new-only',{mode:'stop-with-desktop',acceptanceWindow:true});
+    expect(await verifyColdRuntimePlan(p.planFile,p.planSha256)).toMatchObject({serviceMode:'stop-with-desktop',serviceAcceptanceWindow:true});
+    const actual=await verifyDeployment(join(dir,'managed-runtime','stage'));expect(actual.host.desktopQuitPolicy).toBe('stop-with-desktop');
+    expect(await readFile(join(dir,'managed-runtime','stage','host.json'),'utf8')).toContain('stop-with-desktop');expect((await verifyDeployment(stage)).host.desktopQuitPolicy).toBeUndefined();
+    expect(await readFile(join(dir,'managed-runtime','stage','host.json'),'utf8')).not.toContain('DO_NOT_COPY');
+  });
+  it('rejects an unsupported quit policy instead of silently dropping it from the backup',async()=>{
+    const {spec,stage,host}=await fixture();await save(spec.hostConfigFile,{...host,desktopQuitPolicy:'always-reopen'});await expect(prepareDeployment(spec,stage)).rejects.toThrow('quit policy');
+  });
   it('backs up only public configuration, leaves original state byte identical, and never overwrites a stage', async () => {
     const { c, spec, stage } = await fixture(), before = await readFile(c.registryFile, 'utf8');
     await prepareDeployment({ ...spec, appSecret: 'DO_NOT_COPY' }, stage);

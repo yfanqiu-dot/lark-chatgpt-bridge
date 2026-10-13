@@ -38,7 +38,7 @@ node D:\bridge\bin\lark-chatgpt-runtime-supervisor.mjs --service-prepare D:\brid
 node D:\bridge\bin\lark-chatgpt-runtime-supervisor.mjs --service-shortcuts-check D:\bridge-local\service\service.json <manifestSha256>
 ```
 
-以上仅准备和检查。显式 `--service-launch` 是实际启动入口，`--service-install-startup` 是实际安装入口；不将原45分钟计划注册为长期启动项。本机142文件/1115项、类型及程序构建通过，现场退出保持关闭及本提交三平台CI尚待独立核对。
+以上仅准备和检查。显式 `--service-launch` 是实际启动入口，`--service-install-startup` 是实际安装入口；不将原45分钟计划注册为长期启动项。首次88ece84只读候选因部署配置白名单遗漏退出策略而在启动前被拒绝，原23份构建及失败证据保留，没有进入现场。已补齐白名单，并增加真实来源→复制Host→冷计划的完整链路验证及未知策略拒绝验证。本机142文件/1117项、类型及程序构建通过，修复提交三平台CI及现场退出保持关闭尚待独立核对。
 
 2026-10-13本人明确要求后续只使用新Bridge连接飞书与Codex，旧Bridge不再作为运行渠道。后续开发与验收按此目标推进：
 

@@ -67,6 +67,7 @@ async function configs(spec: DeploymentSpec): Promise<{ host: HostConfig; topics
   const host = await validateHostConfig({
     codexBinary: raw.codexBinary, codexSha256: raw.codexSha256, desktopExe: raw.desktopExe, desktopVersion: raw.desktopVersion,
     projectRoot: raw.projectRoot, endpoint: raw.endpoint, backendEndpoint: raw.backendEndpoint, connectionFile: raw.connectionFile,
+    ...(raw.desktopQuitPolicy !== undefined ? { desktopQuitPolicy: raw.desktopQuitPolicy } : {}),
     ...(raw.toolBindings !== undefined ? { toolBindings: raw.toolBindings.map((b: any) => ({ threadId: b.threadId, projectId: b.projectId })) } : {}),
     ...(raw.topicRegistryFile !== undefined ? { topicRegistryFile: raw.topicRegistryFile } : {}),
     ...(raw.topicProjects !== undefined ? { topicProjects: raw.topicProjects.map((p: any) => ({ projectId: p.projectId, projectRoot: p.projectRoot })) } : {}),
