@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { verifyDeployment } from './deployment';
 import type { ColdExitProof, ProcessIdentity, SupervisorInventory, LegacyRetirementProof } from './supervisor';
+import { ColdExitObservationUnavailable } from './supervisor';
 import { windowsPowerShellEnvironment } from './windows-tools';
 
 const exec = promisify(execFile);
@@ -40,8 +41,14 @@ export class WindowsSupervisorControl {
     }catch(error){
       const native=error as {code?:unknown;stderr?:unknown;signal?:unknown};
       const stderr=typeof native.stderr==='string'?native.stderr:'';
-      const errorCode=stderr.includes('0x80070005')?'native_task_access_denied':'native_control_failed';
+      // Only exact fixed PowerShell error IDs from our pinned inventory
+      // reader are retryable. Private error text, denied reads and timeouts
+      // remain fatal; unreadable processes are never omitted from inventory.
+      const identityUnavailable = native.code===1 && !native.signal && !stderr.includes('0x80070005') && (action==='ColdSnapshot' || action==='Snapshot')
+        && /\+ FullyQualifiedErrorId\s*:\s*(?:A potential runtime process cannot be identified|Potential desktop or App Server is unreadable|Process identity is not readable)\s*(?:\r?\n|$)/.test(stderr);
+      const errorCode=identityUnavailable?'native_process_identity_unavailable':stderr.includes('0x80070005')?'native_task_access_denied':'native_control_failed';
       try{const directory=await mkdtemp(join(this.evidence,'operation-failure-'));await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action,errorCode,exitCode:typeof native.code==='number'?native.code:null,signal:typeof native.signal==='string'?native.signal:null,stderrBytes:Buffer.byteLength(stderr),stderrSha256:digest(stderr),observedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx'});}catch{}
+      if(identityUnavailable)throw new ColdExitObservationUnavailable(action as 'ColdSnapshot'|'Snapshot');
       throw error;
     }
     return raw ? stdout : JSON.parse(stdout);

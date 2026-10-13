@@ -34,6 +34,20 @@ export interface ColdExitProof {
   desktopRelated: ProcessIdentity[];
   complete: boolean;
 }
+/** A fixed native read failure, never an exit proof or permission to launch.
+ * Structural identification also works across independently bundled adapters. */
+export class ColdExitObservationUnavailable extends Error {
+  readonly code = 'cold_exit_observation_unavailable';
+  constructor(readonly action: 'Snapshot' | 'ColdSnapshot') {
+    super('Native process identity is incomplete; cold exit remains unverified');
+    this.name = 'ColdExitObservationUnavailable';
+  }
+}
+function isUnavailableColdRead(error: unknown): error is ColdExitObservationUnavailable {
+  const value = error as Partial<ColdExitObservationUnavailable> | null;
+  return error instanceof Error && value?.name === 'ColdExitObservationUnavailable' && value.code === 'cold_exit_observation_unavailable'
+    && (value.action === 'Snapshot' || value.action === 'ColdSnapshot');
+}
 export interface LegacyRetirementProof {
   version: 1;
   observedAt: number;
@@ -182,7 +196,14 @@ export class DesktopSupervisor {
     await this.journal.save(state);
   }
   private async coldExit(s: SupervisorState): Promise<boolean> {
-    const p = await this.port.coldExit!(), i = await this.inventory();
+    let p: ColdExitProof, i: SupervisorInventory;
+    try { p = await this.port.coldExit!(); i = await this.inventory(); }
+    catch (error) {
+      // Re-read only during the existing bounded wait. No proof, service
+      // launch, process stop, queue submission, or desktop restore is implied.
+      if (isUnavailableColdRead(error)) return false;
+      throw error;
+    }
     if (p.complete !== true || !Number.isFinite(p.verifiedAt) || p.verifiedAt > this.now() + 1000 || this.now() - p.verifiedAt > 5000
       || !Array.isArray(p.desktopRelated) || p.desktopRelated.some(identity => !validIdentity(identity))) fail('cold_exit_proof_rejected');
     if (i.legacy.length !== (s.channelMode==='new-only' || s.legacyPauseAttempted ? 0 : 1) || (s.channelMode!=='new-only' && !s.legacyPauseAttempted && !sameProcess(i.legacy[0]!, s.baseline!.legacy))

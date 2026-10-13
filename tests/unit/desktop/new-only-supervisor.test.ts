@@ -2,7 +2,7 @@ import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {DesktopSupervisor,SupervisorJournal,type SupervisorPort,type SupervisorInventory,type LegacyRetirementProof,type SupervisorState} from '../../../src/desktop/supervisor';
+import {DesktopSupervisor,SupervisorJournal,ColdExitObservationUnavailable,type SupervisorPort,type SupervisorInventory,type LegacyRetirementProof,type SupervisorState} from '../../../src/desktop/supervisor';
 let dir:string;
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'new-only-'));});
 afterEach(async()=>{await rm(dir,{recursive:true,force:true});});
@@ -30,6 +30,28 @@ function fixture(){
 it('runs and stops the sole new consumer, restoring only the desktop',async()=>{
   const h=fixture(),s=await h.run();expect(s).toMatchObject({phase:'restored',channelMode:'new-only',legacyPauseAttempted:false});expect(s.errorCode).toBeUndefined();expect(s.baseline).toBeUndefined();
   expect(h.events).toEqual(['start:broker','start:host','start:listener','stop:listener','stop:host','ordinary','stop:broker']);expect(h.forbidden).not.toHaveBeenCalled();expect(h.inventory.legacy).toEqual([]);
+});
+it.each(['ColdSnapshot','Snapshot'] as const)('waits through an incomplete %s read and launches only after a fresh complete exit proof',async action=>{
+  const h=fixture(),read=h.port.coldExit!,inventory=h.port.inventory;
+  let failed=false,proved=false,paused=false;
+  h.port.coldExit=async()=>{if(action==='ColdSnapshot'&&!failed){failed=true;throw new ColdExitObservationUnavailable(action);}const p=await read();if(!p.desktopRelated.length)proved=true;return p;};
+  h.port.inventory=async()=>{const s=JSON.parse(await readFile(h.path,'utf8'));if(action==='Snapshot'&&s.phase==='waiting_desktop_exit'&&!failed){failed=true;throw new ColdExitObservationUnavailable(action);}return inventory();};
+  const start=h.port.startBroker;h.port.startBroker=async runId=>{expect(failed).toBe(true);expect(paused).toBe(true);expect(proved).toBe(true);return start(runId);};
+  const result=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>h.inventory.listener.length>0,async()=>{expect(h.events).toEqual([]);paused=true;h.inventory.desktop=[];},{startMode:'cold',channelMode:'new-only'});
+  expect(result.phase).toBe('restored');expect(result.errorCode).toBeUndefined();expect(h.forbidden).not.toHaveBeenCalled();expect(h.events.filter(e=>e==='start:broker')).toHaveLength(1);
+});
+it('keeps permanent unreadable exit observations bounded and never launches or treats them as an exit',async()=>{
+  const h=fixture();let now=Date.now();h.port.coldExit=async()=>{throw new ColdExitObservationUnavailable('ColdSnapshot');};
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings,()=>now).run(async()=>false,async()=>{now+=600001;},{startMode:'cold',channelMode:'new-only'});
+  expect(s).toMatchObject({phase:'blocked',errorCode:'cold_exit_timeout'});expect(s.lastColdExitProof).toBeUndefined();expect(h.events).toEqual([]);expect(h.forbidden).not.toHaveBeenCalled();
+});
+it('does not retry an arbitrary cold read failure',async()=>{
+  const h=fixture();h.port.coldExit=async()=>{throw Error('TEST_PRIVATE_NATIVE_FAILURE');};
+  expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'supervisor_operation_failed'});expect(h.events).toEqual([]);expect(h.forbidden).not.toHaveBeenCalled();
+});
+it('does not advance from an unavailable exit recheck after launching the broker',async()=>{
+  const h=fixture(),read=h.port.coldExit!;h.port.coldExit=async()=>{if(h.inventory.broker.length)throw new ColdExitObservationUnavailable('ColdSnapshot');return read();};
+  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'cold_desktop_reappeared'});expect(h.events).not.toContain('start:host');expect(h.events).not.toContain('start:listener');expect(h.events).toContain('ordinary');expect(h.forbidden).not.toHaveBeenCalled();
 });
 it.each(['enabled','old-process','stale'])('blocks %s retirement before requesting desktop exit',async condition=>{
   const h=fixture();if(condition==='enabled')h.setRetired(false);if(condition==='old-process')h.inventory.legacy=[id(90)];
