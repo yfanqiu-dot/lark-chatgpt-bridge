@@ -31,6 +31,10 @@ it('matches actual host, its own child backend, package pipe and both TCP owners
   expect(await readOwnedSharedContext(tmpdir(),control,owned)).toMatchObject({host:owned.host,backend:{pid:43,parentPid:42},desktop:{pid:44},packageIdentityVerified:true,endpointOwnershipVerified:true});
   expect(mocked.tools).toHaveBeenCalledOnce();expect(mocked.pipes).toHaveBeenCalledWith(44,host.desktopExe);
 });
+it.each(['incomplete','stale'])('still rejects a complete-reader result that is %s before any native task read',async kind=>{
+  if(kind==='incomplete')scan.complete=false;else scan.verifiedAt-=6000;
+  await expect(readOwnedSharedContext(tmpdir(),control,owned)).rejects.toThrow('unverified');expect(mocked.calls).not.toHaveBeenCalled();
+});
 it.each(['hostPid','backendPid','version','stale','parent','replacement'])('rejects %s lease/identity drift',async condition=>{
   if(condition==='hostPid')lease.hostPid=99;
   if(condition==='backendPid')lease.backendPid=99;

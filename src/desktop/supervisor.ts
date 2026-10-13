@@ -34,11 +34,11 @@ export interface ColdExitProof {
   desktopRelated: ProcessIdentity[];
   complete: boolean;
 }
-/** A fixed native read failure, never an exit proof or permission to launch.
+/** A fixed native inventory read failure, never a proof or permission to launch.
  * Structural identification also works across independently bundled adapters. */
 export class ColdExitObservationUnavailable extends Error {
   readonly code = 'cold_exit_observation_unavailable';
-  constructor(readonly action: 'Snapshot' | 'ColdSnapshot') {
+  constructor(readonly action: 'Snapshot' | 'ColdSnapshot' | 'SharedSnapshot') {
     super('Native process identity is incomplete; cold exit remains unverified');
     this.name = 'ColdExitObservationUnavailable';
   }

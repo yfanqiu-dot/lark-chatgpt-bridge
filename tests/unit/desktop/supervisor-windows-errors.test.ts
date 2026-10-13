@@ -56,6 +56,30 @@ it.skipIf(process.platform!=='win32')('never repeats a process mutation even wit
   await expect(control.stopOwned('listener',{pid:1,parentPid:0,createdAt:'2026-10-13T00:00:00.000Z',executable:process.execPath,commandLineSha256:'a'.repeat(64)})).rejects.toBe(error);
   expect(mock.exec).toHaveBeenCalledTimes(1);
 });
+it.skipIf(process.platform!=='win32').each(['shared','bounded'] as const)('returns only a complete later %s shared scan, preserving its original timestamp and owners',async mode=>{
+  const control=await fixtureControl(),unavailable=Object.assign(new Error('TEST_PRIVATE_SHARED'),{code:1,stderr:'    + FullyQualifiedErrorId : Process identity is not readable\r\n'});
+  const complete={verifiedAt:123,complete:true,desktopRelated:[{pid:4}],inventory:{desktop:[{pid:4}],legacy:[],host:[{pid:2}],listener:[],broker:[{pid:1}]},endpointOwners:[{endpoint:'ws://127.0.0.1:9998/',listeners:[{address:'127.0.0.1',pid:2}]}]};
+  mock.exec.mockRejectedValueOnce(unavailable).mockRejectedValueOnce(unavailable).mockResolvedValueOnce({stdout:JSON.stringify(complete)});
+  expect(await (mode==='shared'?control.sharedSnapshot():control.boundedSharedSnapshot())).toEqual(complete);
+  expect(mock.exec).toHaveBeenCalledTimes(3);expect(mock.exec.mock.calls.every(([program,args])=>program==='powershell.exe'&&args.at(-1)==='SharedSnapshot')).toBe(true);
+});
+it.skipIf(process.platform!=='win32').each(['shared','bounded'] as const)('rejects persistent unreadability after at most three %s shared scans and retains validated diagnostics',async mode=>{
+  const control=await fixtureControl(),diagnostic={version:1,pid:23,parentPid:5,processName:'node.exe',createdAt:'2026-10-13T00:00:00.000Z',missingExecutablePath:true,missingCommandLine:true,missingCreationDate:false,privateExtra:'TEST_PRIVATE_SHARED'};
+  mock.exec.mockRejectedValue(Object.assign(new Error('TEST_PRIVATE_SHARED'),{code:1,stderr:`BRIDGE_NATIVE_UNREADABLE_PROCESS ${JSON.stringify(diagnostic)}\r\n    + FullyQualifiedErrorId : Process identity is not readable\r\n`}));
+  await expect(mode==='shared'?control.sharedSnapshot():control.boundedSharedSnapshot()).rejects.toMatchObject({name:'ColdExitObservationUnavailable',action:'SharedSnapshot'});expect(mock.exec).toHaveBeenCalledTimes(3);
+  const folders=(await readdir(join(directory,'evidence'))).filter(n=>n.startsWith('operation-failure-'));expect(folders).toHaveLength(3);
+  for(const folder of folders){const text=await readFile(join(directory,'evidence',folder,'summary.json'),'utf8');expect(JSON.parse(text)).toMatchObject({action:'SharedSnapshot',errorCode:'native_process_identity_unavailable',unreadableProcess:{pid:23,parentPid:5}});expect(text).not.toContain('TEST_PRIVATE');}
+});
+it.skipIf(process.platform!=='win32').each(['denied','timeout','unknown','body-only','killed'])('does not repeat a %s shared failure',async kind=>{
+  const control=await fixtureControl(),failure=Object.assign(new Error('TEST_PRIVATE_SHARED'),{code:1 as string|number,signal:null as string|null,stderr:'    + FullyQualifiedErrorId : Process identity is not readable\r\n'});
+  if(kind==='denied')failure.stderr+='HRESULT 0x80070005';if(kind==='timeout')failure.code='ETIMEDOUT';if(kind==='unknown')failure.stderr='    + FullyQualifiedErrorId : Unknown native failure\r\n';if(kind==='body-only')failure.stderr='Process identity is not readable';if(kind==='killed')failure.signal='SIGTERM';
+  mock.exec.mockRejectedValue(failure);await expect(control.sharedSnapshot()).rejects.toBe(failure);expect(mock.exec).toHaveBeenCalledTimes(1);
+});
+it.skipIf(process.platform!=='win32')('rejects a bounded shared retry when its pinned reader changes after the first scan',async()=>{
+  const control=await fixtureControl();
+  mock.exec.mockImplementationOnce(async()=>{await writeFile(join(directory,'control.ps1'),'CHANGED READER','utf8');throw Object.assign(Error('TEST_PRIVATE_SHARED'),{code:1,stderr:'    + FullyQualifiedErrorId : Process identity is not readable\r\n'});});
+  await expect(control.boundedSharedSnapshot()).rejects.toThrow('Bounded native reader changed');expect(mock.exec).toHaveBeenCalledTimes(1);
+});
 it.skipIf(process.platform!=='win32')('keeps only validated unreadable process identifiers and flags, excluding command and path fields',async()=>{
   const control=await fixtureControl();const diagnostic={version:1,pid:12,parentPid:5,processName:'node.exe',createdAt:'2026-10-13T00:00:00.000Z',missingExecutablePath:true,missingCommandLine:false,missingCreationDate:false,commandLine:'TEST_PRIVATE_COMMAND',executablePath:'TEST_PRIVATE_PATH'};
   mock.exec.mockRejectedValue(Object.assign(new Error('TEST_PRIVATE_EXCEPTION'),{code:1,stderr:`BRIDGE_NATIVE_UNREADABLE_PROCESS ${JSON.stringify(diagnostic)}\r\n    + FullyQualifiedErrorId : Process identity is not readable\r\n`}));

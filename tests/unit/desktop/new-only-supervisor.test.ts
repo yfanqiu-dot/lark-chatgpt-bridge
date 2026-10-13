@@ -49,6 +49,11 @@ it('does not retry an arbitrary cold read failure',async()=>{
   const h=fixture();h.port.coldExit=async()=>{throw Error('TEST_PRIVATE_NATIVE_FAILURE');};
   expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'supervisor_operation_failed'});expect(h.events).toEqual([]);expect(h.forbidden).not.toHaveBeenCalled();
 });
+it('does not treat an unavailable SharedSnapshot as a retryable cold exit read',async()=>{
+  const h=fixture();h.port.coldExit=async()=>{throw new ColdExitObservationUnavailable('SharedSnapshot');};
+  expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'supervisor_operation_failed'});
+  expect(h.events).toEqual([]);expect(h.forbidden).not.toHaveBeenCalled();
+});
 it('does not advance from an unavailable exit recheck after launching the broker',async()=>{
   const h=fixture(),read=h.port.coldExit!;h.port.coldExit=async()=>{if(h.inventory.broker.length)throw new ColdExitObservationUnavailable('ColdSnapshot');return read();};
   expect(await h.run()).toMatchObject({phase:'restored',errorCode:'cold_desktop_reappeared'});expect(h.events).not.toContain('start:host');expect(h.events).not.toContain('start:listener');expect(h.events).toContain('ordinary');expect(h.forbidden).not.toHaveBeenCalled();

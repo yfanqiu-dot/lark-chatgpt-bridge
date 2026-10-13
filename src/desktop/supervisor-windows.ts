@@ -57,12 +57,12 @@ export class WindowsSupervisorControl {
       // Only exact fixed PowerShell error IDs from our pinned inventory
       // reader are retryable. Private error text, denied reads and timeouts
       // remain fatal; unreadable processes are never omitted from inventory.
-      const identityUnavailable = native.code===1 && !native.signal && !stderr.includes('0x80070005') && (action==='ColdSnapshot' || action==='Snapshot')
+      const identityUnavailable = native.code===1 && !native.signal && !stderr.includes('0x80070005') && ['ColdSnapshot','Snapshot','SharedSnapshot'].includes(action)
         && /\+ FullyQualifiedErrorId\s*:\s*(?:A potential runtime process cannot be identified|Potential desktop or App Server is unreadable|Process identity is not readable)\s*(?:\r?\n|$)/.test(stderr);
       const errorCode=identityUnavailable?'native_process_identity_unavailable':stderr.includes('0x80070005')?'native_task_access_denied':'native_control_failed';
       const unreadableProcess=identityUnavailable?unreadableProcessDiagnostic(stderr):undefined;
       try{const directory=await mkdtemp(join(this.evidence,'operation-failure-'));await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action,errorCode,exitCode:typeof native.code==='number'?native.code:null,signal:typeof native.signal==='string'?native.signal:null,stderrBytes:Buffer.byteLength(stderr),stderrSha256:digest(stderr),unreadableProcess,observedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx'});}catch{}
-      if(identityUnavailable)throw new ColdExitObservationUnavailable(action as 'ColdSnapshot'|'Snapshot');
+      if(identityUnavailable)throw new ColdExitObservationUnavailable(action as 'ColdSnapshot'|'Snapshot'|'SharedSnapshot');
       throw error;
     }
     return raw ? stdout : JSON.parse(stdout);
@@ -98,10 +98,22 @@ export class WindowsSupervisorControl {
   }
   async startOrdinary():Promise<void>{await this.call('StartOrdinary');}
   async coldSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory }> { return this.call('ColdSnapshot'); }
-  async sharedSnapshot(): Promise<ColdExitProof & { inventory: SupervisorInventory; endpointOwners:Array<{endpoint:string;listeners:Array<{address:string;pid:number}>}> }> { return this.call('SharedSnapshot'); }
+  private async completeSharedSnapshot(boundedRead:boolean): Promise<ColdExitProof & { inventory: SupervisorInventory; endpointOwners:Array<{endpoint:string;listeners:Array<{address:string;pid:number}>}> }> {
+    // Each attempt is a complete CIM/TCP scan from the pinned reader. Never
+    // combine partial data or reset the caller's <=5s native admission clock.
+    for(let attempt=0;attempt<3;attempt++){
+      try{return await this.call('SharedSnapshot',[],undefined,false,boundedRead);}
+      catch(error){
+        if(!(error instanceof ColdExitObservationUnavailable) || error.action!=='SharedSnapshot' || attempt===2)throw error;
+        await new Promise<void>(done=>setTimeout(done,250));
+      }
+    }
+    throw new Error('Complete shared process inventory unavailable');
+  }
+  async sharedSnapshot(): ReturnType<WindowsSupervisorControl['completeSharedSnapshot']> { return this.completeSharedSnapshot(false); }
   /** For an already pinned <=5s admission scan only. Still hashes the sealed
    * reader/config and queries live CIM/TCP. Never permits a mutation. */
-  async boundedSharedSnapshot():ReturnType<WindowsSupervisorControl['sharedSnapshot']>{return this.call('SharedSnapshot',[],undefined,false,true);}
+  async boundedSharedSnapshot():ReturnType<WindowsSupervisorControl['sharedSnapshot']>{return this.completeSharedSnapshot(true);}
   async backupTask(directory: string): Promise<{ definitionSha256: string; enabled: boolean }> {
     if (!isAbsolute(directory)) throw new Error('Backup directory must be absolute');
     await mkdir(directory, { recursive: false, mode: 0o700 });
