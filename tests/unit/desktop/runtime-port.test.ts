@@ -31,7 +31,7 @@ function harness(recovery=false,channelMode?:'new-only'){
       async protectCapability(path,token){expect(token).toMatch(/^[a-f0-9]{64}$/);await writeFile(path,'ENCRYPTED_TEST_CAPABILITY',{encoding:'utf8',flag:'wx'});events.push('protect');},async unprotectCapability(){events.push('unprotect');return 'a'.repeat(64);},
       async startOrdinary(){events.push('shell');inventory.desktop=[ids.ordinary];}},
     async verify(){return input;},async launch(role,_run,env){runtimeRun=_run;events.push(`launch:${role}`);inventory[role]=[ids[role]];if(role==='host')inventory.desktop=[ids.shared];
-      if(role==='listener'){expect(env.LARK_APP_SECRET).toBe('TEST_MEMORY_SECRET');await writeFile(join(dir,'listener.ready.json'),JSON.stringify({version:1,runId:_run,pid:ids.listener.pid,readyAt:clock,updatedAt:clock,connectionState:'connected',phase:'ready',enabledChatIds:['oc_c']}),'utf8');}
+      if(role==='listener'){expect(env.LARK_APP_SECRET).toBe('TEST_MEMORY_SECRET');expect(env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE).toBe(join(dir,'broker-owner.json'));await writeFile(join(dir,'listener.ready.json'),JSON.stringify({version:1,runId:_run,pid:ids.listener.pid,readyAt:clock,updatedAt:clock,connectionState:'connected',phase:'ready',enabledChatIds:['oc_c']}),'utf8');}
       return ids[role];},
     async command(){events.push('packageRestore');if(packageFails)throw new Error('TEST_PRIVATE_ERROR');inventory.desktop=[ids.ordinary];},
     async secret(){events.push('secret');if(!secret)throw new Error('TEST_PRIVATE_SECRET_ERROR');return 'TEST_MEMORY_SECRET';},

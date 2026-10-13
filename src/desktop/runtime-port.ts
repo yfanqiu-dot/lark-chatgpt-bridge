@@ -30,6 +30,13 @@ export interface RuntimeEffects {
 const json=async(path:string)=>JSON.parse(await readFile(path,'utf8'));
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 const sleep=(ms:number)=>new Promise<void>(done=>setTimeout(done,ms));
+/** A Windows listener without a console must have the original bounded owner
+ * lease. Other roles keep their existing parent/job lifecycle. */
+export function detachOwnedListener(role:'broker'|'host'|'listener',extra:NodeJS.ProcessEnv,directory:string,platform=process.platform):boolean{
+  if(role!=='listener'||platform!=='win32')return false;
+  if(extra.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE!==join(directory,'broker-owner.json'))throw new Error('Detached listener requires its original owner lease');
+  return true;
+}
 /** Concrete cold lifecycle; only an explicitly invoked runtime worker creates
  * it. Never calls closeDesktop, overwrites ledgers or repeats launch intents. */
 export class DesktopRuntimePort implements SupervisorPort {
@@ -123,7 +130,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   async startHost(runId:string){return this.launch('host',runId,{BRIDGE_PACKAGE_BROKER_TOKEN:await this.capability()});}
   async startListener(runId:string){
     if(!this.appSecret)this.appSecret=await this.effects.secret();if(!this.appSecret)throw new Error('Secret provider unavailable');
-    const result=await this.launch('listener',runId,{[this.input.topics.appSecretEnv]:this.appSecret,BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_READY_FILE:join(this.directory,'listener.ready.json')});
+    const result=await this.launch('listener',runId,{[this.input.topics.appSecretEnv]:this.appSecret,BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_READY_FILE:join(this.directory,'listener.ready.json'),BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(this.directory,'broker-owner.json')});
     this.appSecret=undefined;return result;
   }
   private sharedOwned(){if(!this.owned.host || !this.owned.broker)throw new Error('Shared runtime not owned');return {host:this.owned.host,broker:this.owned.broker,...(this.owned.listener?{listener:this.owned.listener}:{})};}
@@ -272,7 +279,7 @@ export async function createWindowsRuntimePort(stage:string,directory:string,roo
       const started=Date.now();
       const args=role==='broker'?['-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned','-File',join(root,'bin/desktop-package-broker-task.ps1'),'-ConnectionFile',host.connectionFile,'-ProtectedTokenFile',join(directory,'broker-capability.dpapi'),'-OwnerLeaseFile',join(directory,'broker-owner.json')]:
         [join(root,`bin/lark-chatgpt-${role==='host'?'host':'topics'}.mjs`),role==='host'?snapshot.spec.hostConfigFile:snapshot.spec.topicConfigFile,role==='host'?'--start':'--run'];
-      const child=spawn(role==='broker'?'powershell.exe':snapshot.spec.legacy.executable,args,{cwd:host.projectRoot,windowsHide:true,stdio:['ignore','ignore','pipe'],env:{...(role==='broker'?windowsPowerShellEnvironment(process.env):cleanDesktopEnvironment(process.env)),...extra}});
+      const child=spawn(role==='broker'?'powershell.exe':snapshot.spec.legacy.executable,args,{cwd:host.projectRoot,windowsHide:true,detached:detachOwnedListener(role,extra,directory),stdio:['ignore','ignore','pipe'],env:{...(role==='broker'?windowsPowerShellEnvironment(process.env):cleanDesktopEnvironment(process.env)),...extra}});
       const stderrHash=createHash('sha256');let stderrBytes=0;
       child.stderr?.on('data',(bytes:Buffer)=>{stderrBytes+=bytes.length;stderrHash.update(bytes);});
       child.once('close',(code,signal)=>{void writeFile(join(directory,`${role}.exit.json`),JSON.stringify({version:1,runId,role,pid:child.pid,code,signal,stderrBytes,stderrSha256:stderrHash.digest('hex'),exitedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx',mode:0o600}).catch(()=>{});});

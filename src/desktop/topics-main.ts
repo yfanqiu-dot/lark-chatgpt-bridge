@@ -98,7 +98,9 @@ async function main(): Promise<void> {
   try{
     await rm(`${config.registryFile}.stop`,{force:true});
     await channel.connect();await cards.start();await router.start();
-    clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>channel.getConnectionStatus()?.state??'unknown');readyResolve();
+    clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>channel.getConnectionStatus()?.state??'unknown',2500,()=>{
+      console.error('Listener supervisor owner lease lost; shutting down.');process.exitCode=1;onSignal();
+    });readyResolve();
     process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);
     stopWatcher=setInterval(()=>{void readFile(`${config.registryFile}.stop`,'utf8').then(shutdown).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT'){console.error('Topic bridge shutdown failed:',String(e));process.exitCode=1;}});},1000);
     let syncing=false;
