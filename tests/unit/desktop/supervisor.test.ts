@@ -119,6 +119,11 @@ it('locks a journal against two writers and rejects malformed state before any O
 
 function coldHarness() {
   const h=harness(); let stop=false, tick=Date.now(), linger=false, reads=0;
+  // Every observation must use the injected clock. Wall-clock file IO on a
+  // loaded runner cannot turn an otherwise valid ordinary proof into a future
+  // timestamp relative to the frozen supervisor clock.
+  const ordinary=h.port.ordinary;
+  h.port.ordinary=async()=>({...await ordinary(),verifiedAt:tick});
   h.port.coldExit=async () => { h.events.push('coldExit'); reads++; return {verifiedAt:tick,complete:true,desktopRelated:linger ? [identity(90)] : structuredClone(h.inventory.desktop)}; };
   h.port.sharedIdle=async () => { h.events.push('sharedIdle'); return {verifiedAt:tick,desktop:h.inventory.desktop[0]!,allDesktopTasksIdle:true,toolsExact:true,
     tasks:bindings.map(b => ({...b,status:'idle',queueCount:0,waitingApproval:false}))}; };
