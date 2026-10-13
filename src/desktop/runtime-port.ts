@@ -132,13 +132,16 @@ export class DesktopRuntimePort implements SupervisorPort {
     await writeFile(join(this.directory,`shared-idle-${++this.sharedObservation}.json`),JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
     if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');return r.proof;
   }
-  private async listenerReady(){
+  private async listenerReadiness(){
     const r=await json(join(this.directory,'listener.ready.json'));
-    return r.version===1 && r.runId===this.runId && r.pid===this.owned.listener?.pid && r.phase==='ready'
-      && r.connectionState==='connected' && Number.isFinite(r.updatedAt) && r.updatedAt<=this.effects.now()+1000 && this.effects.now()-r.updatedAt<=10_000
-      && Number.isFinite(r.readyAt) && r.readyAt<=this.effects.now()+1000 && r.readyAt>=Date.parse(this.owned.listener!.createdAt)-1000
-      && JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds);
+    // Persist fixed boolean checks only, never an untrusted heartbeat or lease.
+    return {versionMatches:r.version===1,runMatches:r.runId===this.runId,pidMatches:r.pid===this.owned.listener?.pid,
+      phaseReady:r.phase==='ready',connected:r.connectionState==='connected',
+      heartbeatFresh:Number.isFinite(r.updatedAt) && r.updatedAt<=this.effects.now()+1000 && this.effects.now()-r.updatedAt<=10_000,
+      readyTimeValid:Number.isFinite(r.readyAt) && r.readyAt<=this.effects.now()+1000 && !!this.owned.listener && r.readyAt>=Date.parse(this.owned.listener.createdAt)-1000,
+      scopeMatches:JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds)};
   }
+  private async listenerReady(){return Object.values(await this.listenerReadiness()).every(Boolean);}
   async ready(){
     const deadline=this.effects.now()+130_000;
     do{
@@ -151,9 +154,25 @@ export class DesktopRuntimePort implements SupervisorPort {
     }while(this.effects.now()<deadline);
     throw new Error('Runtime readiness deadline exceeded');
   }
+  private async healthFailure(reason:string,details?:{stage:'retirement'|'shared_context'|'listener'|'locks';errorSha256?:string;checks?:Awaited<ReturnType<DesktopRuntimePort['listenerReadiness']>>}){
+    // Keep the first failed observation. Diagnostics never relax fail-closed
+    // health, retry reads/mutations, or expose raw errors/private capabilities.
+    try{await writeFile(join(this.directory,'runtime-health.failure.json'),JSON.stringify({version:1,runId:this.runId,
+      observedAt:this.effects.now(),reason,...details}),{encoding:'utf8',flag:'wx',mode:0o600});}catch{}
+    return false;
+  }
   async health(){
-    if(this.lost)return false;
-    try{if(this.channelMode==='new-only')await this.legacyRetirement();await this.effects.context(this.sharedOwned());return !!this.owned.listener && await this.listenerReady() && await this.effects.locksHeld();}catch{return false;}
+    if(this.lost)return this.healthFailure('broker_owner_lease_lost');
+    let stage:'retirement'|'shared_context'|'listener'|'locks'='retirement';
+    try{
+      if(this.channelMode==='new-only')await this.legacyRetirement();
+      stage='shared_context';await this.effects.context(this.sharedOwned());
+      stage='listener';if(!this.owned.listener)return this.healthFailure('listener_not_owned');
+      const checks=await this.listenerReadiness();
+      if(!Object.values(checks).every(Boolean))return this.healthFailure('listener_not_ready',{stage,checks});
+      stage='locks';if(!await this.effects.locksHeld())return this.healthFailure('runtime_locks_lost',{stage});
+      return true;
+    }catch(e){return this.healthFailure('health_read_failed',{stage,errorSha256:sha(e instanceof Error?e.message:'NonError')});}
   }
   private async stop(role:'host'|'listener',identity:ProcessIdentity){
     await this.effects.control.testIdentity(role,identity);

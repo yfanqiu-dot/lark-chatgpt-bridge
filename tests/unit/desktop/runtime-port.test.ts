@@ -1,5 +1,6 @@
 import { beforeEach,afterEach,expect,it } from 'vitest';
-import { mkdtemp,readFile,rm,writeFile } from 'node:fs/promises';
+import { mkdtemp,mkdir,readFile,rm,writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DesktopRuntimePort,type RuntimeEffects } from '../../../src/desktop/runtime-port';
@@ -92,6 +93,46 @@ it.each(['stale','disconnected','locks'])('fails health on %s even when the list
   if(condition==='locks')h.badLocks();
   if(condition==='disconnected'){const path=join(dir,'listener.ready.json'),r=JSON.parse(await readFile(path,'utf8'));r.connectionState='reconnecting';r.phase='disconnected';await writeFile(path,JSON.stringify(r),'utf8');}
   expect(await h.port.health()).toBe(false);
+});
+it('keeps healthy checks read-only without creating a failure diagnostic',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.startListener(runId);
+  const before=h.events.filter(e=>e.startsWith('launch:'));expect(await h.port.health()).toBe(true);
+  await expect(readFile(join(dir,'runtime-health.failure.json'),'utf8')).rejects.toMatchObject({code:'ENOENT'});
+  expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(before);
+});
+it('preserves the first failing read stage without disclosing private error text or retrying',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.startListener(runId);
+  let reads=0;h.effects.context=async()=>{reads++;throw Error('TEST_PRIVATE_HEALTH_SECRET');};
+  expect(await h.port.health()).toBe(false);expect(reads).toBe(1);
+  const path=join(dir,'runtime-health.failure.json'),bytes=await readFile(path,'utf8');
+  expect(JSON.parse(bytes)).toEqual({version:1,runId,observedAt:h.clock(),reason:'health_read_failed',stage:'shared_context',errorSha256:createHash('sha256').update('TEST_PRIVATE_HEALTH_SECRET').digest('hex')});
+  expect(bytes).not.toContain('TEST_PRIVATE_HEALTH_SECRET');
+  h.effects.context=async()=>{throw Error('SECOND_PRIVATE_ERROR');};expect(await h.port.health()).toBe(false);
+  expect(await readFile(path,'utf8')).toBe(bytes);expect(h.events).not.toContain('startLegacy');
+});
+it('records only boolean heartbeat checks for stale listener readiness',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.startListener(runId);
+  const path=join(dir,'listener.ready.json'),r=JSON.parse(await readFile(path,'utf8'));
+  r.privateExtra='TEST_PRIVATE_HEARTBEAT';await writeFile(path,JSON.stringify(r),'utf8');h.advance(11000);
+  expect(await h.port.health()).toBe(false);const bytes=await readFile(join(dir,'runtime-health.failure.json'),'utf8'),failure=JSON.parse(bytes);
+  expect(failure).toMatchObject({reason:'listener_not_ready',stage:'listener',checks:{heartbeatFresh:false,scopeMatches:true,connected:true}});
+  expect(Object.values(failure.checks).every(v=>typeof v==='boolean')).toBe(true);expect(bytes).not.toContain('TEST_PRIVATE_HEARTBEAT');
+});
+it('records unavailable retirement while retaining new-only legacy protections',async()=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];
+  h.effects.control.legacyRetirement=async()=>{throw Error('TEST_PRIVATE_RETIREMENT');};
+  expect(await h.port.health()).toBe(false);expect(JSON.parse(await readFile(join(dir,'runtime-health.failure.json'),'utf8'))).toMatchObject({reason:'health_read_failed',stage:'retirement'});
+  expect(h.events).not.toContain('startLegacy');expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual([]);
+});
+it('distinguishes failed lock reads from an observed lost runtime lock',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.startListener(runId);
+  h.effects.locksHeld=async()=>{throw Error('TEST_PRIVATE_LOCK_ERROR');};expect(await h.port.health()).toBe(false);
+  expect(JSON.parse(await readFile(join(dir,'runtime-health.failure.json'),'utf8'))).toMatchObject({reason:'health_read_failed',stage:'locks'});
+});
+it('fails closed even when the diagnostic destination cannot be written',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.startListener(runId);
+  await mkdir(join(dir,'runtime-health.failure.json'));h.badContext();expect(await h.port.health()).toBe(false);
+  expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(['launch:broker','launch:host','launch:listener']);
 });
 it('preserves package failure and verifies a separate shell restore before old consumer restoration',async()=>{
   const h=harness(true);h.packageFails();const proof=await h.port.ordinary();expect(proof.toolsExact).toBe(true);expect(h.events.filter(e=>['packageRestore','shell'].includes(e))).toEqual(['packageRestore','shell']);
