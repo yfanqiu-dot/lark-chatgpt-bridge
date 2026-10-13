@@ -10,6 +10,19 @@ import { windowsPowerShellEnvironment } from './windows-tools';
 
 const exec = promisify(execFile);
 const digest = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
+function unreadableProcessDiagnostic(stderr:string){
+  const line=stderr.split(/\r?\n/).find(value=>value.startsWith('BRIDGE_NATIVE_UNREADABLE_PROCESS '));
+  if(!line || line.length>2048)return;
+  try{
+    const value=JSON.parse(line.slice('BRIDGE_NATIVE_UNREADABLE_PROCESS '.length));
+    if(value.version!==1 || !Number.isInteger(value.pid) || value.pid<1 || value.pid>0xffffffff || !Number.isInteger(value.parentPid) || value.parentPid<0 || value.parentPid>0xffffffff
+      || typeof value.processName!=='string' || !/^[A-Za-z0-9_.-]{1,64}\.exe$/.test(value.processName)
+      || !['missingExecutablePath','missingCommandLine','missingCreationDate'].every(key=>typeof value[key]==='boolean')
+      || value.createdAt!==null && (typeof value.createdAt!=='string' || value.createdAt.length>40 || !Number.isFinite(Date.parse(value.createdAt))))return;
+    return {pid:value.pid,parentPid:value.parentPid,processName:value.processName,createdAt:value.createdAt,
+      missingExecutablePath:value.missingExecutablePath,missingCommandLine:value.missingCommandLine,missingCreationDate:value.missingCreationDate};
+  }catch{return;}
+}
 /** Windows adapter primitives. The native idle gate and production launch
  * lifecycle are deliberately required before wiring destructive operations. */
 export class WindowsSupervisorControl {
@@ -47,13 +60,25 @@ export class WindowsSupervisorControl {
       const identityUnavailable = native.code===1 && !native.signal && !stderr.includes('0x80070005') && (action==='ColdSnapshot' || action==='Snapshot')
         && /\+ FullyQualifiedErrorId\s*:\s*(?:A potential runtime process cannot be identified|Potential desktop or App Server is unreadable|Process identity is not readable)\s*(?:\r?\n|$)/.test(stderr);
       const errorCode=identityUnavailable?'native_process_identity_unavailable':stderr.includes('0x80070005')?'native_task_access_denied':'native_control_failed';
-      try{const directory=await mkdtemp(join(this.evidence,'operation-failure-'));await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action,errorCode,exitCode:typeof native.code==='number'?native.code:null,signal:typeof native.signal==='string'?native.signal:null,stderrBytes:Buffer.byteLength(stderr),stderrSha256:digest(stderr),observedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx'});}catch{}
+      const unreadableProcess=identityUnavailable?unreadableProcessDiagnostic(stderr):undefined;
+      try{const directory=await mkdtemp(join(this.evidence,'operation-failure-'));await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action,errorCode,exitCode:typeof native.code==='number'?native.code:null,signal:typeof native.signal==='string'?native.signal:null,stderrBytes:Buffer.byteLength(stderr),stderrSha256:digest(stderr),unreadableProcess,observedAt:new Date().toISOString()}),{encoding:'utf8',flag:'wx'});}catch{}
       if(identityUnavailable)throw new ColdExitObservationUnavailable(action as 'ColdSnapshot'|'Snapshot');
       throw error;
     }
     return raw ? stdout : JSON.parse(stdout);
   }
-  async inventory(): Promise<SupervisorInventory> { return this.call('Snapshot'); }
+  async inventory(): Promise<SupervisorInventory> {
+    // At most three pinned, read-only scans. Do not retry a mutation or return
+    // a partial inventory; persistent unreadability remains a hard failure.
+    for(let attempt=0;attempt<3;attempt++){
+      try{return await this.call('Snapshot');}
+      catch(error){
+        if(!(error instanceof ColdExitObservationUnavailable) || error.action!=='Snapshot' || attempt===2)throw error;
+        await new Promise<void>(done=>setTimeout(done,250));
+      }
+    }
+    throw new Error('Complete process inventory unavailable');
+  }
   async legacyRetirement():Promise<LegacyRetirementProof>{
     const p=await this.call('TaskRetirement');
     if(p.version!==1 || !Number.isFinite(p.observedAt) || typeof p.retired!=='boolean' || typeof p.taskPresent!=='boolean' || typeof p.taskEnabled!=='boolean'

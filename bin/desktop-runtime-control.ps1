@@ -19,6 +19,15 @@ function Get-Sha($text){
   $taskHash=[Security.Cryptography.SHA256]::Create()
   try{return ([BitConverter]::ToString($taskHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}finally{$taskHash.Dispose()}
 }
+function Throw-UnreadableProcess($process,[string]$reason){
+  # Only process identifiers and missing-field flags. Never emit command text,
+  # executable paths, environment, user identity, or capability arguments.
+  $taskCreatedAt=$null
+  if($process.CreationDate -is [DateTime]){$taskCreatedAt=$process.CreationDate.ToUniversalTime().ToString('o')}
+  $taskOpaque=@{version=1;pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;processName=[string]$process.Name;createdAt=$taskCreatedAt;missingExecutablePath=(!$process.ExecutablePath);missingCommandLine=(!$process.CommandLine);missingCreationDate=($null -eq $taskCreatedAt)}
+  [Console]::Error.WriteLine('BRIDGE_NATIVE_UNREADABLE_PROCESS '+($taskOpaque|ConvertTo-Json -Compress))
+  throw $reason
+}
 function Has-Argument($command,$value){
   $taskPattern='(?:^|\s)(?:"'+[regex]::Escape($value)+'"|'+[regex]::Escape($value)+')(?:\s|$)'
   return [regex]::IsMatch($command,$taskPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
@@ -34,7 +43,7 @@ function Get-Role($process){
   return $null
 }
 function Get-Identity($process){
-  if(!$process.ExecutablePath -or !$process.CommandLine){throw 'Process identity is not readable'}
+  if(!$process.ExecutablePath -or !$process.CommandLine -or !($process.CreationDate -is [DateTime])){Throw-UnreadableProcess $process 'Process identity is not readable'}
   return @{pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;createdAt=$process.CreationDate.ToUniversalTime().ToString('o');executable=[string]$process.ExecutablePath;commandLineSha256=(Get-Sha $process.CommandLine)}
 }
 if($Action -eq 'ReadOwner'){
@@ -66,7 +75,7 @@ if($Action -in @('ProtectCapability','UnprotectCapability')){
 function Get-ColdRelated($processes){
   $taskRelated=[Collections.Generic.HashSet[int]]::new()
   foreach($taskProcess in $processes){
-    if($taskProcess.Name -in @('ChatGPT.exe','codex.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){throw 'Potential desktop or App Server is unreadable'}
+    if($taskProcess.Name -in @('ChatGPT.exe','codex.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'Potential desktop or App Server is unreadable'}
     # Count every desktop child and any Codex App Server, not just the selected
     # install. A renderer left after main-window exit is not a cold baseline.
     if($taskProcess.Name -eq 'ChatGPT.exe' -or ($taskProcess.Name -eq 'codex.exe' -and (Has-Argument $taskProcess.CommandLine 'app-server'))){[void]$taskRelated.Add([int]$taskProcess.ProcessId)}
@@ -214,7 +223,7 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   $taskProcesses=@(Get-CimInstance Win32_Process)
   $taskResult=@{legacy=@();desktop=@();host=@();listener=@();broker=@()}
   foreach($taskProcess in @($taskProcesses | Where-Object {$_.Name -in @('node.exe','ChatGPT.exe','powershell.exe','pwsh.exe')})){
-    if($taskProcess.Name -in @('node.exe','ChatGPT.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){throw 'A potential runtime process cannot be identified'}
+    if($taskProcess.Name -in @('node.exe','ChatGPT.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'A potential runtime process cannot be identified'}
     $taskRole=Get-Role $taskProcess
     if($taskRole){$taskResult[$taskRole]+=,(Get-Identity $taskProcess)}
   }
