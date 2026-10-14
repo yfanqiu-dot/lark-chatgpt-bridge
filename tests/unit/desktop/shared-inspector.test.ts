@@ -49,12 +49,16 @@ it.each(['gui','backend','host','broker','legacy','foreign','incomplete','stale'
   if(kind==='duplicatePort')scan.endpointOwners[1].listeners.push({address:'127.0.0.1',pid:43});
   await expect(readOwnedSharedIdentity(tmpdir(),control,owned,expected)).rejects.toThrow();
 });
-it.each(['exact','mismatch','withdrawn','changed'])('requires an actual %s catalog and the same published lease after settings refresh',async kind=>{
+it.each(['exact','heartbeat','mismatch','withdrawn','changed','toolNamesChanged'])('requires an actual %s catalog and the same stable lease after settings refresh',async kind=>{
+  const initialVerifiedAt=lease.verifiedAt;
   if(kind==='mismatch')mocked.catalog.mockResolvedValue(['list_projects','unexpected']);
   if(kind==='withdrawn')mocked.catalog.mockImplementation(async()=>{mocked.read.mockRejectedValue(Object.assign(Error('withdrawn'),{code:'ENOENT'}));return ['list_projects'];});
   if(kind==='changed')mocked.catalog.mockImplementation(async()=>{lease.endpoint='ws://127.0.0.1:10000/';return ['list_projects'];});
+  if(kind==='heartbeat')mocked.catalog.mockImplementation(async()=>{lease.verifiedAt=Date.now()+1;return ['list_projects'];});
+  if(kind==='toolNamesChanged')mocked.catalog.mockImplementation(async()=>{lease.toolNames=['list_projects','unexpected'];return ['list_projects'];});
   const result=readOwnedSharedContext(tmpdir(),control,owned,true,undefined,true);
-  if(kind==='exact')expect(await result).toMatchObject({leaseVerifiedAt:lease.verifiedAt});else await expect(result).rejects.toThrow();
+  if(kind==='exact')expect(await result).toMatchObject({leaseVerifiedAt:initialVerifiedAt});
+  else if(kind==='heartbeat')expect(await result).toMatchObject({leaseVerifiedAt:initialVerifiedAt});else await expect(result).rejects.toThrow();
   expect(mocked.catalog).toHaveBeenCalledOnce();
 });
 it.each(['incomplete','stale'])('still rejects a complete-reader result that is %s before any native task read',async kind=>{

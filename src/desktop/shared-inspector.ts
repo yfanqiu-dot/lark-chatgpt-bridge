@@ -45,7 +45,9 @@ export async function readOwnedSharedContext(stage:string, control:WindowsSuperv
     const names=await desktopToolCatalog(join(dirname(host.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),lease.pipe);
     if(JSON.stringify([...names].sort())!==JSON.stringify([...snapshot.spec.expectedToolNames].sort()))throw Error('Refreshed tool catalog mismatch');
     const current=JSON.parse(await readFile(host.connectionFile,'utf8'));
-    if(JSON.stringify(current)!==JSON.stringify(lease))throw Error('Connection changed during catalog refresh');
+    const stableLease=(value:Record<string,unknown>)=>{const {verifiedAt:_verifiedAt,...identity}=value;return JSON.stringify(identity);};
+    if(!Number.isFinite(current.verifiedAt)||current.verifiedAt<Date.now()-60_000||current.verifiedAt>Date.now()+1000
+      ||current.verifiedAt<lease.verifiedAt||stableLease(current)!==stableLease(lease))throw Error('Connection changed during catalog refresh');
   }
   return {host:owned.host,backend:candidates[0]!,desktop:i.desktop[0]!,endpoint:host.endpoint,backendEndpoint:host.backendEndpoint,
     leaseVerifiedAt:lease.verifiedAt,desktopVersion:lease.desktopVersion,codexSha256:lease.codexSha256,toolNames:lease.toolNames,
