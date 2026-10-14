@@ -225,12 +225,19 @@ export class DesktopSupervisor {
     return exited;
   }
   private async phase(s: SupervisorState, phase: SupervisorPhase): Promise<void> { s.phase = phase; await this.journal.save(s); }
-  private async launch(s: SupervisorState, role: 'broker' | 'host' | 'listener'): Promise<void> {
+  private async launch(s: SupervisorState, role: 'broker' | 'host' | 'listener', stopRequested?: () => Promise<boolean>): Promise<void> {
     await this.phase(s, `starting_${role}`);
     const before = await this.inventory();
     if (before[role].length || (role === 'listener' && before.legacy.length)) fail('consumer_or_role_conflict');
-    if (role === 'listener' && s.startMode === 'cold' && (!s.lastIdleProof || this.now() - s.lastIdleProof.verifiedAt > 5000
-      || before.desktop.length !== 1 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop))) fail('cold_shared_proof_stale_or_changed');
+    if (role === 'listener' && s.startMode === 'cold') {
+      // Inventory and journal work can consume the short proof freshness
+      // window. Confirm the same adopted desktop first, then take the final
+      // native idle proof immediately before creating the listener.
+      if (!s.lastIdleProof || before.desktop.length !== 1 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop)) fail('cold_shared_proof_stale_or_changed');
+      await this.idle(before.desktop[0]!, s, true);
+      if (await stopRequested?.()) fail('stop_requested');
+      if (!s.lastIdleProof || this.now() - s.lastIdleProof.verifiedAt > 5000 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop)) fail('cold_shared_proof_stale_or_changed');
+    }
     const identity = await (role === 'broker' ? this.port.startBroker(s.runId) : role === 'host' ? this.port.startHost(s.runId) : this.port.startListener(s.runId));
     if (!validIdentity(identity)) fail('launch_identity_invalid');
     s.owned[role] = structuredClone(identity); await this.journal.save(s);
@@ -379,7 +386,7 @@ export class DesktopSupervisor {
           // Recheck after bindings so that the listener uses a fresh proof.
           await this.idle(shared.desktop[0]!, s, true);
         }
-        await this.launch(s, 'listener'); await this.port.ready();
+        await this.launch(s, 'listener', stopRequested); await this.port.ready();
         await this.phase(s, 'running');
         while (!await stopRequested()) {
           if(await this.managedDesktopQuit(s,stopRequested))break;

@@ -131,7 +131,7 @@ function coldHarness() {
     new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings,()=>tick).run(async()=>stop,pause,{startMode:'cold',exitTimeoutMs:20});
   return {...h,run,stop:()=>{stop=true;},advance:(ms=21)=>{tick+=ms;},linger:()=>{linger=true;},get reads(){return reads;}};
 }
-it('cold mode waits for a human exit, checks shared tasks twice and never closes the old desktop', async () => {
+it('cold mode waits for a human exit, rechecks shared tasks at listener creation and never closes the old desktop', async () => {
   const h=coldHarness(); let waiting=false;
   const result=await h.run(async()=>{
     if(h.inventory.desktop[0]?.pid===2) { waiting=true; expect(JSON.parse(await readFile(h.path,'utf8')).phase).toBe('waiting_desktop_exit');
@@ -140,7 +140,7 @@ it('cold mode waits for a human exit, checks shared tasks twice and never closes
   });
   expect(waiting).toBe(true); expect(result).toMatchObject({startMode:'cold',phase:'restored',desktopCloseAttempted:false,desktopRestoreRequired:true,lastColdExitProof:{desktopRelated:[]}});
   expect(h.events).not.toContain('idle'); expect(h.events).not.toContain('closeDesktop');
-  expect(h.events.filter(e=>e==='sharedIdle')).toHaveLength(2);
+  expect(h.events.filter(e=>e==='sharedIdle')).toHaveLength(3);
   expect(h.events.indexOf('sharedIdle')).toBeLessThan(h.events.indexOf('startListener'));
   expect(h.events.indexOf('ordinary')).toBeLessThan(h.events.indexOf('restoreLegacy'));
 });
@@ -192,9 +192,34 @@ it('cold recovery restores the desktop even when no automatic close was attempte
   expect(await h.run()).toMatchObject({phase:'restored',startMode:'cold',desktopCloseAttempted:false,desktopRestoreRequired:true});
   expect(h.events.some(e=>e.startsWith('start'))).toBe(false);expect(h.events.indexOf('ordinary')).toBeLessThan(h.events.indexOf('restoreLegacy'));
 });
-it('blocks listener startup when the final shared proof becomes stale during inventory',async()=>{
+it('refreshes the shared idle proof after slow listener inventory',async()=>{
   const h=coldHarness(), inventory=h.port.inventory;let proofs=0;
   const idle=h.port.sharedIdle!;h.port.sharedIdle=async()=>{proofs++;return idle();};
   h.port.inventory=async()=>{if(proofs===2){h.advance(6000);proofs++;}return inventory();};
-  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'cold_shared_proof_stale_or_changed'});expect(h.events).not.toContain('startListener');
+  const result=await h.run();expect(result.phase).toBe('restored');expect(result.errorCode).toBeUndefined();expect(h.events).toContain('startListener');expect(h.events.filter(e=>e==='sharedIdle')).toHaveLength(3);
+});
+it.each(['busy','queued','approval','tools','identity','stale'])('blocks listener when the final admission observes %s',async condition=>{
+  const h=coldHarness(), idle=h.port.sharedIdle!;let proofs=0;
+  h.port.sharedIdle=async()=>{
+    const p=await idle();if(++proofs!==3)return p;
+    if(condition==='busy')p.allDesktopTasksIdle=false;
+    if(condition==='queued')p.tasks[0]!.queueCount=1;
+    if(condition==='approval')p.tasks[0]!.waitingApproval=true;
+    if(condition==='tools')p.toolsExact=false;
+    if(condition==='identity')p.desktop=identity(99);
+    if(condition==='stale')p.verifiedAt-=6000;
+    return p;
+  };
+  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'idle_proof_rejected'});expect(h.events).not.toContain('startListener');
+});
+it('refuses a replaced desktop before refreshing final admission',async()=>{
+  const h=coldHarness(), inventory=h.port.inventory,idle=h.port.sharedIdle!;let proofs=0,replaced=false;
+  h.port.sharedIdle=async()=>{proofs++;return idle();};
+  h.port.inventory=async()=>{if(proofs===2&&!replaced){replaced=true;h.inventory.desktop=[identity(99)];}return inventory();};
+  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'cold_shared_proof_stale_or_changed'});expect(h.events).not.toContain('startListener');expect(proofs).toBe(2);
+});
+it('honors cancellation during final native admission before creating a listener',async()=>{
+  const h=coldHarness(), idle=h.port.sharedIdle!;let proofs=0;
+  h.port.sharedIdle=async()=>{const p=await idle();if(++proofs===3)h.stop();return p;};
+  expect(await h.run()).toMatchObject({phase:'restored',errorCode:'stop_requested'});expect(h.events).not.toContain('startListener');
 });
