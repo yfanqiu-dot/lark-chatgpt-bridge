@@ -6,7 +6,9 @@ import { BrokerOwnerLease } from './broker-lease';
 import { sameProcess,validRetirementProof,type SupervisorPort,type ProcessIdentity,type SupervisorState,type OrdinaryProof } from './supervisor';
 import { verifyDeployment,pendingApprovalChats } from './deployment';
 import { WindowsSupervisorControl } from './supervisor-windows';
-import { inspectOwnedShared,readOwnedSharedContext } from './shared-inspector';
+import { inspectOwnedShared,readOwnedSharedContext,readOwnedSharedIdentity } from './shared-inspector';
+import type {SharedContext} from './shared-idle';
+import {writeFileAtomic} from '../platform/atomic-write';
 import { desktopPipes,desktopToolCatalog,cleanDesktopEnvironment,windowsPowerShellEnvironment } from './windows-tools';
 import { execFile,spawn,type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -21,7 +23,8 @@ export interface RuntimeEffects {
   command(args:string[],env:NodeJS.ProcessEnv):Promise<void>;
   secret():Promise<string>;
   shared(owned:{host:ProcessIdentity;broker:ProcessIdentity}):ReturnType<typeof inspectOwnedShared>;
-  context(owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity}):ReturnType<typeof readOwnedSharedContext>;
+  context(owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},refreshCatalog?:boolean):ReturnType<typeof readOwnedSharedContext>;
+  configurationIdentity?(owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},expected:SharedContext):Promise<void>;
   ordinaryTools(desktop:ProcessIdentity):Promise<boolean>;
   locksHeld():Promise<boolean>;
   now():number;
@@ -48,6 +51,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   private lost=false;
   private sharedObservation=0;
   private sharedDesktop?:ProcessIdentity;
+  private lastSharedContext?:SharedContext;
   private retirementDefinition?:{taskPresent:boolean;definitionSha256:string};
   constructor(private readonly input:Deployment,readonly directory:string,private readonly owner:ProcessIdentity,
     private readonly effects:RuntimeEffects, recovery?:SupervisorState,private readonly channelMode?:'new-only'){
@@ -178,7 +182,7 @@ export class DesktopRuntimePort implements SupervisorPort {
       const i=await this.inventory();
       if(i.legacy.length || !this.owned.host || !this.owned.broker || i.host.length!==1 || i.broker.length!==1
         || !sameProcess(i.host[0]!,this.owned.host) || !sameProcess(i.broker[0]!,this.owned.broker))throw new Error('Owned runtime changed during readiness');
-      try{await this.effects.context(this.sharedOwned());if(!this.owned.listener || await this.listenerReady() && await this.effects.locksHeld())return;}catch{}
+      try{this.lastSharedContext=await this.effects.context(this.sharedOwned());if(!this.owned.listener || await this.listenerReady() && await this.effects.locksHeld())return;}catch{}
       await this.effects.pause();
     }while(this.effects.now()<deadline);
     throw new Error('Runtime readiness deadline exceeded');
@@ -190,12 +194,63 @@ export class DesktopRuntimePort implements SupervisorPort {
       observedAt:this.effects.now(),reason,...details}),{encoding:'utf8',flag:'wx',mode:0o600});}catch{}
     return false;
   }
+  private missingConnection(error:unknown):boolean{
+    const e=error as NodeJS.ErrnoException;return e?.code==='ENOENT'&&e.path===this.input.host.connectionFile;
+  }
+  private validConfigurationWithdrawal(value:any,expected:SharedContext):boolean{
+    const r=value?.readiness,now=this.effects.now();
+    return value?.version===1&&value.runId===this.runId&&value.hostPid===this.owned.host?.pid&&value.reason==='desktop_readiness_changed'
+      &&Number.isFinite(value.observedAt)&&value.observedAt>=expected.leaseVerifiedAt&&value.observedAt<=now+1000&&now-value.observedAt<40000
+      &&r?.desktopConnected===true&&r.initialized===true&&r.projectsRead===true&&r.configurationFailures===0&&Number.isSafeInteger(r.revision)&&r.revision>0
+      &&/^(request|response) (config\/batchWrite|config\/value\/write|experimentalFeature\/enablement\/set)$/.test(r.lastChange??'')
+      &&Array.isArray(r.pendingConfiguration)&&r.pendingConfiguration.every((m:unknown)=>['config/batchWrite','config/value/write','experimentalFeature/enablement/set'].includes(m as string));
+  }
+  private async healthContext():Promise<void>{
+    try{this.lastSharedContext=await this.effects.context(this.sharedOwned());return;}catch(firstError){
+      const expected=this.lastSharedContext;
+      if(!this.missingConnection(firstError)||this.channelMode!=='new-only'||!this.effects.configurationIdentity||!expected?.desktop||!expected.backend
+        ||!expected.packageIdentityVerified||!expected.endpointOwnershipVerified||!this.sharedDesktop||!sameProcess(expected.desktop,this.sharedDesktop)||!this.owned.listener)throw firstError;
+      // Withdrawal deliberately removes admission before publishing diagnostics.
+      // Allow one publication recheck, never admit using the cached context.
+      let first:any;
+      try{first=await json(`${this.input.host.connectionFile}.invalidation.json`);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw firstError;}
+      if(!first||first.observedAt<expected.leaseVerifiedAt){
+        if(this.lost)throw firstError;await this.effects.pause();
+        try{first=await json(`${this.input.host.connectionFile}.invalidation.json`);}catch{throw firstError;}
+      }
+      if(!this.validConfigurationWithdrawal(first,expected))throw firstError;
+      // Anchor to the first withdrawal, not each subsequent settings write.
+      const until=first.observedAt+40000,trace={version:1,runId:this.runId,hostPid:this.owned.host!.pid,firstObservedAt:first.observedAt,until,
+        originalErrorSha256:sha(firstError instanceof Error?firstError.message:'NonError'),lastChange:first.readiness.lastChange};
+      const report=async(phase:string,error?:unknown)=>{try{await writeFileAtomic(join(this.directory,'runtime-health.configuration-refresh.json'),JSON.stringify({...trace,phase,observedAt:this.effects.now(),...(error?{errorSha256:sha(error instanceof Error?error.message:'NonError')}:{})}));}catch{}};
+      await report('waiting_for_fresh_connection');
+      try{
+        while(this.effects.now()<until){
+          if(this.lost)throw Error('Configuration wait owner lease lost');
+          const current=await json(`${this.input.host.connectionFile}.invalidation.json`);
+          if(!this.validConfigurationWithdrawal(current,expected))throw Error('Configuration withdrawal changed or failed');
+          await this.legacyRetirement();await this.effects.configurationIdentity(this.sharedOwned(),expected);
+          if(!await this.effects.locksHeld())throw Error('Configuration wait runtime lock lost');
+          try{
+            const fresh=await this.effects.context(this.sharedOwned(),true);
+            if(!sameProcess(fresh.host,expected.host)||!sameProcess(fresh.desktop,expected.desktop)||!sameProcess(fresh.backend,expected.backend)
+              ||fresh.endpoint!==expected.endpoint||fresh.backendEndpoint!==expected.backendEndpoint||fresh.desktopVersion!==expected.desktopVersion||fresh.codexSha256!==expected.codexSha256
+              ||!fresh.packageIdentityVerified||!fresh.endpointOwnershipVerified||fresh.leaseVerifiedAt<first.observedAt||fresh.leaseVerifiedAt>this.effects.now()+1000||this.effects.now()-fresh.leaseVerifiedAt>60000
+              ||JSON.stringify([...fresh.toolNames].sort())!==JSON.stringify([...this.input.snapshot.spec.expectedToolNames].sort())||this.effects.now()>=until)throw Error('Configuration wait fresh context differs from original admission');
+            this.lastSharedContext=fresh;await report('fresh_connection_verified');return;
+          }catch(e){if(!this.missingConnection(e))throw e;}
+          await this.effects.pause();
+        }
+        throw Error('Configuration refresh exceeded bounded window');
+      }catch(e){await report('failed',e);throw e;}
+    }
+  }
   async health(){
     if(this.lost)return this.healthFailure('broker_owner_lease_lost');
     let stage:'retirement'|'shared_context'|'listener'|'locks'='retirement';
     try{
       if(this.channelMode==='new-only')await this.legacyRetirement();
-      stage='shared_context';await this.effects.context(this.sharedOwned());
+      stage='shared_context';await this.healthContext();
       stage='listener';if(!this.owned.listener)return this.healthFailure('listener_not_owned');
       const checks=await this.listenerReadiness();
       if(!Object.values(checks).every(Boolean))return this.healthFailure('listener_not_ready',{stage,checks});
@@ -334,7 +389,7 @@ export async function createWindowsRuntimePort(stage:string,directory:string,roo
         child.stdin!.end(JSON.stringify({protocolVersion:1,provider:'bridge',ids:[id]}));
       });
     },
-    shared:owned=>inspectOwnedShared(stage,control,owned),context:owned=>readOwnedSharedContext(stage,control,owned),
+    shared:owned=>inspectOwnedShared(stage,control,owned),context:(owned,refreshCatalog)=>readOwnedSharedContext(stage,control,owned,true,undefined,refreshCatalog),configurationIdentity:(owned,expected)=>readOwnedSharedIdentity(stage,control,owned,expected),
     locksHeld:async()=>await lockfile.check(host.connectionFile,{realpath:false}) && await lockfile.check(topics.registryFile,{realpath:false}),
     async ordinaryTools(desktop){
       try{await control.testIdentity('desktop',desktop);const pipes=await desktopPipes(desktop.pid,host.desktopExe);let exact=0;

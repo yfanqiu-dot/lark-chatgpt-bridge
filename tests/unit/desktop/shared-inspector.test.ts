@@ -1,7 +1,7 @@
 import { beforeEach,expect,it,vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readOwnedSharedContext,inspectOwnedShared } from '../../../src/desktop/shared-inspector';
+import { readOwnedSharedContext,readOwnedSharedIdentity,inspectOwnedShared } from '../../../src/desktop/shared-inspector';
 import type { WindowsSupervisorControl } from '../../../src/desktop/supervisor-windows';
 const mocked=vi.hoisted(()=>({verify:vi.fn(),tools:vi.fn(),read:vi.fn(),pipes:vi.fn(),catalog:vi.fn(),connect:vi.fn(),calls:vi.fn(),close:vi.fn(),listen:vi.fn()}));
 vi.mock('../../../src/desktop/deployment',()=>({verifyDeployment:mocked.verify}));
@@ -30,6 +30,32 @@ beforeEach(()=>{
 it('matches actual host, its own child backend, package pipe and both TCP owners',async()=>{
   expect(await readOwnedSharedContext(tmpdir(),control,owned)).toMatchObject({host:owned.host,backend:{pid:43,parentPid:42},desktop:{pid:44},packageIdentityVerified:true,endpointOwnershipVerified:true});
   expect(mocked.tools).toHaveBeenCalledOnce();expect(mocked.pipes).toHaveBeenCalledWith(44,host.desktopExe);
+});
+it('checks original OS identities while admission is absent without reading old tools or native queues',async()=>{
+  const expected=await readOwnedSharedContext(tmpdir(),control,owned);vi.clearAllMocks();
+  mocked.read.mockRejectedValue(Object.assign(Error('withdrawn'),{code:'ENOENT'}));mocked.tools.mockRejectedValue(Error('withdrawn'));
+  await readOwnedSharedIdentity(tmpdir(),control,owned,expected);
+  expect(mocked.read).not.toHaveBeenCalled();expect(mocked.tools).not.toHaveBeenCalled();expect(mocked.pipes).not.toHaveBeenCalled();expect(mocked.calls).not.toHaveBeenCalled();
+});
+it.each(['gui','backend','host','broker','legacy','foreign','incomplete','stale','port','duplicatePort'])('rejects %s loss or replacement during a configuration wait',async kind=>{
+  const expected=await readOwnedSharedContext(tmpdir(),control,owned);
+  if(kind==='gui')scan.inventory.desktop[0].createdAt='2026-10-12T00:01:00.000Z';
+  if(kind==='backend')scan.desktopRelated[1].createdAt='2026-10-12T00:01:00.000Z';
+  if(kind==='host'||kind==='broker')scan.inventory[kind][0].commandLineSha256='f'.repeat(64);
+  if(kind==='legacy')scan.inventory.legacy.push(identity(99));
+  if(kind==='foreign')scan.desktopRelated.push(identity(99,999));
+  if(kind==='incomplete')scan.complete=false;if(kind==='stale')scan.verifiedAt-=6000;
+  if(kind==='port')scan.endpointOwners[1].listeners[0].pid=99;
+  if(kind==='duplicatePort')scan.endpointOwners[1].listeners.push({address:'127.0.0.1',pid:43});
+  await expect(readOwnedSharedIdentity(tmpdir(),control,owned,expected)).rejects.toThrow();
+});
+it.each(['exact','mismatch','withdrawn','changed'])('requires an actual %s catalog and the same published lease after settings refresh',async kind=>{
+  if(kind==='mismatch')mocked.catalog.mockResolvedValue(['list_projects','unexpected']);
+  if(kind==='withdrawn')mocked.catalog.mockImplementation(async()=>{mocked.read.mockRejectedValue(Object.assign(Error('withdrawn'),{code:'ENOENT'}));return ['list_projects'];});
+  if(kind==='changed')mocked.catalog.mockImplementation(async()=>{lease.endpoint='ws://127.0.0.1:10000/';return ['list_projects'];});
+  const result=readOwnedSharedContext(tmpdir(),control,owned,true,undefined,true);
+  if(kind==='exact')expect(await result).toMatchObject({leaseVerifiedAt:lease.verifiedAt});else await expect(result).rejects.toThrow();
+  expect(mocked.catalog).toHaveBeenCalledOnce();
 });
 it.each(['incomplete','stale'])('still rejects a complete-reader result that is %s before any native task read',async kind=>{
   if(kind==='incomplete')scan.complete=false;else scan.verifiedAt-=6000;

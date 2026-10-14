@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DesktopRuntimePort,type RuntimeEffects } from '../../../src/desktop/runtime-port';
+import { readDesktopToolConfig } from '../../../src/desktop/backend';
 import { DesktopSupervisor,SupervisorJournal,type ProcessIdentity,type SupervisorState } from '../../../src/desktop/supervisor';
 let dir:string;const ports:DesktopRuntimePort[]=[];
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'runtime-port-'));});
@@ -45,6 +46,56 @@ function harness(recovery=false,channelMode?:'new-only'){
   const port=new DesktopRuntimePort(input,dir,identity(process.pid),effects,recovery?saved:undefined,channelMode);ports.push(port);
   return {port,effects,input,events,inventory,ids,saved,bindings,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},packageFails:()=>{packageFails=true;},badTools:()=>{tools=false;},badContext:()=>{context=false;},badLocks:()=>{locks=false;},badSecret:()=>{secret=false;}};
 }
+async function configurationHarness(){
+  const h=harness(false,'new-only');h.inventory.legacy=[];
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  const original={host:h.ids.host,desktop:h.ids.shared,backend:{...identity(8),parentPid:4},endpoint:'ws://127.0.0.1:9998/',backendEndpoint:'ws://127.0.0.1:9999/',
+    leaseVerifiedAt:h.clock(),desktopVersion:h.input.host.desktopVersion,codexSha256:'c'.repeat(64),toolNames:['list_projects'],packageIdentityVerified:true,endpointOwnershipVerified:true};
+  Object.assign(h.input.host,{endpoint:original.endpoint,backendEndpoint:original.backendEndpoint,codexSha256:original.codexSha256});
+  let pending=false;const missing=()=>Object.assign(Error('Connection withdrawn'),{code:'ENOENT',path:h.input.host.connectionFile});
+  h.effects.context=async(_owned,refreshCatalog)=>{h.events.push(refreshCatalog?'refreshedCatalog':'context');if(pending)throw missing();return {...original,leaseVerifiedAt:h.clock()};};
+  h.effects.configurationIdentity=async()=>{h.events.push('liveOriginalIdentity');};
+  await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.sharedIdle();await h.port.startListener(runId);await h.port.ready();
+  h.advance(1);pending=true;
+  const withdrawal:any={version:1,runId,hostPid:4,observedAt:h.clock(),reason:'desktop_readiness_changed',readiness:{desktopConnected:true,initialized:true,projectsRead:true,configurationFailures:0,revision:2,lastChange:'request config/batchWrite',pendingConfiguration:['config/batchWrite']}};
+  const publish=()=>writeFile(`${h.input.host.connectionFile}.invalidation.json`,JSON.stringify(withdrawal),'utf8');await publish();
+  const pause=h.effects.pause;h.effects.pause=async()=>{await pause();await writeFile(join(dir,'listener.ready.json'),JSON.stringify({version:1,runId,pid:6,readyAt:original.leaseVerifiedAt,updatedAt:h.clock(),phase:'ready',connectionState:'connected',enabledChatIds:['oc_c']}),'utf8');};
+  return {...h,original,withdrawal,publish,missing,refresh:()=>{pending=false;}};
+}
+it('keeps the original running desktop through a settings gap and requires new admission before health succeeds',async()=>{
+  const h=await configurationHarness(),started=h.clock(),pause=h.effects.pause;let readDenied=false;
+  h.effects.pause=async()=>{await pause();await expect(readDesktopToolConfig(h.input.host)).rejects.toMatchObject({code:'ENOENT'});readDenied=true;if(h.clock()-started>=20000)h.refresh();};
+  expect(await h.port.health()).toBe(true);expect(readDenied).toBe(true);expect(h.events).toContain('liveOriginalIdentity');expect(h.events).toContain('refreshedCatalog');
+  expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(['launch:broker','launch:host','launch:listener']);expect(h.events).not.toContain('packageRestore');expect(h.events).not.toContain('startLegacy');
+  const trace=JSON.parse(await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'));expect(trace.phase).toBe('fresh_connection_verified');expect(trace.until-trace.firstObservedAt).toBe(40000);
+  await expect(readFile(join(dir,'runtime-health.failure.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+it('allows one diagnostic publication recheck after admission has already been withdrawn',async()=>{
+  const h=await configurationHarness();await rm(`${h.input.host.connectionFile}.invalidation.json`);const pause=h.effects.pause;
+  h.effects.pause=async()=>{await pause();await h.publish();h.refresh();};expect(await h.port.health()).toBe(true);
+});
+it('bounds continuous settings writes by the first withdrawal instead of extending the wait',async()=>{
+  const h=await configurationHarness(),started=h.clock(),pause=h.effects.pause;
+  h.effects.pause=async()=>{await pause();h.withdrawal.observedAt=h.clock();h.withdrawal.readiness.revision++;await h.publish();};
+  expect(await h.port.health()).toBe(false);expect(h.clock()-started).toBe(40000);
+  const trace=JSON.parse(await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'));expect(trace.firstObservedAt).toBe(started);expect(trace.phase).toBe('failed');expect(trace.originalErrorSha256).toHaveLength(64);
+});
+it.each(['socket','failedResponse','failure','foreignRun','foreignHost','stale','pendingUnknown'])('never interprets %s withdrawal evidence as healthy configuration activity',async kind=>{
+  const h=await configurationHarness();
+  if(kind==='socket')h.withdrawal.readiness.lastChange='desktop connection closed';if(kind==='failedResponse')h.withdrawal.readiness.lastChange='response config/batchWrite failed';
+  if(kind==='failure')h.withdrawal.readiness.configurationFailures=1;if(kind==='foreignRun')h.withdrawal.runId='foreign';if(kind==='foreignHost')h.withdrawal.hostPid=99;
+  if(kind==='stale')h.advance(41000);if(kind==='pendingUnknown')h.withdrawal.readiness.pendingConfiguration=['other/write'];await h.publish();
+  expect(await h.port.health()).toBe(false);expect(h.events).not.toContain('liveOriginalIdentity');
+});
+it.each(['identity','locks','owner','retirement','catalog','backend','oldLease','otherFile'])('fails closed on %s change during configuration refresh',async kind=>{
+  const h=await configurationHarness();
+  if(kind==='identity')h.effects.configurationIdentity=async()=>{throw Error('Original process changed');};
+  if(kind==='locks')h.badLocks();if(kind==='owner')h.effects.configurationIdentity=async()=>{(h.port as any).lost=true;throw Error('Owner lost');};
+  if(kind==='retirement')h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'f'.repeat(64)});
+  if(['catalog','backend','oldLease'].includes(kind)){let reads=0;h.effects.context=async()=>{if(++reads===1)throw h.missing();const v=structuredClone(h.original);if(kind==='catalog')v.toolNames=['unexpected'];if(kind==='backend')v.backend.createdAt='2026-10-12T00:01:00.000Z';return v;};}
+  if(kind==='otherFile')h.effects.context=async()=>{throw Object.assign(h.missing(),{path:join(dir,'other.json')});};
+  expect(await h.port.health()).toBe(false);expect(h.events).not.toContain('packageRestore');expect(h.events.filter(e=>e==='launch:listener')).toHaveLength(1);
+});
 it('runs the concrete new-only port without old task permissions, backup, pause or restore',async()=>{
   const h=harness(false,'new-only');h.inventory.legacy=[];
   h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
