@@ -9,7 +9,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { DesktopRpc, loopbackEndpoint } from './rpc';
 import { desktopToolOverrides, prepareResumeTools } from './resume-tools';
 import { cleanDesktopEnvironment, desktopPipes, desktopToolCatalog } from './windows-tools';
-import { DesktopReadiness } from './readiness';
+import { DesktopReadiness, type ReadinessSnapshot } from './readiness';
 import { launchPackagedDesktop, type PackagedDesktop } from './packaged-desktop';
 import {ListenerOwnerLease} from './listener-owner';
 
@@ -137,7 +137,17 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   let stopping=false;
   let cleanDesktopQuit=false;
   let leaseWrites: Promise<void> = Promise.resolve();
-  const invalidate = () => { leaseWrites = leaseWrites.then(() => rm(cfg.connectionFile,{force:true})); void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; }); };
+  const invalidate = (snapshot?: ReadinessSnapshot, reason: 'desktop_readiness_changed'|'host_starting'|'lease_refresh_failed' = 'desktop_readiness_changed', errorSha256?: string) => {
+    const evidence={version:1,runId:process.env.BRIDGE_SUPERVISOR_RUN_ID??null,hostPid:process.pid,observedAt:Date.now(),reason,readiness:snapshot??null,...(errorSha256?{errorSha256}:{})};
+    leaseWrites=leaseWrites.then(async()=>{
+      // Withdraw first. Diagnostic I/O never keeps an obsolete lease alive or
+      // supplies an alternative readiness proof. No request/response bodies.
+      await rm(cfg.connectionFile,{force:true});
+      try{await writeFileAtomic(`${cfg.connectionFile}.invalidation.json`,JSON.stringify(evidence));}
+      catch{console.error('Lease invalidation evidence unavailable.');}
+    });
+    void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; });
+  };
   const readiness=new DesktopReadiness(invalidate);
   let proxy: WebSocketServer | undefined;
   let desktop: PackagedDesktop | undefined;
@@ -162,7 +172,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   };
   const stop=()=>{stopping=true;};process.once('SIGINT',stop);process.once('SIGTERM',stop);
   try {
-    invalidate(); await leaseWrites;
+    invalidate(undefined,'host_starting'); await leaseWrites;
     await rm(`${cfg.connectionFile}.restored.json`,{force:true});
     await rm(`${cfg.connectionFile}.stop`,{force:true});
     await appServer.ready();
@@ -254,7 +264,7 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
             if(!verifiedOnce){verifiedOnce=true;console.log('Shared desktop and tool catalog ready.');}
           });
           await leaseWrites;
-        }catch(e){invalidate();console.error('Desktop lease not refreshed:',String(e));}
+        }catch(e){invalidate(readiness.snapshot(),'lease_refresh_failed',createHash('sha256').update(e instanceof Error?e.message:'NonError').digest('hex'));console.error('Desktop lease not refreshed:',String(e));}
       }
       await sleep(10_000);
     }

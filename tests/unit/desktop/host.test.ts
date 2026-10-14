@@ -43,6 +43,25 @@ function initialize(r:DesktopReadiness,c:object){
   r.request(c,{id:3,method:'config/batchWrite'});r.response(c,{id:3,result:{}});
 }
 
+it('reports the exact configuration withdrawal before a later quiet-window poll without request bodies',()=>{
+  let now=0;const observations:unknown[]=[];const r=new DesktopReadiness(snapshot=>observations.push(snapshot),()=>now),c={};
+  initialize(r,c);now=15_000;expect(r.canLease()).toBe(true);
+  r.request(c,{id:9,method:'config/batchWrite',params:{private:'SECRET_REQUEST_BODY'}});
+  expect(observations.at(-1)).toMatchObject({lastChange:'request config/batchWrite',configurationObserved:false,pendingConfiguration:[],revision:r.revision});
+  expect(r.canLease()).toBe(false);expect(JSON.stringify(observations)).not.toContain('SECRET');
+  r.response(c,{id:9,result:{private:'SECRET_RESPONSE_BODY'}});
+  expect(observations.at(-1)).toMatchObject({lastChange:'response config/batchWrite',configurationObserved:false});
+  now+=14_999;expect(r.canLease()).toBe(false);now++;expect(r.canLease()).toBe(true);expect(JSON.stringify(observations)).not.toContain('SECRET');
+});
+
+it('records a desktop socket withdrawal while unrelated bridge traffic cannot supply a replacement proof',()=>{
+  let now=0;const observations:unknown[]=[];const r=new DesktopReadiness(snapshot=>observations.push(snapshot),()=>now),desktop={},bridge={};
+  initialize(r,desktop);now=15_000;expect(r.canLease()).toBe(true);r.close(desktop);
+  expect(observations.at(-1)).toMatchObject({lastChange:'desktop connection closed',desktopConnected:false});
+  const count=observations.length;r.request(bridge,{id:11,method:'config/read'});r.response(bridge,{id:11,result:{}});now+=60_000;
+  expect(observations).toHaveLength(count);expect(r.canLease()).toBe(false);
+});
+
 it('requires actual desktop initialization, successful configuration and a quiet window',()=>{
   let now=0,invalidations=0;const r=new DesktopReadiness(()=>invalidations++,()=>now);const c={};
   r.request(c,{id:1,method:'initialize',params:{clientInfo:{name:'lark_chatgpt_bridge'}}});r.response(c,{id:1,result:{}});
