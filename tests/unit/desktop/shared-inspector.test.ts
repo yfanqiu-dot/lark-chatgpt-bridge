@@ -1,6 +1,7 @@
 import { beforeEach,expect,it,vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {createHash} from 'node:crypto';
 import { readOwnedSharedContext,readOwnedSharedIdentity,inspectOwnedShared } from '../../../src/desktop/shared-inspector';
 import type { WindowsSupervisorControl } from '../../../src/desktop/supervisor-windows';
 const mocked=vi.hoisted(()=>({verify:vi.fn(),tools:vi.fn(),read:vi.fn(),pipes:vi.fn(),catalog:vi.fn(),connect:vi.fn(),calls:vi.fn(),close:vi.fn(),listen:vi.fn()}));
@@ -96,4 +97,22 @@ it('starts the activity window after initialization and still rejects notificati
   const original=mocked.calls.getMockImplementation()!;
   mocked.calls.mockImplementation(async(method,params)=>{if(method==='thread/read')mocked.listen.mock.calls.at(-1)![0]({method:'thread/status/changed'});return original(method,params);});
   expect((await inspectOwnedShared(tmpdir(),control,owned)).verified).toBe(false);
+});
+it.each(['notification','request'] as const)('records only fixed first %s metadata while keeping native admission blocked',async kind=>{
+  const threadId='11111111-1111-4111-8111-111111111111',turnId='22222222-2222-4222-8222-222222222222',original=mocked.calls.getMockImplementation()!;
+  mocked.calls.mockImplementation(async(method,params)=>{if(method==='thread/read')mocked.listen.mock.calls.at(-1)![0]({method:'thread/status/changed',...(kind==='request'?{id:'SECRET_REQUEST_ID'}:{}),params:{threadId,turnId,body:'SECRET_BODY'}});return original(method,params);});
+  const r=await inspectOwnedShared(tmpdir(),control,owned);
+  expect(r).toMatchObject({verified:false,activity:{kind,method:'thread/status/changed',methodSha256:createHash('sha256').update('thread/status/changed').digest('hex'),threadId,turnId}});
+  expect(r.activity!.observedAt).toBeGreaterThan(0);expect(r.proof).toBeUndefined();expect(JSON.stringify(r)).not.toContain('SECRET');
+});
+it('keeps an unknown method hashed and the first event immutable without copying malformed identifiers',async()=>{
+  const original=mocked.calls.getMockImplementation()!;
+  mocked.calls.mockImplementation(async(method,params)=>{if(method==='thread/read'){const notify=mocked.listen.mock.calls.at(-1)![0];notify({method:'SECRET_METHOD',params:{threadId:'SECRET_THREAD',turnId:'SECRET_TURN',value:'SECRET_VALUE'}});notify({method:'thread/status/changed',params:{threadId:'11111111-1111-4111-8111-111111111111'}});}return original(method,params);});
+  const r=await inspectOwnedShared(tmpdir(),control,owned);
+  expect(r).toMatchObject({verified:false,activity:{kind:'notification',methodSha256:createHash('sha256').update('SECRET_METHOD').digest('hex')}});
+  expect(r.activity).not.toHaveProperty('method');expect(r.activity).not.toHaveProperty('threadId');expect(r.activity).not.toHaveProperty('turnId');expect(JSON.stringify(r)).not.toContain('SECRET');
+});
+it('does not retain initialization notifications as activity evidence or a permission to reject a later quiet scan',async()=>{
+  mocked.connect.mockImplementation(async()=>{mocked.listen.mock.calls.at(-1)![0]({method:'thread/status/changed',params:{threadId:'11111111-1111-4111-8111-111111111111'}});});
+  const r=await inspectOwnedShared(tmpdir(),control,owned);expect(r.verified).toBe(true);expect(r).not.toHaveProperty('activity');
 });

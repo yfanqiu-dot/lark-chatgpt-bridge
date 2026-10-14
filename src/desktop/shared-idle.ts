@@ -25,6 +25,9 @@ export interface SharedIdleObservation {
   proof?: IdleProof;
   blocker?: IdleBlocker;
   failure?: { method?: string; kind: string; code?: number };
+  /** First unsolicited message in the native observation window. No body,
+   * configuration value, request id or arbitrary method text is retained. */
+  activity?: { observedAt:number; kind:'request'|'notification'|'unclassified'; method?:string; methodSha256?:string; threadId?:string; turnId?:string };
 }
 const reads = new Set(['project/list','thread/turns/list','thread/loaded/list','thread/read','thread/queue/list']);
 /** Only reads the new shared App Server. Does not resume/create a task, submit

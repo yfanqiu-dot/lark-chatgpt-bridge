@@ -1,10 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { verifyDeployment } from './deployment';
 import { readDesktopToolConfig } from './backend';
 import { desktopPipes, desktopToolCatalog } from './windows-tools';
 import { DesktopRpc } from './rpc';
-import { inspectSharedIdle, type SharedContext } from './shared-idle';
+import { inspectSharedIdle, type SharedContext, type SharedIdleObservation } from './shared-idle';
 import { sameProcess, type ProcessIdentity } from './supervisor';
 import type { WindowsSupervisorControl } from './supervisor-windows';
 
@@ -85,12 +86,24 @@ export async function inspectOwnedShared(stage:string,control:WindowsSupervisorC
   // not trust the persisted list alone, even when the lease is fresh.
   const names=await desktopToolCatalog(join(dirname(host.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),lease.pipe);
   if(JSON.stringify([...names].sort())!==JSON.stringify([...snapshot.spec.expectedToolNames].sort())) throw new Error('Owned tool catalog mismatch');
-  const rpc=new DesktopRpc(host.endpoint,2500);let changed=false,observing=false;
-  rpc.onMessage(()=>{if(observing)changed=true;});
+  const rpc=new DesktopRpc(host.endpoint,2500);let changed=false,observing=false,activity:SharedIdleObservation['activity'];
+  const diagnosticMethods=new Set(['thread/status/changed','thread/started','thread/closed','thread/archived','thread/unarchived','thread/name/updated',
+    'turn/started','turn/completed','item/started','item/completed','serverRequest/resolved','item/commandExecution/requestApproval','item/fileChange/requestApproval',
+    'config/batchWrite','config/value/write','experimentalFeature/enablement/set']);
+  const identifier=(value:unknown)=>typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)?value:undefined;
+  rpc.onMessage(message=>{
+    if(!observing)return;changed=true;if(activity)return;
+    const method=typeof message.method==='string'?message.method:undefined;
+    const threadId=identifier(message.params?.threadId??message.params?.thread?.id),turnId=identifier(message.params?.turnId??message.params?.turn?.id);
+    activity={observedAt:Date.now(),kind:method?(message.id===undefined?'notification':'request'):'unclassified',
+      ...(method?{methodSha256:createHash('sha256').update(method).digest('hex'),...(diagnosticMethods.has(method)?{method}:{})}:{}),
+      ...(threadId?{threadId}:{}),...(turnId?{turnId}:{})};
+  });
   try {
     await rpc.connect();
-    return await inspectSharedIdle({get changed(){return changed;},beginObservation(){changed=false;observing=true;},call:(method,params)=>rpc.call(method,params),close:()=>rpc.close()},context,
+    const observed=await inspectSharedIdle({get changed(){return changed;},beginObservation(){changed=false;activity=undefined;observing=true;},call:(method,params)=>rpc.call(method,params),close:()=>rpc.close()},context,
       snapshot.bindings,{desktopVersion:host.desktopVersion,codexSha256:host.codexSha256,toolNames:snapshot.spec.expectedToolNames},
       ()=>readOwnedSharedContext(stage,control,owned,false,pinned));
+    return !observed.verified&&activity?{...observed,activity}:observed;
   } finally {rpc.close();}
 }
