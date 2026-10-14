@@ -42,7 +42,25 @@ function Get-Role($process){
   if($process.CommandLine -match '(?:lark-chatgpt-(topics|bridge)\.mjs|desktop(?:-topics)?\.js)["\s]'){return 'listener'}
   return $null
 }
+function Resolve-ProcessMetadata($process){
+  if($process.ExecutablePath -and $process.CommandLine -and $process.CreationDate -is [DateTime]){return $process}
+  # A bulk CIM record can lack fields while a process is being created/exiting.
+  # Re-read this exact identity once; never omit an opaque/disappeared process,
+  # merge partial records, or accept a reused PID. Access errors remain fatal.
+  if(!($process.CreationDate -is [DateTime]) -or [int]$process.ProcessId -le 0 -or !$process.Name){Throw-UnreadableProcess $process 'Process identity is not readable'}
+  $taskFresh=@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$process.ProcessId) -ErrorAction Stop)
+  if($taskFresh.Count -ne 1){Throw-UnreadableProcess $process 'Process identity is not readable'}
+  $taskCurrent=$taskFresh[0]
+  if($taskCurrent.ProcessId -ne $process.ProcessId -or $taskCurrent.ParentProcessId -ne $process.ParentProcessId -or $taskCurrent.Name -cne $process.Name -or $taskCurrent.CreationDate -ne $process.CreationDate -or
+    !$taskCurrent.ExecutablePath -or !$taskCurrent.CommandLine -or !($taskCurrent.CreationDate -is [DateTime]) -or
+    ($process.ExecutablePath -and $taskCurrent.ExecutablePath -cne $process.ExecutablePath) -or
+    ($process.CommandLine -and $taskCurrent.CommandLine -cne $process.CommandLine)){
+    Throw-UnreadableProcess $process 'Process identity is not readable'
+  }
+  return $taskCurrent
+}
 function Get-Identity($process){
+  $process=Resolve-ProcessMetadata $process
   if(!$process.ExecutablePath -or !$process.CommandLine -or !($process.CreationDate -is [DateTime])){Throw-UnreadableProcess $process 'Process identity is not readable'}
   return @{pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;createdAt=$process.CreationDate.ToUniversalTime().ToString('o');executable=[string]$process.ExecutablePath;commandLineSha256=(Get-Sha $process.CommandLine)}
 }
@@ -73,6 +91,7 @@ if($Action -in @('ProtectCapability','UnprotectCapability')){
   exit 0
 }
 function Get-ColdRelated($processes){
+  $processes=@($processes | ForEach-Object {if($_.Name -in @('ChatGPT.exe','codex.exe')){Resolve-ProcessMetadata $_}else{$_}})
   $taskRelated=[Collections.Generic.HashSet[int]]::new()
   foreach($taskProcess in $processes){
     if($taskProcess.Name -in @('ChatGPT.exe','codex.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'Potential desktop or App Server is unreadable'}
@@ -221,6 +240,7 @@ if($Action -eq 'TaskPermissions'){
 if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   $taskObservedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $taskProcesses=@(Get-CimInstance Win32_Process)
+  $taskProcesses=@($taskProcesses | ForEach-Object {if($_.Name -in @('node.exe','ChatGPT.exe','codex.exe')){Resolve-ProcessMetadata $_}else{$_}})
   $taskResult=@{legacy=@();desktop=@();host=@();listener=@();broker=@()}
   foreach($taskProcess in @($taskProcesses | Where-Object {$_.Name -in @('node.exe','ChatGPT.exe','powershell.exe','pwsh.exe')})){
     if($taskProcess.Name -in @('node.exe','ChatGPT.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'A potential runtime process cannot be identified'}

@@ -81,7 +81,7 @@ if($Mode -eq 'Launch'){
 $nativeBytes=Read-SealedBytes $request.nativeFile $request.nativeSha256
 function Load-TaskHelpers($nativeBytes){
   $ast=[Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString($nativeBytes),[ref]$null,[ref]$null)
-  foreach($name in @('Get-Sha','Has-Argument','Get-Role','Get-Identity','Get-ColdRelated','Normalize-TaskDefinition','Read-TaskDefinition','Restore-TaskEnabled','Test-TaskAccess')){
+  foreach($name in @('Get-Sha','Throw-UnreadableProcess','Has-Argument','Get-Role','Resolve-ProcessMetadata','Get-Identity','Get-ColdRelated','Normalize-TaskDefinition','Read-TaskDefinition','Restore-TaskEnabled','Test-TaskAccess')){
     $matches=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true))
     if($matches.Count -ne 1){throw 'Pinned task helper missing'}
     . ([scriptblock]::Create($matches[0].Extent.Text))
