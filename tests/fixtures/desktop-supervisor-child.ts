@@ -48,7 +48,7 @@ async function supervisor(): Promise<void> {
     async backup() { return { legacyTaskEnabled: true, launchDefinitionSha256: 'b'.repeat(64) }; },
     async pauseLegacy() { await event('pause:legacy'); const i = await inventory(); i.legacy = []; await save(inventoryFile, i); },
     async closeDesktop() { await event('close:desktop'); const i = await inventory(); i.desktop = []; await save(inventoryFile, i); },
-    startBroker: () => launch('broker'), startHost: () => launch('host'), startListener: () => launch('listener'),
+    startBroker: () => launch('broker'), startHost: () => launch('host'), startListener: async (_runId,beforeCreate) => { await beforeCreate?.();return launch('listener'); },
     async ready() {}, async health() { return true; },
     stopListener: () => stop('listener'), stopHost: () => stop('host'), stopBroker: () => stop('broker'),
     async ordinary() { await event('restore:desktop'); const i = await inventory(); i.desktop = [fake(10000004)]; await save(inventoryFile, i); return { desktop: i.desktop[0]!, verifiedAt: Date.now(), packageIdentityVerified: true, toolsExact: true }; },

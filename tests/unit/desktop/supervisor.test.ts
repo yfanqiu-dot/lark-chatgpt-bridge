@@ -34,7 +34,7 @@ function harness() {
     async closeDesktop() { await step('closeDesktop', () => { inventory.desktop = []; }); },
     async startBroker() { await step('startBroker', () => { inventory.broker = [identity(3)]; }); return inventory.broker[0]!; },
     async startHost() { await step('startHost', () => { inventory.host = [identity(4)]; inventory.desktop = [identity(5)]; }); return inventory.host[0]!; },
-    async startListener() { await step('startListener', () => { inventory.listener = [identity(6)]; }); return inventory.listener[0]!; },
+    async startListener(_runId,beforeCreate) { await beforeCreate?.();await step('startListener', () => { inventory.listener = [identity(6)]; }); return inventory.listener[0]!; },
     async ready() { await step('ready'); },
     async health() { await step('health'); return health; },
     async stopListener(p) { expect(sameProcess(p, inventory.listener[0]!)).toBe(true); await step('stopListener', () => { inventory.listener = []; }); },

@@ -33,6 +33,7 @@ export interface RuntimeEffects {
 const json=async(path:string)=>JSON.parse(await readFile(path,'utf8'));
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 const sleep=(ms:number)=>new Promise<void>(done=>setTimeout(done,ms));
+const CONFIGURATION_REFRESH_WINDOW_MS=60_000;
 /** A Windows listener without a console must have the original bounded owner
  * lease. Other roles keep their existing parent/job lifecycle. */
 export function detachOwnedListener(role:'broker'|'host'|'listener',extra:NodeJS.ProcessEnv,directory:string,platform=process.platform):boolean{
@@ -126,17 +127,17 @@ export class DesktopRuntimePort implements SupervisorPort {
     this.lease.startHeartbeat(()=>{this.lost=true;});
     return this.launch('broker',runId,{});
   }
-  private async launch(role:'broker'|'host'|'listener',runId:string,extra:NodeJS.ProcessEnv){
-    await this.effects.verify();await this.intent(`launch-${role}`,{version:1,runId,role,requestedAt:this.effects.now()});
+  private async launch(role:'broker'|'host'|'listener',runId:string,extra:NodeJS.ProcessEnv,beforeCreate?:()=>Promise<void>){
+    await this.effects.verify();await beforeCreate?.();await this.intent(`launch-${role}`,{version:1,runId,role,requestedAt:this.effects.now()});
     const identity=await this.effects.launch(role,runId,extra);
     if(!sameProcess(identity,identity))throw new Error('Runtime launch identity unavailable');
     await writeFile(join(this.directory,`${role}.receipt.json`),JSON.stringify({version:1,runId,role,identity}),{encoding:'utf8',flag:'wx',mode:0o600});
     this.owned[role]=structuredClone(identity);return identity;
   }
   async startHost(runId:string){return this.launch('host',runId,{BRIDGE_PACKAGE_BROKER_TOKEN:await this.capability(),BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(this.directory,'broker-owner.json')});}
-  async startListener(runId:string){
+  async startListener(runId:string,beforeCreate?:()=>Promise<void>){
     if(!this.appSecret)this.appSecret=await this.effects.secret();if(!this.appSecret)throw new Error('Secret provider unavailable');
-    const result=await this.launch('listener',runId,{[this.input.topics.appSecretEnv]:this.appSecret,BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_READY_FILE:join(this.directory,'listener.ready.json'),BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(this.directory,'broker-owner.json')});
+    const result=await this.launch('listener',runId,{[this.input.topics.appSecretEnv]:this.appSecret,BRIDGE_SUPERVISOR_RUN_ID:runId,BRIDGE_SUPERVISOR_READY_FILE:join(this.directory,'listener.ready.json'),BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(this.directory,'broker-owner.json')},beforeCreate);
     this.appSecret=undefined;return result;
   }
   private sharedOwned(){if(!this.owned.host || !this.owned.broker)throw new Error('Shared runtime not owned');return {host:this.owned.host,broker:this.owned.broker,...(this.owned.listener?{listener:this.owned.listener}:{})};}
@@ -200,7 +201,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   private validConfigurationWithdrawal(value:any,expected:SharedContext):boolean{
     const r=value?.readiness,now=this.effects.now();
     return value?.version===1&&value.runId===this.runId&&value.hostPid===this.owned.host?.pid&&value.reason==='desktop_readiness_changed'
-      &&Number.isFinite(value.observedAt)&&value.observedAt>=expected.leaseVerifiedAt&&value.observedAt<=now+1000&&now-value.observedAt<40000
+      &&Number.isFinite(value.observedAt)&&value.observedAt>=expected.leaseVerifiedAt&&value.observedAt<=now+1000&&now-value.observedAt<CONFIGURATION_REFRESH_WINDOW_MS
       &&r?.desktopConnected===true&&r.initialized===true&&r.projectsRead===true&&r.configurationFailures===0&&Number.isSafeInteger(r.revision)&&r.revision>0
       &&/^(request|response) (config\/batchWrite|config\/value\/write|experimentalFeature\/enablement\/set)$/.test(r.lastChange??'')
       &&Array.isArray(r.pendingConfiguration)&&r.pendingConfiguration.every((m:unknown)=>['config/batchWrite','config/value/write','experimentalFeature/enablement/set'].includes(m as string));
@@ -220,9 +221,10 @@ export class DesktopRuntimePort implements SupervisorPort {
       }
       if(!this.validConfigurationWithdrawal(first,expected))throw firstError;
       // Anchor to the first withdrawal, not each subsequent settings write.
-      const until=first.observedAt+40000,trace={version:1,runId:this.runId,hostPid:this.owned.host!.pid,firstObservedAt:first.observedAt,until,
+      const until=first.observedAt+CONFIGURATION_REFRESH_WINDOW_MS,trace={version:1,runId:this.runId,hostPid:this.owned.host!.pid,firstObservedAt:first.observedAt,until,
         originalErrorSha256:sha(firstError instanceof Error?firstError.message:'NonError'),lastChange:first.readiness.lastChange};
-      const report=async(phase:string,error?:unknown)=>{try{await writeFileAtomic(join(this.directory,'runtime-health.configuration-refresh.json'),JSON.stringify({...trace,phase,observedAt:this.effects.now(),...(error?{errorSha256:sha(error instanceof Error?error.message:'NonError')}:{})}));}catch{}};
+      let freshChecks:Record<string,boolean>|undefined;
+      const report=async(phase:string,error?:unknown)=>{try{await writeFileAtomic(join(this.directory,'runtime-health.configuration-refresh.json'),JSON.stringify({...trace,phase,observedAt:this.effects.now(),...(freshChecks?{freshChecks}:{}),...(error?{errorSha256:sha(error instanceof Error?error.message:'NonError')}:{})}));}catch{}};
       await report('waiting_for_fresh_connection');
       try{
         while(this.effects.now()<until){
@@ -233,10 +235,14 @@ export class DesktopRuntimePort implements SupervisorPort {
           if(!await this.effects.locksHeld())throw Error('Configuration wait runtime lock lost');
           try{
             const fresh=await this.effects.context(this.sharedOwned(),true);
-            if(!sameProcess(fresh.host,expected.host)||!sameProcess(fresh.desktop,expected.desktop)||!sameProcess(fresh.backend,expected.backend)
-              ||fresh.endpoint!==expected.endpoint||fresh.backendEndpoint!==expected.backendEndpoint||fresh.desktopVersion!==expected.desktopVersion||fresh.codexSha256!==expected.codexSha256
-              ||!fresh.packageIdentityVerified||!fresh.endpointOwnershipVerified||fresh.leaseVerifiedAt<first.observedAt||fresh.leaseVerifiedAt>this.effects.now()+1000||this.effects.now()-fresh.leaseVerifiedAt>60000
-              ||JSON.stringify([...fresh.toolNames].sort())!==JSON.stringify([...this.input.snapshot.spec.expectedToolNames].sort())||this.effects.now()>=until)throw Error('Configuration wait fresh context differs from original admission');
+            const now=this.effects.now();
+            freshChecks={hostIdentity:sameProcess(fresh.host,expected.host),desktopIdentity:sameProcess(fresh.desktop,expected.desktop),backendIdentity:sameProcess(fresh.backend,expected.backend),
+              endpoints:fresh.endpoint===expected.endpoint&&fresh.backendEndpoint===expected.backendEndpoint,desktopVersion:fresh.desktopVersion===expected.desktopVersion,codexSha:fresh.codexSha256===expected.codexSha256,
+              packageIdentity:fresh.packageIdentityVerified===true,endpointOwnership:fresh.endpointOwnershipVerified===true,newLease:fresh.leaseVerifiedAt>=first.observedAt,
+              freshLease:Number.isFinite(fresh.leaseVerifiedAt)&&fresh.leaseVerifiedAt<=now+1000&&now-fresh.leaseVerifiedAt<=60000,
+              toolCatalog:JSON.stringify([...fresh.toolNames].sort())===JSON.stringify([...this.input.snapshot.spec.expectedToolNames].sort()),withinWindow:now<until};
+            if(Object.entries(freshChecks).some(([name,passed])=>name!=='withinWindow'&&!passed))throw Error('Configuration wait fresh context differs from original admission');
+            if(!freshChecks.withinWindow)throw Error('Configuration refresh exceeded bounded window');
             this.lastSharedContext=fresh;await report('fresh_connection_verified');return;
           }catch(e){if(!this.missingConnection(e))throw e;}
           await this.effects.pause();

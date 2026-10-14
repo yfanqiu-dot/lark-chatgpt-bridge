@@ -96,7 +96,9 @@ export interface SupervisorPort {
    * is never repeated. Its unresolved inventory blocks rollback instead. */
   startBroker(runId: string): Promise<ProcessIdentity>;
   startHost(runId: string): Promise<ProcessIdentity>;
-  startListener(runId: string): Promise<ProcessIdentity>;
+  /** Invoke beforeCreate after credential/deployment preparation and before
+   * publishing the listener creation intent. */
+  startListener(runId: string, beforeCreate?: () => Promise<void>): Promise<ProcessIdentity>;
   ready(): Promise<void>;
   health(): Promise<boolean>;
   stopListener(identity: ProcessIdentity): Promise<void>;
@@ -229,16 +231,19 @@ export class DesktopSupervisor {
     await this.phase(s, `starting_${role}`);
     const before = await this.inventory();
     if (before[role].length || (role === 'listener' && before.legacy.length)) fail('consumer_or_role_conflict');
+    let listenerAdmission: (() => Promise<void>) | undefined;
     if (role === 'listener' && s.startMode === 'cold') {
       // Inventory and journal work can consume the short proof freshness
       // window. Confirm the same adopted desktop first, then take the final
       // native idle proof immediately before creating the listener.
       if (!s.lastIdleProof || before.desktop.length !== 1 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop)) fail('cold_shared_proof_stale_or_changed');
-      await this.idle(before.desktop[0]!, s, true);
-      if (await stopRequested?.()) fail('stop_requested');
-      if (!s.lastIdleProof || this.now() - s.lastIdleProof.verifiedAt > 5000 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop)) fail('cold_shared_proof_stale_or_changed');
+      listenerAdmission = async () => {
+        await this.idle(before.desktop[0]!, s, true);
+        if (await stopRequested?.()) fail('stop_requested');
+        if (!s.lastIdleProof || this.now() - s.lastIdleProof.verifiedAt > 5000 || !sameProcess(before.desktop[0]!, s.lastIdleProof.desktop)) fail('cold_shared_proof_stale_or_changed');
+      };
     }
-    const identity = await (role === 'broker' ? this.port.startBroker(s.runId) : role === 'host' ? this.port.startHost(s.runId) : this.port.startListener(s.runId));
+    const identity = await (role === 'broker' ? this.port.startBroker(s.runId) : role === 'host' ? this.port.startHost(s.runId) : this.port.startListener(s.runId, listenerAdmission));
     if (!validIdentity(identity)) fail('launch_identity_invalid');
     s.owned[role] = structuredClone(identity); await this.journal.save(s);
     const after = await this.inventory();

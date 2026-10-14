@@ -67,7 +67,7 @@ it('keeps the original running desktop through a settings gap and requires new a
   h.effects.pause=async()=>{await pause();await expect(readDesktopToolConfig(h.input.host)).rejects.toMatchObject({code:'ENOENT'});readDenied=true;if(h.clock()-started>=20000)h.refresh();};
   expect(await h.port.health()).toBe(true);expect(readDenied).toBe(true);expect(h.events).toContain('liveOriginalIdentity');expect(h.events).toContain('refreshedCatalog');
   expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(['launch:broker','launch:host','launch:listener']);expect(h.events).not.toContain('packageRestore');expect(h.events).not.toContain('startLegacy');
-  const trace=JSON.parse(await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'));expect(trace.phase).toBe('fresh_connection_verified');expect(trace.until-trace.firstObservedAt).toBe(40000);
+  const trace=JSON.parse(await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'));expect(trace.phase).toBe('fresh_connection_verified');expect(trace.until-trace.firstObservedAt).toBe(60000);
   await expect(readFile(join(dir,'runtime-health.failure.json'))).rejects.toMatchObject({code:'ENOENT'});
 });
 it('allows one diagnostic publication recheck after admission has already been withdrawn',async()=>{
@@ -77,14 +77,14 @@ it('allows one diagnostic publication recheck after admission has already been w
 it('bounds continuous settings writes by the first withdrawal instead of extending the wait',async()=>{
   const h=await configurationHarness(),started=h.clock(),pause=h.effects.pause;
   h.effects.pause=async()=>{await pause();h.withdrawal.observedAt=h.clock();h.withdrawal.readiness.revision++;await h.publish();};
-  expect(await h.port.health()).toBe(false);expect(h.clock()-started).toBe(40000);
+  expect(await h.port.health()).toBe(false);expect(h.clock()-started).toBe(60000);
   const trace=JSON.parse(await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'));expect(trace.firstObservedAt).toBe(started);expect(trace.phase).toBe('failed');expect(trace.originalErrorSha256).toHaveLength(64);
 });
 it.each(['socket','failedResponse','failure','foreignRun','foreignHost','stale','pendingUnknown'])('never interprets %s withdrawal evidence as healthy configuration activity',async kind=>{
   const h=await configurationHarness();
   if(kind==='socket')h.withdrawal.readiness.lastChange='desktop connection closed';if(kind==='failedResponse')h.withdrawal.readiness.lastChange='response config/batchWrite failed';
   if(kind==='failure')h.withdrawal.readiness.configurationFailures=1;if(kind==='foreignRun')h.withdrawal.runId='foreign';if(kind==='foreignHost')h.withdrawal.hostPid=99;
-  if(kind==='stale')h.advance(41000);if(kind==='pendingUnknown')h.withdrawal.readiness.pendingConfiguration=['other/write'];await h.publish();
+  if(kind==='stale')h.advance(61000);if(kind==='pendingUnknown')h.withdrawal.readiness.pendingConfiguration=['other/write'];await h.publish();
   expect(await h.port.health()).toBe(false);expect(h.events).not.toContain('liveOriginalIdentity');
 });
 it.each(['identity','locks','owner','retirement','catalog','backend','oldLease','otherFile'])('fails closed on %s change during configuration refresh',async kind=>{
@@ -95,6 +95,50 @@ it.each(['identity','locks','owner','retirement','catalog','backend','oldLease',
   if(['catalog','backend','oldLease'].includes(kind)){let reads=0;h.effects.context=async()=>{if(++reads===1)throw h.missing();const v=structuredClone(h.original);if(kind==='catalog')v.toolNames=['unexpected'];if(kind==='backend')v.backend.createdAt='2026-10-12T00:01:00.000Z';return v;};}
   if(kind==='otherFile')h.effects.context=async()=>{throw Object.assign(h.missing(),{path:join(dir,'other.json')});};
   expect(await h.port.health()).toBe(false);expect(h.events).not.toContain('packageRestore');expect(h.events.filter(e=>e==='launch:listener')).toHaveLength(1);
+});
+it.each([57000,61000])('includes the final context verification in the fixed refresh budget at %d ms',async elapsed=>{
+  const h=await configurationHarness(),started=h.clock();let reads=0;
+  h.effects.context=async(_owned,refreshCatalog)=>{
+    if(++reads===1)throw h.missing();expect(refreshCatalog).toBe(true);
+    h.advance(elapsed-1000);await h.effects.pause();
+    return {...h.original,leaseVerifiedAt:h.clock(),privateExtra:'TEST_PRIVATE_REFRESH'};
+  };
+  expect(await h.port.health()).toBe(elapsed<60000);
+  const bytes=await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'),trace=JSON.parse(bytes);
+  expect(trace.firstObservedAt).toBe(started);expect(trace.until-started).toBe(60000);expect(trace.freshChecks.withinWindow).toBe(elapsed<60000);
+  expect(Object.entries(trace.freshChecks).filter(([key])=>key!=='withinWindow').every(([,passed])=>passed===true)).toBe(true);
+  expect(bytes).not.toContain('TEST_PRIVATE_REFRESH');
+  if(elapsed>=60000)expect(trace.errorSha256).toBe(createHash('sha256').update('Configuration refresh exceeded bounded window').digest('hex'));
+});
+it('records a changed identity independently of an expired verification budget',async()=>{
+  const h=await configurationHarness();let reads=0;
+  h.effects.context=async()=>{if(++reads===1)throw h.missing();h.advance(61000);return {...h.original,desktop:{...h.original.desktop,pid:99},leaseVerifiedAt:h.clock()};};
+  expect(await h.port.health()).toBe(false);
+  const trace=JSON.parse(await readFile(join(dir,'runtime-health.configuration-refresh.json'),'utf8'));
+  expect(trace.freshChecks).toMatchObject({desktopIdentity:false,withinWindow:false});
+  expect(trace.errorSha256).toBe(createHash('sha256').update('Configuration wait fresh context differs from original admission').digest('hex'));
+});
+it('runs final native admission after credentials and deployment verification, before listener creation',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);h.events.length=0;
+  const verify=h.effects.verify;h.effects.verify=async()=>{h.events.push('deploymentVerify');return verify();};
+  await h.port.startListener(runId,async()=>{h.events.push('finalAdmission');});
+  expect(h.events.filter(e=>['secret','deploymentVerify','finalAdmission','launch:listener'].includes(e))).toEqual(['secret','deploymentVerify','finalAdmission','launch:listener']);
+});
+it('does not publish a listener intent or create its process when final admission rejects',async()=>{
+  const h=harness();await h.port.startBroker(runId);await h.port.startHost(runId);
+  await expect(h.port.startListener(runId,async()=>{throw Error('Final native task active');})).rejects.toThrow('Final native task active');
+  expect(h.events).not.toContain('launch:listener');expect(h.inventory.listener).toEqual([]);
+  await expect(readFile(join(dir,'launch-listener.intent.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+it('refreshes the concrete listener proof after a slow deployment verification',async()=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  const journal=join(dir,'journal.json'),verify=h.effects.verify;let delayed=false,stop=false;
+  h.effects.verify=async()=>{const state=JSON.parse(await readFile(journal,'utf8'));if(state.phase==='starting_listener'&&!delayed){delayed=true;h.advance(6000);}return verify();};
+  const state=await new DesktopSupervisor(new SupervisorJournal(journal),h.port,h.bindings,h.clock).run(async()=>stop,async()=>{if(h.inventory.desktop[0]?.pid===2&&!h.inventory.host.length)h.inventory.desktop=[];else stop=true;},{startMode:'cold',channelMode:'new-only'});
+  expect(delayed).toBe(true);expect(state.errorCode).toBeUndefined();expect(state.phase).toBe('restored');
+  const intent=JSON.parse(await readFile(join(dir,'launch-listener.intent.json'),'utf8'));
+  expect(intent.requestedAt-state.lastIdleProof!.verifiedAt).toBeLessThanOrEqual(5000);
 });
 it('runs the concrete new-only port without old task permissions, backup, pause or restore',async()=>{
   const h=harness(false,'new-only');h.inventory.legacy=[];

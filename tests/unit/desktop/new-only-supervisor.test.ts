@@ -20,7 +20,7 @@ function fixture(){
     legacyRetirement:async()=>({version:1,observedAt:Date.now(),retired,taskPresent:true,taskEnabled:!retired,taskState:retired?'disabled':'other',definitionSha256:'b'.repeat(64)}),
     coldExit:async()=>({verifiedAt:Date.now(),complete:true,desktopRelated:structuredClone(inventory.desktop)}),
     sharedIdle:async()=>({verifiedAt:Date.now(),desktop:inventory.desktop[0]!,allDesktopTasksIdle:true,toolsExact:true,tasks:bindings.map(b=>({...b,status:'idle',queueCount:0,waitingApproval:false}))}),
-    startBroker:()=>launch('broker',2),startHost:()=>launch('host',3),startListener:()=>launch('listener',4),ready:async()=>{},health:async()=>health,
+    startBroker:()=>launch('broker',2),startHost:()=>launch('host',3),startListener:async(_runId,beforeCreate)=>{await beforeCreate?.();return launch('listener',4);},ready:async()=>{},health:async()=>health,
     stopListener:async()=>{events.push('stop:listener');inventory.listener=[];},stopHost:async()=>{events.push('stop:host');inventory.host=[];inventory.desktop=[];},
     ordinary:async()=>{events.push('ordinary');inventory.desktop=[id(6)];return {desktop:id(6),verifiedAt:Date.now(),packageIdentityVerified:true,toolsExact:true};},
     stopBroker:async()=>{events.push('stop:broker');inventory.broker=[];},verifyBindings:async()=>{},
