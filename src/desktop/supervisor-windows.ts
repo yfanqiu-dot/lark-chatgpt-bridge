@@ -7,6 +7,7 @@ import { verifyDeployment } from './deployment';
 import type { ColdExitProof, ProcessIdentity, SupervisorInventory, LegacyRetirementProof } from './supervisor';
 import { ColdExitObservationUnavailable } from './supervisor';
 import { windowsPowerShellEnvironment } from './windows-tools';
+import { performance } from 'node:perf_hooks';
 
 const exec = promisify(execFile);
 const digest = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
@@ -125,14 +126,26 @@ export class WindowsSupervisorControl {
   private async completeSharedSnapshot(boundedRead:boolean): Promise<ColdExitProof & { inventory: SupervisorInventory; endpointOwners:Array<{endpoint:string;listeners:Array<{address:string;pid:number}>}> }> {
     // Each attempt is a complete CIM/TCP scan from the pinned reader. Never
     // combine partial data or reset the caller's <=5s native admission clock.
+    const startedAt=Date.now(),started=performance.now(),attempts:Array<{attempt:number;elapsedMs:number;outcome:'complete'|'identity_unavailable'|'failed'}>=[];
+    try{
     for(let attempt=0;attempt<3;attempt++){
-      try{return await this.call('SharedSnapshot',[],undefined,false,boundedRead);}
+      const at=performance.now();
+      try{const result=await this.call('SharedSnapshot',[],undefined,false,boundedRead);attempts.push({attempt:attempt+1,elapsedMs:performance.now()-at,outcome:'complete'});return result;}
       catch(error){
+        attempts.push({attempt:attempt+1,elapsedMs:performance.now()-at,outcome:error instanceof ColdExitObservationUnavailable && error.action==='SharedSnapshot'?'identity_unavailable':'failed'});
         if(!(error instanceof ColdExitObservationUnavailable) || error.action!=='SharedSnapshot' || attempt===2)throw error;
         await new Promise<void>(done=>setTimeout(done,250));
       }
     }
     throw new Error('Complete shared process inventory unavailable');
+    }finally{
+      // Best-effort diagnostics cannot replace a proof or change a failure.
+      // Store no response, endpoint, process identity or arbitrary error text.
+      const completedAt=Date.now(),elapsedMs=performance.now()-started;
+      if(boundedRead || attempts.some(a=>a.outcome!=='complete')){
+        try{const directory=await mkdtemp(join(this.evidence,'shared-read-timing-'));await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action:'SharedSnapshot',boundedRead,startedAt,completedAt,elapsedMs,attempts}),{encoding:'utf8',flag:'wx'});}catch{}
+      }
+    }
   }
   async sharedSnapshot(): ReturnType<WindowsSupervisorControl['completeSharedSnapshot']> { return this.completeSharedSnapshot(false); }
   /** For an already pinned <=5s admission scan only. Still hashes the sealed

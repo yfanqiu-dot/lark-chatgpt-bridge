@@ -87,6 +87,11 @@ it.skipIf(process.platform!=='win32').each(['shared','bounded'] as const)('retur
   mock.exec.mockRejectedValueOnce(unavailable).mockRejectedValueOnce(unavailable).mockResolvedValueOnce({stdout:JSON.stringify(complete)});
   expect(await (mode==='shared'?control.sharedSnapshot():control.boundedSharedSnapshot())).toEqual(complete);
   expect(mock.exec).toHaveBeenCalledTimes(3);expect(mock.exec.mock.calls.every(([program,args])=>program==='powershell.exe'&&args.at(-1)==='SharedSnapshot')).toBe(true);
+  const timingFolder=(await readdir(join(directory,'evidence'))).find(n=>n.startsWith('shared-read-timing-'))!;
+  const timingText=await readFile(join(directory,'evidence',timingFolder,'summary.json'),'utf8'),timing=JSON.parse(timingText);
+  expect(timing).toMatchObject({action:'SharedSnapshot',boundedRead:mode==='bounded',attempts:[{attempt:1,outcome:'identity_unavailable'},{attempt:2,outcome:'identity_unavailable'},{attempt:3,outcome:'complete'}]});
+  expect(timing.elapsedMs).toBeGreaterThanOrEqual(490);expect(timing.attempts.every((a:any)=>a.elapsedMs>=0)).toBe(true);
+  expect(timingText).not.toMatch(/TEST_PRIVATE|endpoint|inventory|desktopRelated/);
 });
 it.skipIf(process.platform!=='win32').each(['shared','bounded'] as const)('rejects persistent unreadability after at most three %s shared scans and retains validated diagnostics',async mode=>{
   const control=await fixtureControl(),diagnostic={version:1,pid:23,parentPid:5,processName:'node.exe',createdAt:'2026-10-13T00:00:00.000Z',missingExecutablePath:true,missingCommandLine:true,missingCreationDate:false,privateExtra:'TEST_PRIVATE_SHARED'};
@@ -104,6 +109,19 @@ it.skipIf(process.platform!=='win32')('rejects a bounded shared retry when its p
   const control=await fixtureControl();
   mock.exec.mockImplementationOnce(async()=>{await writeFile(join(directory,'control.ps1'),'CHANGED READER','utf8');throw Object.assign(Error('TEST_PRIVATE_SHARED'),{code:1,stderr:'    + FullyQualifiedErrorId : Process identity is not readable\r\n'});});
   await expect(control.boundedSharedSnapshot()).rejects.toThrow('Bounded native reader changed');expect(mock.exec).toHaveBeenCalledTimes(1);
+});
+it.skipIf(process.platform!=='win32').each(['success','failure'] as const)('diagnostic write failure cannot replace the original shared %s result',async mode=>{
+  const control=await fixtureControl(),failure=Object.assign(Error('TEST_PRIVATE_DIAGNOSTIC'),{code:'ETIMEDOUT'}),result={verifiedAt:123,complete:true,inventory:{desktop:[]}};
+  mock.exec.mockImplementation(async()=>{await rm(join(directory,'evidence'),{recursive:true});if(mode==='failure')throw failure;return {stdout:JSON.stringify(result)};});
+  if(mode==='failure')await expect(control.boundedSharedSnapshot()).rejects.toBe(failure);
+  else expect(await control.boundedSharedSnapshot()).toEqual(result);
+  expect(mock.exec).toHaveBeenCalledTimes(1);
+});
+it.skipIf(process.platform!=='win32')('does not accumulate timing files for successful unbounded health reads',async()=>{
+  const control=await fixtureControl(),result={verifiedAt:123,complete:true,inventory:{desktop:[]}};
+  mock.exec.mockResolvedValue({stdout:JSON.stringify(result)});
+  expect(await control.sharedSnapshot()).toEqual(result);
+  expect((await readdir(join(directory,'evidence'))).filter(n=>n.startsWith('shared-read-timing-'))).toEqual([]);
 });
 it.skipIf(process.platform!=='win32')('keeps only validated unreadable process identifiers and flags, excluding command and path fields',async()=>{
   const control=await fixtureControl();const diagnostic={version:1,pid:12,parentPid:5,processName:'node.exe',createdAt:'2026-10-13T00:00:00.000Z',missingExecutablePath:true,missingCommandLine:false,missingCreationDate:false,commandLine:'TEST_PRIVATE_COMMAND',executablePath:'TEST_PRIVATE_PATH'};

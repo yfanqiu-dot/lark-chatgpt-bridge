@@ -25,9 +25,25 @@ export interface SharedIdleObservation {
   proof?: IdleProof;
   blocker?: IdleBlocker;
   failure?: { method?: string; kind: string; code?: number };
+  /** Fixed counters and durations only. Diagnostic data never grants admission. */
+  timing?: SharedAdmissionTiming;
   /** First unsolicited message in the native observation window. No body,
    * configuration value, request id or arbitrary method text is retained. */
   activity?: { observedAt:number; kind:'request'|'notification'|'unclassified'; method?:string; methodSha256?:string; threadId?:string; turnId?:string };
+}
+export interface SharedAdmissionTiming {
+  version: 1;
+  startedAt: number;
+  completedAt: number;
+  elapsedMs: number;
+  nativeWindowStartedAt?: number;
+  nativeWindowMs?: number;
+  prerequisiteContextMs: number;
+  finalContextMs: number;
+  projectHistoryReadMs: number;
+  taskQueueReadMs: number;
+  nativeReadCount: number;
+  contextReadCount: number;
 }
 const reads = new Set(['project/list','thread/turns/list','thread/loaded/list','thread/read','thread/queue/list']);
 /** Only reads the new shared App Server. Does not resume/create a task, submit
@@ -36,6 +52,31 @@ const reads = new Set(['project/list','thread/turns/list','thread/loaded/list','
 export async function inspectSharedIdle(rpc: OrdinaryReadRpc, expected: SharedContext,
   bindings: readonly SupervisorBinding[], baseline: { desktopVersion: string; codexSha256: string; toolNames: readonly string[] },
   recheckContext: () => Promise<SharedContext>, now = Date.now): Promise<SharedIdleObservation> {
+  const startedAt=now();let nativeWindowStartedAt:number|undefined;
+  const timing:SharedAdmissionTiming={version:1,startedAt,completedAt:startedAt,elapsedMs:0,prerequisiteContextMs:0,finalContextMs:0,projectHistoryReadMs:0,taskQueueReadMs:0,nativeReadCount:0,contextReadCount:0};
+  const measured:OrdinaryReadRpc={
+    get changed(){return rpc.changed;},
+    beginObservation(){nativeWindowStartedAt=now();rpc.beginObservation?.();},
+    async call(method,params){
+      const at=now();timing.nativeReadCount++;
+      try{return await rpc.call(method,params);}finally{
+        const key=method==='project/list'||method==='thread/turns/list'?'projectHistoryReadMs':'taskQueueReadMs';
+        timing[key]+=Math.max(0,now()-at);
+      }
+    },
+    close(){rpc.close();},
+  };
+  const observed=await inspectSharedIdleCore(measured,expected,bindings,baseline,async()=>{
+    const at=now(),key=timing.contextReadCount++===0?'prerequisiteContextMs':'finalContextMs';
+    try{return await recheckContext();}finally{timing[key]+=Math.max(0,now()-at);}
+  },now);
+  const completedAt=now();
+  return {...observed,timing:{...timing,completedAt,elapsedMs:Math.max(0,completedAt-startedAt),
+    ...(nativeWindowStartedAt===undefined?{}:{nativeWindowStartedAt,nativeWindowMs:Math.max(0,completedAt-nativeWindowStartedAt)})}};
+}
+async function inspectSharedIdleCore(rpc: OrdinaryReadRpc, expected: SharedContext,
+  bindings: readonly SupervisorBinding[], baseline: { desktopVersion: string; codexSha256: string; toolNames: readonly string[] },
+  recheckContext: () => Promise<SharedContext>, now:()=>number): Promise<SharedIdleObservation> {
   let started = now(),lastMethod: string | undefined;
   const failed = (finding: string): SharedIdleObservation => ({verified:false,source:'owned_shared_native',findings:[finding]});
   const contextValid = (c: SharedContext) => sameProcess(c.host,expected.host) && sameProcess(c.backend,expected.backend) && sameProcess(c.desktop,expected.desktop)

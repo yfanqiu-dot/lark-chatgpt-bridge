@@ -60,3 +60,36 @@ it('includes project/history scan time in proof freshness and rejects observed a
   const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>c,()=>tick);expect(r.verified).toBe(false);
   const dirty=harness();Object.defineProperty(dirty.rpc,'changed',{value:true});expect((await inspectSharedIdle(dirty.rpc,c,bindings,baseline,async()=>c)).verified).toBe(false);
 });
+it('separates prerequisite, native reads and final identity time without renewing the proof clock',async()=>{
+  const c=context(),initial=c.leaseVerifiedAt;let tick=initial,contexts=0;
+  const h=harness(m=>{tick+=m==='project/list'||m==='thread/turns/list'?100:10;});
+  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>{tick+=++contexts===1?6000:500;return {...c,leaseVerifiedAt:tick};},()=>tick);
+  expect(r.verified).toBe(true);expect(r.proof?.verifiedAt).toBe(initial+6000);
+  expect(r.timing).toEqual({version:1,startedAt:initial,completedAt:initial+6810,elapsedMs:6810,nativeWindowStartedAt:initial+6000,nativeWindowMs:810,prerequisiteContextMs:6000,finalContextMs:500,projectHistoryReadMs:200,taskQueueReadMs:110,nativeReadCount:13,contextReadCount:2});
+  expect(h.closed).toBe(1);
+});
+it('attributes a slow final identity check and still rejects an expired native observation',async()=>{
+  const c=context();let tick=c.leaseVerifiedAt,contexts=0;const h=harness();
+  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>{if(++contexts===2)tick+=5001;return c;},()=>tick);
+  expect(r).toMatchObject({verified:false,findings:['shared_observation_stale'],timing:{finalContextMs:5001,nativeWindowMs:5001,nativeReadCount:13,contextReadCount:2}});
+  expect(r.proof).toBeUndefined();expect(contexts).toBe(2);
+});
+it('attributes slow project/history reads without hiding their effect on the five-second gate',async()=>{
+  const c=context();let tick=c.leaseVerifiedAt;const h=harness(m=>{if(m==='thread/turns/list')tick+=5001;});
+  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>c,()=>tick);
+  expect(r.verified).toBe(false);expect(r.proof).toBeUndefined();
+  expect(r.timing).toMatchObject({projectHistoryReadMs:5001,taskQueueReadMs:0,nativeWindowMs:5001,finalContextMs:0,contextReadCount:1,nativeReadCount:2});
+});
+it('retains bounded timing for failed context reads without retaining errors or inventing a native window',async()=>{
+  const c=context();let tick=c.leaseVerifiedAt;const h=harness();
+  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>{tick+=120;throw Error('SECRET_CONTEXT');},()=>tick);
+  expect(r).toMatchObject({verified:false,timing:{prerequisiteContextMs:120,finalContextMs:0,elapsedMs:120,contextReadCount:1,nativeReadCount:0}});
+  expect(r.timing?.nativeWindowStartedAt).toBeUndefined();expect(r.timing?.nativeWindowMs).toBeUndefined();
+  expect(h.calls).toEqual([]);expect(JSON.stringify(r)).not.toContain('SECRET');expect(h.closed).toBe(1);
+});
+it('measures a rejected task RPC once without retry or response content in timing',async()=>{
+  const c=context();let tick=c.leaseVerifiedAt;const h=harness(m=>{if(m==='thread/read'){tick+=200;throw new RpcError(403,'SECRET_RPC');}});
+  const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>c,()=>tick);
+  expect(r).toMatchObject({verified:false,failure:{code:403},timing:{taskQueueReadMs:200,nativeReadCount:4,contextReadCount:1}});
+  expect(h.calls.filter(m=>m==='thread/read')).toHaveLength(1);expect(JSON.stringify(r)).not.toContain('SECRET');
+});
