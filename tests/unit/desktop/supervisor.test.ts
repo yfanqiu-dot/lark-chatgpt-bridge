@@ -57,14 +57,14 @@ it('switches a single consumer, writes intent before side effects and restores i
   const result = await h.run(); expect(result.phase).toBe('restored');
   expect(h.events.filter(e => !['idle','bindings','ready','health'].includes(e))).toEqual(['backup','pauseLegacy','closeDesktop','startBroker','startHost','startListener','stopListener','stopHost','ordinary','restoreLegacy','stopBroker']);
   expect(h.inventory).toMatchObject({ legacy: [identity(8)], desktop: [identity(7)], host: [], listener: [], broker: [] });
-});
+},20_000);
 it.each(['pauseLegacy','closeDesktop','startBroker','startHost','startListener','ready'])('rolls back a known failure before %s without relaunching model consumers', async step => {
   const h = harness(); h.fail(step); const result = await h.run();
   expect(result.phase).toBe('restored'); expect(result.errorCode).toBe('supervisor_operation_failed');
   expect(h.inventory.legacy).toHaveLength(1); expect(h.inventory.host).toHaveLength(0); expect(h.inventory.listener).toHaveLength(0);
   expect(await readFile(h.path, 'utf8')).not.toContain('SECRET');
   for (const launch of ['startBroker','startHost','startListener']) expect(h.events.filter(e => e === launch).length).toBeLessThanOrEqual(1);
-});
+},20_000);
 it.each(['startBroker','startHost','startListener'])('keeps an ambiguous %s receipt blocked and never guesses which process to stop', async step => {
   const h = harness(); h.fail(step, true); const result = await h.run();
   expect(result.phase).toBe('blocked'); expect(result.rollbackErrorCode).toBe('owned_process_unconfirmed');

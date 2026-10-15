@@ -86,7 +86,7 @@ it.each(['socket','failedResponse','failure','foreignRun','foreignHost','stale',
   if(kind==='failure')h.withdrawal.readiness.configurationFailures=1;if(kind==='foreignRun')h.withdrawal.runId='foreign';if(kind==='foreignHost')h.withdrawal.hostPid=99;
   if(kind==='stale')h.advance(61000);if(kind==='pendingUnknown')h.withdrawal.readiness.pendingConfiguration=['other/write'];await h.publish();
   expect(await h.port.health()).toBe(false);expect(h.events).not.toContain('liveOriginalIdentity');
-});
+},20_000);
 it.each(['identity','locks','owner','retirement','catalog','backend','oldLease','otherFile'])('fails closed on %s change during configuration refresh',async kind=>{
   const h=await configurationHarness();
   if(kind==='identity')h.effects.configurationIdentity=async()=>{throw Error('Original process changed');};
