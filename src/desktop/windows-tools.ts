@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { readdir } from 'node:fs/promises';
 const exec = promisify(execFile);
 
 export function cleanDesktopEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -26,19 +27,26 @@ $taskHandle=Get-Process -Id $taskExpectedPid
 if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$null) -ne 122){throw 'Desktop has no package identity'}
 $taskPackage=[Text.StringBuilder]::new([int]$taskLength)
 if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$taskPackage) -ne 0 -or $taskPackage.ToString() -ne $taskPackageExpected){throw 'Desktop package identity changed'}
-$taskMatches=@(foreach($taskPath in [IO.Directory]::GetFiles('\\.\pipe\')) {
-  $taskName=$taskPath.Substring($taskPath.LastIndexOf('\')+1)
-  if(!$taskName.StartsWith('codex-browser-use-')){continue}
+$taskCandidates=ConvertFrom-Json $env:BRIDGE_DESKTOP_PIPE_NAMES
+$taskMatches=@(foreach($taskName in $taskCandidates) {
+  if($taskName -isnot [string] -or !$taskName.StartsWith('codex-browser-use-') -or $taskName -match '[\\/\x00]'){throw 'Invalid desktop pipe candidate'}
+  $taskPath='\\.\pipe\'+$taskName
   $taskPipe=[IO.Pipes.NamedPipeClientStream]::new('.',$taskName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous)
   try { $taskPipe.Connect(100); [uint32]$taskOwner=0; if([BridgePipeOwner]::GetNamedPipeServerProcessId($taskPipe.SafePipeHandle,[ref]$taskOwner) -and $taskOwner -eq $taskExpectedPid){[pscustomobject]@{pipe=$taskPath;serverPid=$taskOwner}} } catch {} finally { $taskPipe.Dispose() }
 })
 ConvertTo-Json -InputObject $taskMatches -Compress
 `;
+/** Node enumerates the pipe namespace without .NET Framework path normalization.
+ * Candidates still require the original packaged desktop and native server PID check. */
+export async function desktopPipeNames(): Promise<string[]> {
+  return (await readdir('\\\\.\\pipe\\')).filter(name => name.startsWith('codex-browser-use-') && !/[\\/\0]/.test(name));
+}
 export async function desktopPipes(pid: number, desktopExe: string): Promise<Array<{pipe: string; serverPid: number}>> {
   if (process.platform !== 'win32') throw new Error('Shared desktop host currently requires Windows');
+  const candidates = await desktopPipeNames();
   const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', discovery], {
     windowsHide: true, timeout: 20_000, encoding: 'utf8',
-    env: { ...windowsPowerShellEnvironment(process.env), BRIDGE_DESKTOP_PID: String(pid), BRIDGE_DESKTOP_EXE: desktopExe },
+    env: { ...windowsPowerShellEnvironment(process.env), BRIDGE_DESKTOP_PID: String(pid), BRIDGE_DESKTOP_EXE: desktopExe, BRIDGE_DESKTOP_PIPE_NAMES: JSON.stringify(candidates) },
   });
   return JSON.parse(stdout.trim());
 }

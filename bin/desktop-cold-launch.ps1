@@ -29,7 +29,7 @@ if($WorkerMode -eq 'Recover'){
   }
 }
 $taskClaim=[IO.File]::Open((Join-Path $taskPlan.directory ($taskName+'.claim')),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);$taskClaim.Dispose()
-$taskNames=@('Path','SystemRoot','ComSpec','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','ProgramFiles','ProgramData','CODEX_HOME','LANG')
+$taskNames=@('Path','PATHEXT','SystemRoot','ComSpec','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','ProgramFiles','ProgramData','CODEX_HOME','LANG')
 $taskEnvironment=@(Get-ChildItem Env:|Where-Object{$_.Name -in $taskNames}|ForEach-Object{$_.Name+'='+$_.Value})
 $taskStartup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0;CreateFlags=[uint32]1032;EnvironmentVariables=[string[]]$taskEnvironment}
 $taskArgument=if($WorkerMode -eq 'Run'){'--run'}else{'--recover'}

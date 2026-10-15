@@ -11,7 +11,7 @@ function Get-LaunchSha($text){
   try{return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
 }
 function New-StandaloneStartup {
-  $names=@('Path','SystemRoot','ComSpec','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','ProgramFiles','ProgramData','CODEX_HOME','LANG')
+  $names=@('Path','PATHEXT','SystemRoot','ComSpec','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','ProgramFiles','ProgramData','CODEX_HOME','LANG')
   $variables=@(Get-ChildItem Env: | Where-Object {$_.Name -in $names} | ForEach-Object {$_.Name+'='+$_.Value})
   # Win32_ProcessStartup's documented Detached_Process + Unicode environment.
   # https://learn.microsoft.com/windows/win32/cimwin32prov/win32-processstartup
