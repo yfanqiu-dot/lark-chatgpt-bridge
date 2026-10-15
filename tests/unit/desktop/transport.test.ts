@@ -103,18 +103,21 @@ it('checks paginated task-scoped MCP state and waits for startup before submitti
 });
 
 it('reconnects to a known turn and returns its final output without submitting again',async()=>{
-  let starts=0,reads=0,resumes=0;
+  let starts=0,reads=0,resumes=0,knownTurn=false;
   serve((m,s)=>{
     if(m.method==='thread/resume')resumes++;
     if(m.method==='thread/queue/add'){starts++;return {turn:{id:'turn'}};}
     if(m.method==='thread/turns/list'){
-      if(++reads===1){s.terminate();return;}
+      // Queue admission may discover the turn through history before the
+      // item/started notification arrives. Inject this test's disconnect only
+      // after attribution is verified, as required by the known-turn case.
+      if(knownTurn&&++reads===1){s.terminate();return;}
       return {data:[{id:'turn',status:'completed',completedAt:1}]};
     }
     return baseline(m);
   });
   const b=new DesktopBackend(config(),{rpcFactory:client,toolConfig:async()=>({}),pollMs:1,reconnectDelayMs:1});
-  expect(await b.execute('one',hooks())).toEqual({turnId:'turn',status:'completed',text:'结果'});
+  expect(await b.execute('one',{...hooks(),started:async id=>{expect(id).toBe('turn');knownTurn=true;}})).toEqual({turnId:'turn',status:'completed',text:'结果'});
   expect(starts).toBe(1);expect(resumes).toBe(2);
 });
 
