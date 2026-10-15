@@ -117,7 +117,7 @@ export interface SupervisorPort {
   legacyRetirement?(): Promise<LegacyRetirementProof>;
   /** Explicit managed mode only. A fresh owned host receipt of a clean GUI
    * exit; missing/abnormal receipts never authorize skipping restoration. */
-  desktopQuit?(): Promise<ProcessIdentity | undefined>;
+  desktopQuit?(options?: {waitForReceipt?:boolean}): Promise<ProcessIdentity | undefined>;
 }
 const phases: SupervisorPhase[] = ['preflight', 'waiting_desktop_exit', 'pausing_legacy', 'closing_desktop', 'starting_broker', 'starting_host', 'starting_listener', 'running', 'stopping_listener', 'stopping_host', 'restoring_desktop', 'restoring_legacy', 'stopping_broker', 'restored', 'closed', 'blocked'];
 function validIdentity(p: ProcessIdentity): boolean {
@@ -269,9 +269,9 @@ export class DesktopSupervisor {
     if ((await this.inventory())[role].length) fail('owned_process_still_running');
     // Keep the last identity receipt for postmortem/repeated rollback checks.
   }
-  private async managedDesktopQuit(s:SupervisorState,stopRequested:()=>Promise<boolean>):Promise<boolean>{
+  private async managedDesktopQuit(s:SupervisorState,stopRequested:()=>Promise<boolean>,waitForReceipt=false):Promise<boolean>{
     if(!s.serviceMode)return false;
-    const quit=await this.port.desktopQuit!();if(!quit)return false;
+    const quit=await this.port.desktopQuit!(waitForReceipt?{waitForReceipt:true}:undefined);if(!quit)return false;
     const q=await this.inventory();
     if(!s.lastIdleProof || !sameProcess(quit,s.lastIdleProof.desktop) || q.desktop.length || q.legacy.length
       || q.host.length>1 || q.host.length && !sameProcess(q.host[0]!,s.owned.host!)
@@ -410,11 +410,14 @@ export class DesktopSupervisor {
           if (i.legacy.length || ['broker','host','listener'].some(role => i[role as 'broker'|'host'|'listener'].length !== 1 || !sameProcess(i[role as 'broker'|'host'|'listener'][0]!, s!.owned[role as 'broker'|'host'|'listener']!)) || !await this.port.health()) {
             // GUI exit can begin after the preceding quit check and during
             // inventory/health reads. Before restoration, observe the same
-            // original clean-exit receipt once more (adapter bound: 20s).
+            // original clean-exit receipt once more (adapter bound: 20s),
+            // including a still-present original GUI whose tool pipe has
+            // already closed. The receipt and final empty GUI inventory are
+            // both mandatory; a health failure never becomes healthy again.
             // Missing/abnormal receipts still fail; no health retry, stale
             // readiness allowance, service restart or input replay occurs.
             if(await stopRequested())fail('runtime_health_failed');
-            if(await this.managedDesktopQuit(s,stopRequested))break;
+            if(await this.managedDesktopQuit(s,stopRequested,true))break;
             fail('runtime_health_failed');
           }
           await pause();

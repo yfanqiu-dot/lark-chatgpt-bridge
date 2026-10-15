@@ -174,6 +174,64 @@ it('bounds missing clean-exit evidence and grants no permission to skip ordinary
   await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.sharedIdle();await h.port.startListener(runId);h.inventory.desktop=[];
   const started=h.clock();expect(await h.port.desktopQuit()).toBeUndefined();expect(h.clock()-started).toBe(20_000);
 });
+async function managedQuitHarness(){
+  const h=harness(false,'new-only');h.inventory.legacy=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.sharedIdle();await h.port.startListener(runId);
+  const receipt=(extra={})=>writeFile(`${h.input.host.connectionFile}.desktop-exit.json`,JSON.stringify({version:1,runId,hostPid:4,desktopPid:5,backendPid:88,observedAt:h.clock(),exitCode:0,verifiedOnce:true,backendWasRunning:true,...extra}),'utf8');
+  return {...h,receipt};
+}
+it('keeps healthy polling immediate but awaits the original clean receipt after a tool-pipe failure while the GUI is still present',async()=>{
+  const h=await managedQuitHarness(),started=h.clock(),pause=h.effects.pause;let waits=0;
+  expect(await h.port.desktopQuit()).toBeUndefined();expect(h.clock()).toBe(started);
+  h.effects.pause=async()=>{await pause();if(++waits===9){h.inventory.desktop=[];h.inventory.host=[];await h.receipt();}};
+  expect(await h.port.desktopQuit({waitForReceipt:true})).toEqual(h.ids.shared);expect(waits).toBe(9);
+  expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(['launch:broker','launch:host','launch:listener']);expect(h.events).not.toContain('packageRestore');expect(h.events).not.toContain('shell');
+});
+it('reads a receipt published during the inventory query even when the original host has already exited',async()=>{
+  const h=await managedQuitHarness(),inventory=h.effects.control.inventory;let reads=0;
+  h.effects.control.inventory=async()=>{if(++reads===1){h.advance(10000);h.inventory.desktop=[];h.inventory.host=[];await h.receipt();}return inventory();};
+  expect(await h.port.desktopQuit({waitForReceipt:true})).toEqual(h.ids.shared);expect(reads).toBe(1);expect(h.events).not.toContain('packageRestore');
+});
+it('does not turn an unresponsive live GUI into a clean quit and bounds failed-health receipt waiting by twenty seconds',async()=>{
+  const h=await managedQuitHarness(),started=h.clock();
+  expect(await h.port.desktopQuit({waitForReceipt:true})).toBeUndefined();expect(h.clock()-started).toBe(20000);expect(h.inventory.desktop).toEqual([h.ids.shared]);
+});
+it.each(['desktop','host','listener','broker','legacy','owner'])('rejects a %s conflict while awaiting the original quit receipt',async role=>{
+  const h=await managedQuitHarness(),started=h.clock();
+  if(role==='owner')(h.port as any).lost=true;
+  else if(role==='legacy')h.inventory.legacy=[h.ids.legacy];
+  else h.inventory[role as 'desktop'|'host'|'listener'|'broker']=[{...h.ids.shared,createdAt:'2026-10-12T00:00:00.000Z'}];
+  expect(await h.port.desktopQuit({waitForReceipt:true})).toBeUndefined();expect(h.clock()).toBe(started);expect(h.events).not.toContain('packageRestore');
+});
+it('rejects an abnormal receipt that arrives while waiting after failed health',async()=>{
+  const h=await managedQuitHarness(),pause=h.effects.pause;
+  h.effects.pause=async()=>{await pause();h.inventory.desktop=[];h.inventory.host=[];await h.receipt({exitCode:1});};
+  await expect(h.port.desktopQuit({waitForReceipt:true})).rejects.toThrow('receipt invalid');expect(h.events).not.toContain('packageRestore');
+});
+it('does not accept a receipt published after owner-lease loss during the bounded wait',async()=>{
+  const h=await managedQuitHarness(),pause=h.effects.pause;
+  h.effects.pause=async()=>{await pause();(h.port as any).lost=true;h.inventory.desktop=[];h.inventory.host=[];await h.receipt();};
+  expect(await h.port.desktopQuit({waitForReceipt:true})).toBeUndefined();expect(h.events).not.toContain('packageRestore');
+});
+it.each([20000,20001])('includes a slow final inventory read in the fixed quit-receipt budget at %d ms',async elapsed=>{
+  const h=await managedQuitHarness(),inventory=h.effects.control.inventory;
+  h.effects.control.inventory=async()=>{h.advance(elapsed);h.inventory.desktop=[];h.inventory.host=[];await h.receipt();return inventory();};
+  expect(await h.port.desktopQuit({waitForReceipt:true})).toEqual(elapsed===20000?h.ids.shared:undefined);expect(h.events).not.toContain('packageRestore');
+});
+it('closes the concrete managed lifecycle when tool-pipe loss precedes GUI exit and the host receipt by nine seconds',async()=>{
+  const h=harness(false,'new-only');h.inventory.legacy=[];h.inventory.desktop=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  const path=join(dir,'journal.json'),pause=h.effects.pause;let failed=false,healthReads=0,waits=0;
+  h.effects.context=async()=>{const s=JSON.parse(await readFile(path,'utf8'));if(s.phase==='running'){failed=true;healthReads++;throw Error('Owned tool pipe unverified');}return {} as any;};
+  h.effects.pause=async()=>{await pause();if(failed&&++waits===9){const s=JSON.parse(await readFile(path,'utf8'));h.inventory.desktop=[];h.inventory.host=[];await writeFile(`${h.input.host.connectionFile}.desktop-exit.json`,JSON.stringify({version:1,runId:s.runId,hostPid:4,desktopPid:5,backendPid:88,observedAt:h.clock(),exitCode:0,verifiedOnce:true,backendWasRunning:true}),'utf8');}};
+  const result=await new DesktopSupervisor(new SupervisorJournal(path),h.port,h.bindings,h.clock).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(result).toMatchObject({phase:'closed',desktopQuitVerified:true});expect(result.errorCode).toBeUndefined();expect(healthReads).toBe(1);expect(waits).toBe(9);
+  expect(h.inventory).toMatchObject({desktop:[],legacy:[],host:[],listener:[],broker:[]});expect(h.events).not.toContain('packageRestore');expect(h.events).not.toContain('shell');
+  expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(['launch:broker','launch:host','launch:listener']);
+  expect(JSON.parse(await readFile(join(dir,'runtime-health.failure.json'),'utf8')).errorSha256).toBe(createHash('sha256').update('Owned tool pipe unverified').digest('hex'));
+  expect(JSON.parse(await readFile(join(dir,'runtime-desktop-quit-observation.json'),'utf8'))).toMatchObject({runId:result.runId,reason:'original_receipt_verified',elapsedMs:9000});
+});
 it('runs the concrete cold lifecycle with fresh lease, memory-only auth, handshake and ordered restoration',async()=>{
   const h=harness();let stop=false;
   const state=await new DesktopSupervisor(new SupervisorJournal(join(dir,'journal.json')),h.port,h.bindings,h.clock).run(async()=>stop,async()=>{if(h.inventory.desktop[0]?.pid===2&&!h.inventory.host.length)h.inventory.desktop=[];else stop=true;},{startMode:'cold'});

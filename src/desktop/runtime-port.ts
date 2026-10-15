@@ -146,24 +146,43 @@ export class DesktopRuntimePort implements SupervisorPort {
     await writeFile(join(this.directory,`shared-idle-${++this.sharedObservation}.json`),JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
     if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');this.sharedDesktop=structuredClone(r.proof.desktop);return r.proof;
   }
-  async desktopQuit():Promise<ProcessIdentity|undefined>{
+  async desktopQuit(options:{waitForReceipt?:boolean}={}):Promise<ProcessIdentity|undefined>{
     if(this.channelMode!=='new-only' || this.input.host.desktopQuitPolicy!=='stop-with-desktop' || !this.sharedDesktop || !this.owned.host || this.lost)return;
     let p:any;
     const deadline=this.effects.now()+20_000;
+    let receiptRead:'before_inventory'|'after_inventory'='before_inventory';
+    const report=async(reason:string,checks?:Record<string,boolean>)=>{
+      if(!options.waitForReceipt)return;
+      try{await writeFileAtomic(join(this.directory,'runtime-desktop-quit-observation.json'),JSON.stringify({version:1,runId:this.runId,
+        startedAt:deadline-20_000,deadline,observedAt:this.effects.now(),elapsedMs:this.effects.now()-(deadline-20_000),reason,receiptRead,...(checks?{checks}:{})}));}catch{}
+    };
     for(;;){
+      receiptRead='before_inventory';
       try{p=await json(`${this.input.host.connectionFile}.desktop-exit.json`);break;}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
       const i=await this.inventory();
-      // The GUI may disappear before the host's next refresh (10 seconds).
-      // Wait only for its original receipt; never invent a clean exit from PID
-      // absence, keep old readiness alive, or launch/submit anything here.
-      if(this.lost || i.desktop.length || i.legacy.length || i.host.length!==1 || !sameProcess(i.host[0]!,this.owned.host)
-        || !this.owned.broker || i.broker.length!==1 || !sameProcess(i.broker[0]!,this.owned.broker)
-        || !this.owned.listener || i.listener.length!==1 || !sameProcess(i.listener[0]!,this.owned.listener) || this.effects.now()>=deadline)return;
+      // Inventory can outlast receipt publication and the original host's
+      // exit. Re-read before rejecting a now-absent host; no missing process
+      // or old readiness grants clean-quit permission.
+      receiptRead='after_inventory';
+      try{p=await json(`${this.input.host.connectionFile}.desktop-exit.json`);break;}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+      // A closing GUI can lose its tool pipe before disappearing. Only the
+      // failed-health path may wait while that exact GUI remains. Normal
+      // healthy polling stays immediate; both paths retain the fixed 20s
+      // receipt budget, original roles and subsequent empty-GUI verification.
+      const checks={ownerAvailable:!this.lost,
+        originalDesktop:i.desktop.length===0||options.waitForReceipt===true&&i.desktop.length===1&&sameProcess(i.desktop[0]!,this.sharedDesktop),
+        noLegacy:i.legacy.length===0,originalHost:i.host.length===0||i.host.length===1&&sameProcess(i.host[0]!,this.owned.host),
+        originalBroker:!!this.owned.broker&&i.broker.length===1&&sameProcess(i.broker[0]!,this.owned.broker),
+        originalListener:!!this.owned.listener&&i.listener.length===1&&sameProcess(i.listener[0]!,this.owned.listener),withinBudget:this.effects.now()<deadline};
+      if(!Object.values(checks).every(Boolean)){await report('inventory_refused',checks);return;}
       await this.effects.pause();
     }
-    if(p.version!==1 || p.runId!==this.runId || p.hostPid!==this.owned.host.pid || p.desktopPid!==this.sharedDesktop.pid || !Number.isSafeInteger(p.backendPid) || p.backendPid<1
+    if(this.lost || this.effects.now()>deadline){await report('receipt_observation_refused',{ownerAvailable:!this.lost,withinBudget:this.effects.now()<=deadline});return;}
+    if(p?.version!==1 || p.runId!==this.runId || p.hostPid!==this.owned.host.pid || p.desktopPid!==this.sharedDesktop.pid || !Number.isSafeInteger(p.backendPid) || p.backendPid<1
       || p.exitCode!==0 || p.verifiedOnce!==true || p.backendWasRunning!==true || !Number.isFinite(p.observedAt)
-      || p.observedAt<Date.parse(this.sharedDesktop.createdAt) || p.observedAt>this.effects.now()+1000 || this.effects.now()-p.observedAt>30_000)throw new Error('Owned desktop quit receipt invalid');
+      || p.observedAt<Date.parse(this.sharedDesktop.createdAt) || p.observedAt>this.effects.now()+1000 || this.effects.now()-p.observedAt>30_000){await report('receipt_invalid');throw new Error('Owned desktop quit receipt invalid');}
+    await report('original_receipt_verified');
+    if(this.lost || this.effects.now()>deadline)return;
     return structuredClone(this.sharedDesktop);
   }
   private async listenerReadiness(){

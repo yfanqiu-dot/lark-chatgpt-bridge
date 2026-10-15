@@ -116,6 +116,13 @@ it('recognizes the original clean GUI receipt when exit begins between the quit 
   const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
   expect(s).toMatchObject({phase:'closed',desktopQuitVerified:true});expect(s.errorCode).toBeUndefined();expect(healthReads).toBe(1);expect(quitReads).toBe(2);expect(h.events).not.toContain('ordinary');expect(h.events.filter(e=>e.startsWith('start:'))).toEqual(['start:broker','start:host','start:listener']);
 });
+it('requests bounded receipt waiting only after failed health, retaining the same live GUI until its real exit is proved',async()=>{
+  const h=fixture();h.inventory.desktop=[];let failed=false,healthReads=0;const options:unknown[]=[];
+  h.port.desktopQuit=async option=>{options.push(option);if(failed&&option?.waitForReceipt){h.inventory.desktop=[];h.inventory.host=[];return id(5);}};
+  h.port.health=async()=>{failed=true;healthReads++;return false;};
+  const s=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings).run(async()=>false,async()=>{}, {startMode:'cold',channelMode:'new-only',serviceMode:'stop-with-desktop'});
+  expect(s).toMatchObject({phase:'closed',desktopQuitVerified:true});expect(s.errorCode).toBeUndefined();expect(options).toEqual([undefined,{waitForReceipt:true}]);expect(healthReads).toBe(1);expect(h.events).not.toContain('ordinary');
+});
 it.each(['missing-receipt','foreign-desktop','listener-lost','broker-lost','retirement-changed','stop-requested'])('does not mask %s behind a concurrent managed GUI exit',async condition=>{
   const h=fixture();h.inventory.desktop=[];let exited=false,stop=false;
   h.port.desktopQuit=async()=>exited&&condition!=='missing-receipt'?id(5):undefined;
