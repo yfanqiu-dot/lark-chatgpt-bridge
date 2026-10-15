@@ -159,6 +159,29 @@ it.each(['incomplete','stale'])('rejects %s cold inventory evidence before stopp
   h.port.coldExit=async()=>({...await read(),...(condition==='incomplete'?{complete:false}:{verifiedAt:Date.now()-6000})});
   expect(await h.run()).toMatchObject({phase:'blocked',errorCode:'cold_exit_proof_rejected'});expect(h.events).not.toContain('pauseLegacy');
 });
+it('takes fresh disappearance evidence after a slow inventory and retains the five-second bound',async()=>{
+  const h=coldHarness();let tick=Date.now(),stopped=false,slowRead=false;
+  const inventory=h.port.inventory;
+  h.port.inventory=async()=>{if(slowRead){tick+=6000;slowRead=false;}return inventory();};
+  h.port.backup=async()=>{h.inventory.desktop=[];slowRead=true;return {legacyTaskEnabled:true,launchDefinitionSha256:'b'.repeat(64)};};
+  h.port.coldExit=async()=>{h.events.push('coldExit');return {complete:true,verifiedAt:tick,desktopRelated:structuredClone(h.inventory.desktop)};};
+  h.port.sharedIdle=async()=>({verifiedAt:tick,desktop:h.inventory.desktop[0]!,allDesktopTasksIdle:true,toolsExact:true,tasks:bindings.map(b=>({...b,status:'idle',queueCount:0,waitingApproval:false}))});
+  const ordinary=h.port.ordinary;h.port.ordinary=async()=>({...await ordinary(),verifiedAt:tick});
+  const result=await new DesktopSupervisor(new SupervisorJournal(h.path),h.port,bindings,()=>tick).run(async()=>stopped,async()=>{stopped=true;},{startMode:'cold',exitTimeoutMs:30000});
+  expect(result).toMatchObject({phase:'restored',lastColdExitProof:{verifiedAt:tick}});expect(result.errorCode).toBeUndefined();expect(h.events).toContain('startBroker');
+});
+it('does not launch if the desktop reappears between inventory and the final disappearance read',async()=>{
+  const h=coldHarness(),read=h.port.coldExit!;let reopened=false;
+  h.port.coldExit=async()=>{if(!h.inventory.desktop.length&&!reopened){reopened=true;h.inventory.desktop=[identity(80)];}return read();};
+  const result=await h.run();expect(result.phase).toBe('blocked');expect(h.events).not.toContain('startBroker');expect(h.events).not.toContain('pauseLegacy');
+});
+it.each(['stale','incomplete','future','invalidIdentity'])('records only bounded rejection diagnostics for %s native evidence',async condition=>{
+  const h=coldHarness(),read=h.port.coldExit!;
+  h.port.coldExit=async()=>{const p=await read();if(condition==='stale')p.verifiedAt-=6000;if(condition==='future')p.verifiedAt+=2000;if(condition==='incomplete')p.complete=false;if(condition==='invalidIdentity')p.desktopRelated=[{...identity(2),commandLineSha256:'PRIVATE_INVALID_VALUE'}];return p;};
+  const result=await h.run();expect(result).toMatchObject({phase:'blocked',errorCode:'cold_exit_proof_rejected',rejectedColdExit:{inventoryReadMs:0,proofReadMs:0}});
+  expect(result.rejectedColdExit?.checks[condition==='stale'?'fresh':condition==='future'?'notFuture':condition==='incomplete'?'complete':'relatedIdentities']).toBe(false);
+  expect(JSON.stringify(result.rejectedColdExit)).not.toContain('PRIVATE_INVALID_VALUE');expect(h.events).not.toContain('startBroker');
+});
 it('rejects a desktop reopened during cold waiting with a different creation identity',async()=>{
   const h=coldHarness();expect(await h.run(async()=>{h.inventory.desktop=[identity(80)];})).toMatchObject({phase:'blocked',errorCode:'cold_exit_inventory_changed'});
   expect(h.events).not.toContain('pauseLegacy');

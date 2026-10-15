@@ -81,6 +81,8 @@ export interface SupervisorState {
   desktopCloseAttempted: boolean;
   desktopRestoreRequired?: boolean;
   lastColdExitProof?: ColdExitProof;
+  rejectedColdExit?: { observedAt:number; inventoryReadMs:number; proofReadMs:number; proofAgeMs:number|null;
+    checks:{complete:boolean;timestampFinite:boolean;notFuture:boolean;fresh:boolean;relatedArray:boolean;relatedIdentities:boolean} };
   errorCode?: string;
   rollbackErrorCode?: string;
   ordinaryProof?: OrdinaryProof;
@@ -208,20 +210,29 @@ export class DesktopSupervisor {
   }
   private async coldExit(s: SupervisorState): Promise<boolean> {
     let p: ColdExitProof, i: SupervisorInventory;
-    try { p = await this.port.coldExit!(); i = await this.inventory(); }
+    const started=this.now();let inventoryDone=started;
+    // The final read must be the <=5s disappearance proof. A slower secondary
+    // inventory must not age that proof before it is checked. Both reads must
+    // still report no desktop; a reopen between them is present in the final
+    // proof and cannot authorize launch.
+    try { i = await this.inventory();inventoryDone=this.now();p = await this.port.coldExit!(); }
     catch (error) {
       // Re-read only during the existing bounded wait. No proof, service
       // launch, process stop, queue submission, or desktop restore is implied.
       if (isUnavailableColdRead(error)) return false;
       throw error;
     }
-    if (p.complete !== true || !Number.isFinite(p.verifiedAt) || p.verifiedAt > this.now() + 1000 || this.now() - p.verifiedAt > 5000
-      || !Array.isArray(p.desktopRelated) || p.desktopRelated.some(identity => !validIdentity(identity))) fail('cold_exit_proof_rejected');
+    const observedAt=this.now(),checks={complete:p.complete===true,timestampFinite:Number.isFinite(p.verifiedAt),notFuture:p.verifiedAt<=observedAt+1000,fresh:observedAt-p.verifiedAt<=5000,
+      relatedArray:Array.isArray(p.desktopRelated),relatedIdentities:Array.isArray(p.desktopRelated)&&p.desktopRelated.every(identity=>validIdentity(identity))};
+    if(Object.values(checks).some(value=>!value)){
+      s.rejectedColdExit={observedAt,inventoryReadMs:inventoryDone-started,proofReadMs:observedAt-inventoryDone,proofAgeMs:Number.isFinite(p.verifiedAt)?observedAt-p.verifiedAt:null,checks};
+      await this.journal.save(s);fail('cold_exit_proof_rejected');
+    }
     if (i.legacy.length !== (s.channelMode==='new-only' || s.legacyPauseAttempted ? 0 : 1) || (s.channelMode!=='new-only' && !s.legacyPauseAttempted && !sameProcess(i.legacy[0]!, s.baseline!.legacy))
       || i.host.length || i.listener.length || i.broker.length !== (s.owned.broker ? 1 : 0) || (s.owned.broker && !sameProcess(i.broker[0]!, s.owned.broker))
       || i.desktop.length > 1 || (i.desktop.length && (!this.desktop(s) || !sameProcess(i.desktop[0]!, this.desktop(s)!)))) fail('cold_exit_inventory_changed');
-    // The second inventory must also report no desktop. Never accept a stale
-    // disappearance proof when the user has reopened the app during the scan.
+    // Both the inventory and the final proof must report no desktop. Never
+    // accept disappearance when the user reopened the app between the reads.
     const exited = !p.desktopRelated.length && !i.desktop.length;
     if (exited) { s.lastColdExitProof = { verifiedAt:p.verifiedAt,complete:true,desktopRelated:[] };if(s.channelMode==='new-only')s.desktopRestoreRequired=true; await this.journal.save(s); }
     return exited;
