@@ -32,7 +32,55 @@ function Has-Argument($command,$value){
   $taskPattern='(?:^|\s)(?:"'+[regex]::Escape($value)+'"|'+[regex]::Escape($value)+')(?:\s|$)'
   return [regex]::IsMatch($command,$taskPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
 }
+function Open-ProcessExitObservation($process){
+  if(!('BridgePinnedProcessExit' -as [type])){Add-Type -TypeDefinition @'
+using System;using System.ComponentModel;using System.Runtime.InteropServices;
+public sealed class BridgePinnedProcessExit : IDisposable {
+  [StructLayout(LayoutKind.Sequential)] struct Time { public uint Low,High; public long Value { get { return ((long)High<<32)|Low; } } }
+  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern uint GetProcessId(IntPtr handle);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr handle,out Time created,out Time exited,out Time kernel,out Time user);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  IntPtr handle; public int NativeError { get; private set; } public bool IdentityVerified { get; private set; }
+  public DateTime KernelCreatedAt { get; private set; }
+  public static BridgePinnedProcessExit Open(int pid,DateTime expectedCreated) {
+    var result=new BridgePinnedProcessExit();result.handle=OpenProcess(0x00101000,false,pid);
+    if(result.handle==IntPtr.Zero){result.NativeError=Marshal.GetLastWin32Error();return result;}
+    Time created,exited,kernel,user;
+    if(GetProcessId(result.handle)!=(uint)pid || !GetProcessTimes(result.handle,out created,out exited,out kernel,out user)){
+      result.NativeError=Marshal.GetLastWin32Error();if(result.NativeError==0)result.NativeError=87;return result;
+    }
+    result.KernelCreatedAt=DateTime.FromFileTimeUtc(created.Value);
+    // CIM creation times have microsecond resolution. Integer comparison
+    // retains that precision without floating-point rounding or PID reuse.
+    result.IdentityVerified=created.Value/10==expectedCreated.ToUniversalTime().ToFileTimeUtc()/10;
+    return result;
+  }
+  public bool IsExited(){
+    if(NativeError!=0 || !IdentityVerified || handle==IntPtr.Zero)return false;
+    var status=WaitForSingleObject(handle,0);if(status==0)return true;if(status==258)return false;
+    if(status==0xffffffff)throw new Win32Exception(Marshal.GetLastWin32Error());throw new InvalidOperationException("Unexpected process wait result");
+  }
+  public void Dispose(){if(handle!=IntPtr.Zero){CloseHandle(handle);handle=IntPtr.Zero;}}
+}
+'@}
+  return [BridgePinnedProcessExit]::Open([int]$process.ProcessId,$process.CreationDate)
+}
+function New-VerifiedExitedRecord($process,$observation){
+  if($Action -notin @('Snapshot','ColdSnapshot','SharedSnapshot') -or !$observation.IdentityVerified -or !$observation.IsExited()){throw 'Native exit proof is not available'}
+  $taskExitProof=@{version=1;pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;processName=[string]$process.Name;
+    createdAt=$process.CreationDate.ToUniversalTime().ToString('o');kernelCreatedAt=$observation.KernelCreatedAt.ToUniversalTime().ToString('o');
+    observedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();identityVerified=$true;exited=$true}
+  if($null -eq $script:taskVerifiedExits){$script:taskVerifiedExits=[Collections.Generic.List[object]]::new()}
+  [void]$script:taskVerifiedExits.Add($taskExitProof)
+  # Retain the original topology for live descendants. This is a tombstone,
+  # never a complete active identity and never usable by a mutation.
+  return [pscustomobject]@{ProcessId=$process.ProcessId;ParentProcessId=$process.ParentProcessId;Name=$process.Name;CreationDate=$process.CreationDate;
+    ExecutablePath=$process.ExecutablePath;CommandLine=$process.CommandLine;BridgeVerifiedExited=$true}
+}
 function Get-Role($process){
+  if($process.BridgeVerifiedExited -eq $true){return $null}
   if($process.Name -eq 'ChatGPT.exe' -and $process.CommandLine -notmatch '(?:^|\s)--type='){return 'desktop'}
   if($process.Name -in @('powershell.exe','pwsh.exe') -and $process.CommandLine -match 'desktop-package-broker\.ps1["\s]'){return 'broker'}
   if($process.Name -ne 'node.exe'){return $null}
@@ -43,24 +91,37 @@ function Get-Role($process){
   return $null
 }
 function Resolve-ProcessMetadata($process){
+  if($process.BridgeVerifiedExited -eq $true){if($Action -notin @('Snapshot','ColdSnapshot','SharedSnapshot')){Throw-UnreadableProcess $process 'Process identity is not readable'};return $process}
   if($process.ExecutablePath -and $process.CommandLine -and $process.CreationDate -is [DateTime]){return $process}
   # A bulk CIM record can lack fields while a process is being created/exiting.
-  # Re-read this exact identity once; never omit an opaque/disappeared process,
-  # merge partial records, or accept a reused PID. Access errors remain fatal.
+  # Re-read this exact identity once. For read-only scans only, pin a kernel
+  # handle before the re-read so an actual exit can be distinguished from an
+  # unreadable live process. Mere disappearance still is not exit proof.
   if(!($process.CreationDate -is [DateTime]) -or [int]$process.ProcessId -le 0 -or !$process.Name){Throw-UnreadableProcess $process 'Process identity is not readable'}
-  $taskFresh=@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$process.ProcessId) -ErrorAction Stop)
-  if($taskFresh.Count -ne 1){Throw-UnreadableProcess $process 'Process identity is not readable'}
-  $taskCurrent=$taskFresh[0]
-  if($taskCurrent.ProcessId -ne $process.ProcessId -or $taskCurrent.ParentProcessId -ne $process.ParentProcessId -or $taskCurrent.Name -cne $process.Name -or $taskCurrent.CreationDate -ne $process.CreationDate -or
-    !$taskCurrent.ExecutablePath -or !$taskCurrent.CommandLine -or !($taskCurrent.CreationDate -is [DateTime]) -or
-    ($process.ExecutablePath -and $taskCurrent.ExecutablePath -cne $process.ExecutablePath) -or
-    ($process.CommandLine -and $taskCurrent.CommandLine -cne $process.CommandLine)){
+  $taskExitObservation=$null
+  try{
+    if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){$taskExitObservation=Open-ProcessExitObservation $process}
+    $taskFresh=@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$process.ProcessId) -ErrorAction Stop | Where-Object {$null -ne $_})
+    if($taskFresh.Count -gt 1){Throw-UnreadableProcess $process 'Process identity is not readable'}
+    if($taskFresh.Count -eq 1){
+      $taskCurrent=$taskFresh[0]
+      if($taskCurrent.ProcessId -ne $process.ProcessId -or $taskCurrent.ParentProcessId -ne $process.ParentProcessId -or $taskCurrent.Name -cne $process.Name -or $taskCurrent.CreationDate -ne $process.CreationDate -or
+        ($process.ExecutablePath -and $taskCurrent.ExecutablePath -and $taskCurrent.ExecutablePath -cne $process.ExecutablePath) -or
+        ($process.CommandLine -and $taskCurrent.CommandLine -and $taskCurrent.CommandLine -cne $process.CommandLine)){
+        Throw-UnreadableProcess $process 'Process identity is not readable'
+      }
+      if($taskExitObservation -and $taskExitObservation.NativeError -eq 0 -and !$taskExitObservation.IdentityVerified){Throw-UnreadableProcess $process 'Process identity is not readable'}
+      if($taskCurrent.ExecutablePath -and $taskCurrent.CommandLine -and $taskCurrent.CreationDate -is [DateTime]){return $taskCurrent}
+    }
+    if($taskExitObservation -and $taskExitObservation.IdentityVerified -and $taskExitObservation.IsExited()){return New-VerifiedExitedRecord $process $taskExitObservation}
+    if($taskExitObservation -and $taskExitObservation.NativeError -eq 5){throw 'Native process exit observation access denied: 0x80070005'}
+    if($taskExitObservation -and $taskExitObservation.NativeError -notin @(0,87)){throw 'Native process exit observation failed'}
     Throw-UnreadableProcess $process 'Process identity is not readable'
-  }
-  return $taskCurrent
+  }finally{if($taskExitObservation){$taskExitObservation.Dispose()}}
 }
 function Get-Identity($process){
   $process=Resolve-ProcessMetadata $process
+  if($process.BridgeVerifiedExited -eq $true){Throw-UnreadableProcess $process 'Exited process is not an active identity'}
   if(!$process.ExecutablePath -or !$process.CommandLine -or !($process.CreationDate -is [DateTime])){Throw-UnreadableProcess $process 'Process identity is not readable'}
   return @{pid=[int]$process.ProcessId;parentPid=[int]$process.ParentProcessId;createdAt=$process.CreationDate.ToUniversalTime().ToString('o');executable=[string]$process.ExecutablePath;commandLineSha256=(Get-Sha $process.CommandLine)}
 }
@@ -94,10 +155,10 @@ function Get-ColdRelated($processes){
   $processes=@($processes | ForEach-Object {if($_.Name -in @('ChatGPT.exe','codex.exe')){Resolve-ProcessMetadata $_}else{$_}})
   $taskRelated=[Collections.Generic.HashSet[int]]::new()
   foreach($taskProcess in $processes){
-    if($taskProcess.Name -in @('ChatGPT.exe','codex.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'Potential desktop or App Server is unreadable'}
+    if($taskProcess.BridgeVerifiedExited -ne $true -and $taskProcess.Name -in @('ChatGPT.exe','codex.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'Potential desktop or App Server is unreadable'}
     # Count every desktop child and any Codex App Server, not just the selected
     # install. A renderer left after main-window exit is not a cold baseline.
-    if($taskProcess.Name -eq 'ChatGPT.exe' -or ($taskProcess.Name -eq 'codex.exe' -and (Has-Argument $taskProcess.CommandLine 'app-server'))){[void]$taskRelated.Add([int]$taskProcess.ProcessId)}
+    if($taskProcess.Name -eq 'ChatGPT.exe' -or ($taskProcess.Name -eq 'codex.exe' -and ($taskProcess.BridgeVerifiedExited -eq $true -or (Has-Argument $taskProcess.CommandLine 'app-server')))){[void]$taskRelated.Add([int]$taskProcess.ProcessId)}
   }
   do{
     $taskAdded=$false
@@ -105,7 +166,10 @@ function Get-ColdRelated($processes){
       if($taskRelated.Contains([int]$taskProcess.ParentProcessId) -and $taskRelated.Add([int]$taskProcess.ProcessId)){$taskAdded=$true}
     }
   }while($taskAdded)
-  return @($processes | Where-Object {$taskRelated.Contains([int]$_.ProcessId)} | ForEach-Object {Get-Identity $_})
+  return @($processes | Where-Object {$taskRelated.Contains([int]$_.ProcessId)} | ForEach-Object {
+    $taskRelatedProcess=Resolve-ProcessMetadata $_
+    if($taskRelatedProcess.BridgeVerifiedExited -ne $true){Get-Identity $taskRelatedProcess}
+  })
 }
 if($Action -eq 'StartOrdinary'){
   # This is a separate recovery attempt; never close an existing app.
@@ -238,11 +302,13 @@ if($Action -eq 'TaskPermissions'){
   exit 0
 }
 if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
+  $script:taskVerifiedExits=[Collections.Generic.List[object]]::new()
   $taskObservedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $taskProcesses=@(Get-CimInstance Win32_Process)
   $taskProcesses=@($taskProcesses | ForEach-Object {if($_.Name -in @('node.exe','ChatGPT.exe','codex.exe')){Resolve-ProcessMetadata $_}else{$_}})
   $taskResult=@{legacy=@();desktop=@();host=@();listener=@();broker=@()}
   foreach($taskProcess in @($taskProcesses | Where-Object {$_.Name -in @('node.exe','ChatGPT.exe','powershell.exe','pwsh.exe')})){
+    if($taskProcess.BridgeVerifiedExited -eq $true){continue}
     if($taskProcess.Name -in @('node.exe','ChatGPT.exe') -and (!$taskProcess.ExecutablePath -or !$taskProcess.CommandLine)){Throw-UnreadableProcess $taskProcess 'A potential runtime process cannot be identified'}
     $taskRole=Get-Role $taskProcess
     if($taskRole){$taskResult[$taskRole]+=,(Get-Identity $taskProcess)}
@@ -262,9 +328,11 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
       }
       $taskColdResult.endpointOwners=$taskOwners
     }
+    if($script:taskVerifiedExits.Count){$taskColdResult.verifiedExitedProcesses=@($script:taskVerifiedExits.ToArray())}
     $taskColdResult | ConvertTo-Json -Depth 8 -Compress
     exit 0
   }
+  if($script:taskVerifiedExits.Count){$taskResult.verifiedExitedProcesses=@($script:taskVerifiedExits.ToArray())}
   $taskResult | ConvertTo-Json -Depth 6 -Compress
   exit 0
 }

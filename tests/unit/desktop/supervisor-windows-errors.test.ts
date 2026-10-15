@@ -28,6 +28,31 @@ async function fixtureControl(allowMutations=false){
   mock.verify.mockResolvedValue({host:{desktopExe:join(directory,'ChatGPT.exe')},snapshot:{spec:{legacy:{}},files:[{path:script,sha256:createHash('sha256').update('TEST ONLY').digest('hex')}]}});
   return WindowsSupervisorControl.prepare(join(directory,'stage'),script,join(directory,'evidence'),allowMutations);
 }
+function exitProof(){return {version:1,pid:12,parentPid:5,processName:'node.exe',createdAt:'2026-10-15T00:00:00.1234560Z',kernelCreatedAt:'2026-10-15T00:00:00.1234567Z',observedAt:Date.now(),identityVerified:true,exited:true};}
+it.skipIf(process.platform!=='win32')('preserves sanitized native exit evidence before returning an active-only inventory',async()=>{
+ const control=await fixtureControl(),inventory={desktop:[],legacy:[],host:[],listener:[],broker:[]},proof={...exitProof(),privateExtra:'TEST_PRIVATE_EXIT'};
+ mock.exec.mockResolvedValue({stdout:JSON.stringify({...inventory,verifiedExitedProcesses:[proof]})});
+ expect(await control.inventory()).toEqual(inventory);expect(mock.exec).toHaveBeenCalledTimes(1);
+ const folder=(await readdir(join(directory,'evidence'))).find(n=>n.startsWith('verified-exits-'))!;
+ const text=await readFile(join(directory,'evidence',folder,'summary.json'),'utf8');expect(text).not.toContain('TEST_PRIVATE');
+ expect(JSON.parse(text)).toMatchObject({action:'Snapshot',proofs:[{pid:12,identityVerified:true,exited:true}]});
+});
+it.skipIf(process.platform!=='win32').each(['alive','identity','creation','future','invalid-date','missing','duplicate','private-name'])('rejects %s native exit evidence without repeating the scan',async kind=>{
+ const control=await fixtureControl(),proof:any=exitProof();let proofs:any[]=[proof];
+ if(kind==='alive')proof.exited=false;if(kind==='identity')proof.identityVerified=false;if(kind==='creation')proof.kernelCreatedAt='2026-10-15T00:00:00.1234570Z';
+ if(kind==='future')proof.observedAt=Date.now()+100000;if(kind==='invalid-date'){proof.createdAt='2026-99-15T00:00:00.1234560Z';proof.kernelCreatedAt=proof.createdAt;}
+ if(kind==='missing')delete proof.createdAt;if(kind==='duplicate')proofs=[proof,proof];if(kind==='private-name')proof.processName='PRIVATE PATH';
+ mock.exec.mockResolvedValue({stdout:JSON.stringify({desktop:[],legacy:[],host:[],listener:[],broker:[],verifiedExitedProcesses:proofs})});
+ await expect(control.inventory()).rejects.toThrow('Native exit proof');expect(mock.exec).toHaveBeenCalledTimes(1);
+});
+it.skipIf(process.platform!=='win32')('does not return an inventory when its native exit proof cannot be preserved',async()=>{
+ const control=await fixtureControl();mock.exec.mockImplementation(async()=>{await rm(join(directory,'evidence'),{recursive:true});return {stdout:JSON.stringify({desktop:[],legacy:[],host:[],listener:[],broker:[],verifiedExitedProcesses:[exitProof()]})};});
+ await expect(control.inventory()).rejects.toThrow();expect(mock.exec).toHaveBeenCalledTimes(1);
+});
+it.skipIf(process.platform!=='win32')('forbids a native exit fallback on a mutation response',async()=>{
+ const control=await fixtureControl(true);mock.exec.mockResolvedValue({stdout:JSON.stringify({verifiedExitedProcesses:[exitProof()]})});
+ await expect(control.startOrdinary()).rejects.toThrow('Native exit proof invalid');expect(mock.exec).toHaveBeenCalledTimes(1);
+});
 it.skipIf(process.platform!=='win32').each([
   'A potential runtime process cannot be identified',
   'Potential desktop or App Server is unreadable',

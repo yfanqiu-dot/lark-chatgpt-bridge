@@ -56,7 +56,8 @@ export class WindowsSupervisorControl {
       const stderr=typeof native.stderr==='string'?native.stderr:'';
       // Only exact fixed PowerShell error IDs from our pinned inventory
       // reader are retryable. Private error text, denied reads and timeouts
-      // remain fatal; unreadable processes are never omitted from inventory.
+      // remain fatal; unverified unreadable processes are never omitted.
+      // A native same-creation, signaled handle is separately audited below.
       const identityUnavailable = native.code===1 && !native.signal && !stderr.includes('0x80070005') && ['ColdSnapshot','Snapshot','SharedSnapshot'].includes(action)
         && /\+ FullyQualifiedErrorId\s*:\s*(?:A potential runtime process cannot be identified|Potential desktop or App Server is unreadable|Process identity is not readable)\s*(?:\r?\n|$)/.test(stderr);
       const errorCode=identityUnavailable?'native_process_identity_unavailable':stderr.includes('0x80070005')?'native_task_access_denied':'native_control_failed';
@@ -65,7 +66,30 @@ export class WindowsSupervisorControl {
       if(identityUnavailable)throw new ColdExitObservationUnavailable(action as 'ColdSnapshot'|'Snapshot'|'SharedSnapshot');
       throw error;
     }
-    return raw ? stdout : JSON.parse(stdout);
+    if(raw)return stdout;
+    const parsed=JSON.parse(stdout);
+    if(parsed.verifiedExitedProcesses!==undefined){
+      if(!['Snapshot','ColdSnapshot','SharedSnapshot'].includes(action) || !Array.isArray(parsed.verifiedExitedProcesses) || !parsed.verifiedExitedProcesses.length)throw Error('Native exit proof invalid');
+      const proofs=parsed.verifiedExitedProcesses.map((p:any)=>{
+        const date=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/;
+        const microseconds=(value:string)=>value.replace(/(\.\d{6})\dZ$/,'$1Z');
+        if(p?.version!==1 || !Number.isSafeInteger(p.pid) || p.pid<1 || p.pid>0xffffffff || !Number.isSafeInteger(p.parentPid) || p.parentPid<0 || p.parentPid>0xffffffff
+          || typeof p.processName!=='string' || !/^[A-Za-z0-9_.-]{1,64}\.exe$/.test(p.processName)
+          || typeof p.createdAt!=='string' || typeof p.kernelCreatedAt!=='string' || !date.test(p.createdAt) || !date.test(p.kernelCreatedAt)
+          || !Number.isFinite(Date.parse(p.createdAt)) || !Number.isFinite(Date.parse(p.kernelCreatedAt))
+          || microseconds(p.createdAt)!==microseconds(p.kernelCreatedAt) || !Number.isFinite(p.observedAt) || p.observedAt>Date.now()+1000
+          || Date.parse(p.createdAt)>p.observedAt+1000 || p.identityVerified!==true || p.exited!==true)throw Error('Native exit proof invalid');
+        return {version:1,pid:p.pid,parentPid:p.parentPid,processName:p.processName,createdAt:p.createdAt,kernelCreatedAt:p.kernelCreatedAt,observedAt:p.observedAt,identityVerified:true,exited:true};
+      });
+      if(new Set(proofs.map((p:{pid:number})=>p.pid)).size!==proofs.length)throw Error('Native exit proof duplicate');
+      // This evidence justifies treating a kernel-confirmed terminated object
+      // as inactive. Failure to preserve it rejects the read; it never grants
+      // mutation rights or resets the caller's existing admission clock.
+      const directory=await mkdtemp(join(this.evidence,'verified-exits-'));
+      await writeFile(join(directory,'summary.json'),JSON.stringify({version:1,action,observedAt:new Date().toISOString(),proofs}),{encoding:'utf8',flag:'wx'});
+      const {verifiedExitedProcesses:_proofs,...payload}=parsed;return payload;
+    }
+    return parsed;
   }
   async inventory(): Promise<SupervisorInventory> {
     // At most three pinned, read-only scans. Do not retry a mutation or return

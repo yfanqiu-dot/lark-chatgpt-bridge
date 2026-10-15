@@ -1,5 +1,17 @@
 # P4 部署开发与灰度运行手册
 
+## 2026-10-15：R17健康清点失败，正式入口拒绝重入
+
+R17的实际入口共享启动、Startup-only范围下13项核对、重复入口目标保护6项及原C新消息19项通过。本人明确桌面不需要快捷方式，后续只保留Startup入口。09:55健康读取在SharedSnapshot连续遇到不同缺字段进程，随后回退清点也出现缺字段记录；最终为blocked/runtime_health_failed/rollback_operation_failed，普通桌面由原Host恢复的回执存在，broker随后失租且drain超时后退出。主结果messageServicePaused=null保持原值，不把普通桌面出现视为回退全通过。正常退出保持关闭、手动重入和真实登录均未通过，原C成功不重投。
+
+10:43独立清理核对通过：当前普通桌面唯一、实际54工具、新旧消费者0、旧任务退役、完成原C后的业务字节/关闭卡片/程序和归档保持，journal已释放；原blocked、首份审计因历史drain超时未通过及第二份独立清理结论均保留。服务指针仍指向原失败计划，没有第二个服务计划；入口按既有规则拒绝重入。不能删除指针或伪造closed/restored绕过。
+
+新增的原生读取改进只适用于Snapshot/ColdSnapshot/SharedSnapshot：缺字段记录先固定PID/创建时间的只查询及同步句柄，再按原规则仅重读该PID一次。只有内核创建时间在CIM微秒精度下匹配、且零等待确认同一句柄已终止，才生成明确的已退出记录；这不提供可用于进程操作的活身份。失踪但没有句柄退出证明、仍存活、PID复用、已有字段改变、权限不足、未知错误仍拒绝。已退出父进程的存活后代仍保留在相关进程清单，不因父退出隐藏后代。没有终止进程、提升权限、增加完整扫描次数或放宽5秒准入时限。
+
+Node端验证并先保存只含PID/父PID/名称/两份创建时间/观察时间及退出布尔值的证明，保存失败即拒绝读取；证明不作为角色数组返回，也不会重置调用方时钟。进程变更、启动、退出控制等写操作不使用此读取补充。依据微软的[进程终止及句柄对象语义](https://learn.microsoft.com/en-us/windows/win32/procthread/terminating-a-process)、[GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)及[WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject)。
+
+原R17没有保存这些内核证明，因此本次不回填其每个缺字段进程的退出原因。该改进覆盖“能取得同身份内核退出证明”的情况；持续权限受限或句柄不可用仍失败，需要新候选现场复测。旧0e31488及安装入口程序保持，后续构建与部署继续使用隔离源码和独立封存。
+
 更新：2026-10-14。P3 已在本人确认的范围内关闭；P4 已接通独立冷启动运行入口、实际启停适配器及持续broker租约，尚未完成新Bridge正式接管。
 
 ## 2026-10-15：R15退出证明拒绝，未进入共享启动
