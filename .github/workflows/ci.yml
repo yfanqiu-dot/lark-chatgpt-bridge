@@ -6,7 +6,7 @@ on:
 
 jobs:
   test:
-    name: Node 20 on ${{ matrix.os }}
+    name: Node 22 on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,7 +23,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install
@@ -37,3 +37,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Public documentation links
+        run: node tools/check-doc-links.mjs

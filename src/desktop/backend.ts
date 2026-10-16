@@ -9,6 +9,7 @@ export interface Approval { token: string; requestId: string | number; threadId:
 export interface TurnResult { turnId: string; status: 'completed' | 'interrupted' | 'failed'; text: string }
 export interface BackendHooks {
   submitting(): Promise<void>;
+  accepted?(queueSubmissionId: string): Promise<void>;
   started(turnId: string): Promise<void>;
   approval(request: Approval): Promise<void>;
   resolved(token: string): Promise<void>;
@@ -26,9 +27,36 @@ export interface BackendOptions {
   toolConfig?: () => Promise<Record<string, unknown>>;
   pollMs?: number;
   reconnectDelayMs?: number;
+  queueMissingTimeoutMs?: number;
 }
 export class UncertainExecution extends Error {}
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+function userMessageText(item: any): string | undefined {
+  if (item?.type !== 'userMessage' || !Array.isArray(item.content)) return undefined;
+  if (item.content.some((part: any) => part?.type !== 'text' || typeof part.text !== 'string')) return undefined;
+  return item.content.map((part: any) => part.text).join('');
+}
+
+export async function readDesktopToolConfig(config: Pick<DesktopConfig, 'connectionFile' | 'endpoint'>, waitMs = 0): Promise<Record<string, unknown>> {
+  const until = Date.now() + waitMs;
+  let m: any;
+  while (true) {
+    try { m = JSON.parse(await readFile(config.connectionFile, 'utf8')); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() >= until) throw e;
+      await delay(500); continue;
+    }
+    if (m.endpoint !== config.endpoint || m.version !== 1 || !Number.isFinite(m.verifiedAt)) throw new Error('Desktop connection lease expired or mismatched');
+    if (Date.now() - m.verifiedAt <= 60_000 && m.verifiedAt <= Date.now() + 1000) break;
+    if (Date.now() >= until) throw new Error('Desktop connection lease expired or mismatched');
+    await delay(500);
+  }
+  if (!Number.isInteger(m.desktopPid) || m.desktopPid <= 0 || m.pipeServerPid !== m.desktopPid || !m.toolNames?.includes('list_projects')) throw new Error('Desktop tool endpoint not verified');
+  try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
+  if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
+  if (!m.mcpServer?.command || !m.mcpServer?.cwd) throw new Error('Missing installed MCP definition');
+  return desktopToolOverrides(m.mcpServer,m.pipe);
+}
 
 /** Desktop and bridge use one server; this class never spawns or kills that server. */
 export class DesktopBackend {
@@ -39,7 +67,11 @@ export class DesktopBackend {
   private busy = false;
   private stopping = false;
   private disconnected = false;
+  private awaitingExecution = false;
   private approvals = new Map<string, Approval>();
+  private connectionEpoch = 0;
+  private expectedUserMessages: string[] = [];
+  private expectedClientId?: string;
   constructor(readonly config: DesktopConfig, private readonly options: BackendOptions = {}) {}
   pendingApprovals(): Approval[] { return structuredClone([...this.approvals.values()]); }
   get currentTurn(): string | undefined { return this.activeTurn; }
@@ -48,7 +80,8 @@ export class DesktopBackend {
     this.rpc?.close();
     this.inbox = [];
     this.rpc = this.options.rpcFactory?.() ?? new DesktopRpc(this.config.endpoint);
-    this.rpc.onMessage(m => { this.inbox.push(m); });
+    const epoch = ++this.connectionEpoch;
+    this.rpc.onMessage(m => { if (epoch === this.connectionEpoch) this.inbox.push(m); });
     try {
       const config = await (this.options.toolConfig?.() ?? this.readToolConfig());
       await this.rpc.connect();
@@ -65,24 +98,20 @@ export class DesktopBackend {
       // Read identity before resume/config mutation. Never attach a wrong task.
       const read = await this.rpc.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
       this.checkThread(read.thread, expectedRoot);
-      if (resume) await this.resumeThread(config, expectedRoot);
+      // Re-subscribing must not change a desktop-owned active turn's configuration.
+      if (resume) await this.resumeThread(read.thread.status?.type === 'active' ? undefined : config, expectedRoot);
     } catch (e) { this.rpc.close(); throw e; }
   }
-  private async resumeThread(config: Record<string, unknown>, root: string): Promise<void> {
-    const resumed = await this.rpc!.call('thread/resume', { threadId: this.config.threadId, excludeTurns: true, config });
+  private async resumeThread(config: Record<string, unknown> | undefined, root: string): Promise<void> {
+    const resumed = await this.rpc!.call('thread/resume', { threadId: this.config.threadId, excludeTurns: true,
+      ...(config ? { config, ...(this.config.model ? { model: this.config.model } : {}) } : {}) });
     this.checkThread(resumed.thread, root);
   }
   private checkThread(thread: any, root: string): void {
     if (!thread || thread.id !== this.config.threadId || thread.projectId !== this.config.projectId || resolve(thread.cwd) !== resolve(root)) throw new Error('Desktop thread/project/cwd mismatch');
   }
   private async readToolConfig(): Promise<Record<string, unknown>> {
-    const m = JSON.parse(await readFile(this.config.connectionFile, 'utf8'));
-    if (m.endpoint !== this.config.endpoint || m.version !== 1 || Date.now() - m.verifiedAt > 60_000 || m.verifiedAt > Date.now() + 1000 || !Number.isFinite(m.verifiedAt)) throw new Error('Desktop connection lease expired or mismatched');
-    if (!Number.isInteger(m.desktopPid) || m.desktopPid <= 0 || m.pipeServerPid !== m.desktopPid || !m.toolNames?.includes('list_projects')) throw new Error('Desktop tool endpoint not verified');
-    try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
-    if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
-    if (!m.mcpServer?.command || !m.mcpServer?.cwd) throw new Error('Missing installed MCP definition');
-    return desktopToolOverrides(m.mcpServer,m.pipe);
+    return readDesktopToolConfig(this.config, this.awaitingExecution ? 45_000 : 0);
   }
   async preflight(): Promise<void> { if (this.busy) throw new Error('Desktop turn already active'); try { await this.connect(false); } finally { this.rpc?.close(); } }
   /** Explicit runtime check: resume only the verified idle task; never start a turn. */
@@ -113,32 +142,68 @@ export class DesktopBackend {
     }while(true);
     throw new Error('Task desktop tool server is missing; no turn submitted');
   }
-  async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string): Promise<TurnResult> {
+  async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string, clientMessageId: string = randomUUID(), recoverQueued = false): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
-    this.busy = true; this.stopping = false; this.disconnected = false; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
-    let submitted = Boolean(resumeTurnId);
+    this.busy = true; this.stopping = false; this.disconnected = false; this.awaitingExecution = true; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
+    this.expectedUserMessages = [prompt]; this.expectedClientId = recoverQueued ? clientMessageId : undefined;
+    let submitted = Boolean(resumeTurnId || recoverQueued);
     try {
-      await this.connect(Boolean(resumeTurnId));
-      if (!resumeTurnId) {
+      await this.connect(Boolean(resumeTurnId || recoverQueued));
+      if (recoverQueued && !resumeTurnId) {
+        const recovered = await this.waitForQueuedTurn(clientMessageId, prompt, hooks);
+        if (!recovered) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };
+        this.activeTurn = recovered;
+        await hooks.started(recovered);
+      } else if (!resumeTurnId) {
         // Desktop may own a turn. Queue without interrupting it or changing its policy.
+        let unloadedResumes = 0;
         while (true) {
           const read = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
-          if (read.thread.status?.type !== 'active') break;
+          this.checkThread(read.thread, await realpath(this.config.projectRoot));
+          if (read.thread.status?.type === 'notLoaded') {
+            if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
+            if (++unloadedResumes > 2) throw new Error('Desktop task remained unloaded after resume; no turn submitted');
+            // A saved task can be absent from the new App Server's memory.
+            // Omit client config here; the host may wire bound tools on first resume.
+            // Recheck desktop ownership before any turn submission.
+            await this.resumeThread(undefined, await realpath(this.config.projectRoot));
+            continue;
+          }
+          if (read.thread.status?.type === 'idle') {
+            if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
+            await this.resumeThread(await (this.options.toolConfig?.() ?? this.readToolConfig()), await realpath(this.config.projectRoot));
+            await this.verifyRuntimeTools();
+            // Tool startup can take seconds. Recheck desktop ownership before submission.
+            const latest = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
+            this.checkThread(latest.thread, await realpath(this.config.projectRoot));
+            if (latest.thread.status?.type === 'idle') break;
+            if (latest.thread.status?.type === 'notLoaded') {
+              if (++unloadedResumes > 2) throw new Error('Desktop task remained unloaded after resume; no turn submitted');
+              await this.resumeThread(undefined, await realpath(this.config.projectRoot));
+              continue;
+            }
+            if (latest.thread.status?.type !== 'active') throw new Error('Desktop task status is not idle; no turn submitted');
+          } else if (read.thread.status?.type !== 'active') throw new Error('Desktop task status is not idle; no turn submitted');
           if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };
           await hooks.state('等待桌面当前任务结束'); await delay(this.options.pollMs ?? 1000);
         }
         if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
-        await this.resumeThread(await (this.options.toolConfig?.() ?? this.readToolConfig()), await realpath(this.config.projectRoot));
-        await this.verifyRuntimeTools();
         await hooks.submitting(); submitted = true;
-        const result = await this.rpc!.call('turn/start', {
+        this.expectedClientId = clientMessageId;
+        const result = await this.rpc!.call('thread/queue/add', {
           threadId: this.config.threadId,
           input: [{ type: 'text', text: prompt }],
-          ...(this.config.model ? { model: this.config.model } : {}),
-          // Preserve the task's existing permissions and approval reviewer.
+          clientUserMessageId: clientMessageId,
         });
-        if (!result.turn?.id) throw new UncertainExecution('turn/start response has no turn ID');
-        this.activeTurn = result.turn.id;
+        if (!result.queuedSubmission?.id || result.queuedSubmission.clientUserMessageId !== clientMessageId)
+          throw new UncertainExecution('Queue admission response has no matching submission ID');
+        await hooks.accepted?.(result.queuedSubmission.id);
+        // Queue admission is atomic with the App Server's turn scheduler. It
+        // cannot steer into a desktop-owned turn; map the persisted client ID
+        // to the actual turn before claiming or interrupting that turn.
+        const startedTurn = await this.waitForQueuedTurn(clientMessageId, prompt, hooks);
+        if (!startedTurn) return { turnId: '', status: 'interrupted', text: '已取消排队，桌面当前工作未停止。' };
+        this.activeTurn = startedTurn;
         await hooks.started(this.activeTurn!);
       }
       let failures = 0;
@@ -147,7 +212,7 @@ export class DesktopBackend {
       while (true) {
         try {
           if (!this.rpc!.connected) {
-            for (const a of this.approvals.values()) await hooks.resolved(a.token);
+            for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
             this.approvals.clear();
             await hooks.state('连接中断，正在核对原任务');
             await this.connect();
@@ -160,6 +225,7 @@ export class DesktopBackend {
           const turn = this.completedTurn ?? (historyTurn?.completedAt != null ? historyTurn : undefined);
           if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
             const items = await this.readItems(this.activeTurn!);
+            this.verifyTurnInputs(items, this.activeTurn!);
             const text = items.filter((i: any) => i.type === 'agentMessage' && i.phase === 'final_answer').map((i: any) => i.text).join('\n\n');
             return { turnId: this.activeTurn!, status: turn.status, text: text || turn.error?.message || (turn.status === 'interrupted' ? '当前对话轮次已停止；已经启动的外部命令可能继续运行。' : '该轮次已结束，没有最终文本。') };
           }
@@ -183,7 +249,7 @@ export class DesktopBackend {
       throw e;
     } finally {
       for (const a of this.approvals.values()) await hooks.resolved(a.token).catch(() => {});
-      this.approvals.clear(); this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.busy = false;
+      this.approvals.clear(); ++this.connectionEpoch; this.rpc?.close(); this.activeTurn = undefined; this.completedTurn = undefined; this.expectedUserMessages = []; this.expectedClientId = undefined; this.awaitingExecution = false; this.busy = false;
     }
   }
   private async processMessages(hooks: BackendHooks): Promise<void> {
@@ -193,7 +259,7 @@ export class DesktopBackend {
       if (m.method === 'turn/completed' && p.turn?.id === this.activeTurn && ['completed','interrupted','failed'].includes(p.turn.status)) {
         this.completedTurn = p.turn;
       } else if (m.method === 'serverRequest/resolved') {
-        for (const a of this.approvals.values()) if (a.requestId === p.requestId) { this.approvals.delete(a.token); await hooks.resolved(a.token); }
+        for (const a of this.approvals.values()) if (a.requestId === p.requestId) { this.approvals.delete(a.token); await hooks.resolved(a.token).catch(() => {}); }
       } else if (m.id !== undefined && p.turnId === this.activeTurn) {
         if ([...this.approvals.values()].some(a => a.requestId === m.id)) continue;
         let supported = ['accept', 'decline', 'cancel'];
@@ -216,7 +282,9 @@ export class DesktopBackend {
         if (description.length > 6000) { supported = supported.filter(d => d !== 'accept');description = description.slice(0,5500) + '\n详情过长，请到桌面查看完整内容并决定是否同意。'; }
         const decisions = Array.isArray(p.availableDecisions) ? p.availableDecisions.filter((d: unknown) => typeof d === 'string' && supported.includes(d)) : supported;
         const a: Approval = { token: randomUUID(), requestId: m.id, threadId: p.threadId, turnId: p.turnId, method: m.method!, description, decisions };
-        this.approvals.set(a.token, a); await hooks.approval(a);
+        this.approvals.set(a.token, a);
+        try { await hooks.approval(a); }
+        catch { await hooks.state('审批通知回传失败，请在桌面处理或用 /status 查看审批编号'); }
       }
     }
   }
@@ -232,6 +300,7 @@ export class DesktopBackend {
   async steer(text: string): Promise<void> {
     if (!this.activeTurn || !this.rpc?.connected || this.stopping) throw new Error('没有可追加指令的活动任务');
     await this.rpc.call('turn/steer', { threadId: this.config.threadId, expectedTurnId: this.activeTurn, input: [{ type: 'text', text }] });
+    this.expectedUserMessages.push(text);
   }
   private async interruptKnownTurn(): Promise<void> {
     try { await this.rpc!.call('turn/interrupt', { threadId: this.config.threadId, turnId: this.activeTurn }); }
@@ -259,5 +328,88 @@ export class DesktopBackend {
       if (cursor && seen.has(cursor)) throw new Error('Repeated item cursor'); if (cursor) seen.add(cursor);
     } while (cursor);
     return items;
+  }
+  private async findQueuedSubmission(clientId: string): Promise<any | undefined> {
+    let cursor: string | undefined; const seen = new Set<string>();
+    do {
+      const page = await this.rpc!.call('thread/queue/list', { threadId: this.config.threadId, limit: 100, ...(cursor ? { cursor } : {}) });
+      if (!Array.isArray(page.data)) throw new Error('Invalid queue page');
+      const matches = page.data.filter((item: any) => item.clientUserMessageId === clientId);
+      if (matches.length > 1) throw new UncertainExecution(`队列中存在重复客户端消息 ${clientId}；未重新提交。`);
+      if (matches.length) return matches[0];
+      cursor = page.nextCursor ?? undefined;
+      if (cursor && seen.has(cursor)) throw new Error('Repeated queue cursor');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return undefined;
+  }
+  private async findTurnForClientId(clientId: string, prompt: string): Promise<string | undefined> {
+    let cursor: string | undefined; const seen = new Set<string>(); let found: string | undefined;
+    do {
+      const page = await this.rpc!.call('thread/turns/list', { threadId: this.config.threadId, limit: 50, itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) });
+      if (!Array.isArray(page.data)) throw new Error('Invalid turn page');
+      for (const turn of page.data) {
+        const items = await this.readItems(turn.id);
+        const matches = items.filter(item => item.type === 'userMessage' && item.clientId === clientId);
+        if (!matches.length) continue;
+        if (found || matches.length !== 1 || userMessageText(matches[0]) !== prompt)
+          throw new UncertainExecution(`客户端消息 ${clientId} 无法唯一归属原轮次；未重新提交。`);
+        found = turn.id;
+      }
+      cursor = page.nextCursor ?? undefined;
+      if (cursor && seen.has(cursor)) throw new Error('Repeated history cursor');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return found;
+  }
+  private async waitForQueuedTurn(clientId: string, prompt: string, hooks: BackendHooks): Promise<string | undefined> {
+    let missingSince: number | undefined;
+    while (true) {
+      const started = this.inbox.find(m => m.method === 'item/started' && m.params?.threadId === this.config.threadId
+        && m.params?.item?.type === 'userMessage' && m.params.item.clientId === clientId);
+      if (started?.params?.turnId) {
+        await this.verifyFirstUserMessage(started.params.turnId, prompt, clientId);
+        return started.params.turnId;
+      }
+      const queued = await this.findQueuedSubmission(clientId);
+      if (this.stopping && queued) {
+        const removed = await this.rpc!.call('thread/queue/delete', { threadId: this.config.threadId, queuedSubmissionId: queued.id });
+        if (removed.deleted) return undefined;
+      }
+      if (!queued) {
+        const turnId = await this.findTurnForClientId(clientId, prompt);
+        if (turnId) {
+          await this.verifyFirstUserMessage(turnId, prompt, clientId);
+          return turnId;
+        }
+        missingSince ??= Date.now();
+        if (Date.now() - missingSince >= (this.options.queueMissingTimeoutMs ?? 10_000)) throw new UncertainExecution(`客户端消息 ${clientId} 已不在队列且未找到原轮次；未重新提交。`);
+      } else {
+        missingSince = undefined;
+        await hooks.state('等待桌面队列执行');
+      }
+      await delay(this.options.pollMs ?? 1000);
+    }
+  }
+  private async verifyFirstUserMessage(turnId: string, prompt: string, clientId?: string): Promise<void> {
+    const until = Date.now() + 5_000;
+    while (true) {
+      const first = (await this.readItems(turnId)).find(item => item.type === 'userMessage');
+      if (first) {
+        if (userMessageText(first) !== prompt || (clientId && first.clientId !== clientId)) throw new UncertainExecution(`轮次 ${turnId} 已由其他消息开始，飞书请求不能归属该轮；请在桌面核对，未自动重试。`);
+        return;
+      }
+      if (Date.now() >= until) throw new UncertainExecution(`轮次 ${turnId} 无法核实首条用户消息；请在桌面核对，未自动重试。`);
+      await delay(this.options.pollMs ?? 250);
+    }
+  }
+  private verifyTurnInputs(items: any[], turnId: string): void {
+    const messages = items.filter(item => item.type === 'userMessage');
+    const inputs = messages.map(userMessageText);
+    if (this.expectedClientId && messages[0]?.clientId !== this.expectedClientId)
+      throw new UncertainExecution(`轮次 ${turnId} 的首条用户消息不属于飞书请求；未重新提交。`);
+    if (inputs.length !== this.expectedUserMessages.length || inputs.some((text, index) => text !== this.expectedUserMessages[index])) {
+      throw new UncertainExecution(`轮次 ${turnId} 含有其他来源或未确认的用户消息，无法将最终答复归属飞书请求；请在桌面核对，未自动重试。`);
+    }
   }
 }

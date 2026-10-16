@@ -1,113 +1,101 @@
-# lark-chatgpt-bridge · P1
+# Windows 桌面版安装配置
 
-让飞书群成为 **Codex 桌面应用** 同一条对话的入口。项目名称保留 `chatgpt`，当前实现目标是 Codex 桌面，不是另一个 ChatGPT 消费端应用。
+适用于 QIU Bridge v0.8.0。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
 
-本阶段提供一个群、一个所有者、一个已存在项目对话的固定绑定。新建群/对话、项目记录导出属于 P2。
+## 1. 准备环境
 
-**状态（2026-09-24）：P1 固定单群普通文本最小闭环已验收关闭。** 真实三轮与桌面接续、状态/追加/轮次停止、群审批同意及取消、桌面审批同步、连接续期修复和普通桌面/原 bridge 恢复均有现场证据。`post` 仅单元回归通过；独立 `decline` 决定不受当前命令协议支持。本阶段仅限受控测试，尚未正式部署。具体证据见 [P1 验证记录](docs/desktop-p1-validation.md)。
+- Windows x64、Windows PowerShell 5.1、Node.js 22 LTS。
+- 已安装并登录的 Codex 桌面，包含 `codex-app-tools` 插件及 `Invoke-CommandInDesktopPackage` 能力。已验收版本见[兼容表](docs/compatibility.md)。
+- 自己的飞书应用机器人，启用长连接事件订阅，订阅 `im.message.receive_v1`、交互卡片回调 `card.action.trigger`，具备读取群内 @ 消息、以机器人发送消息和卡片的权限。将机器人加入测试群，并完成应用权限发布。首版现场验证仅覆盖飞书国内租户。
+- 一条已存在的桌面项目对话，以及群 `chat_id`、本人在此应用下的 `open_id`。
+- 电脑开机联网，无其他消费者同时接收同一飞书应用消息。旧 CLI 后端应先停止并停用，保留配置和记录。
 
-后续 P2 的范围、源码入口与验收方式见 [P2 开发接续说明](docs/desktop-p2-handoff.md)。
+下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v0.8.0`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
 
-## 已实现的行为
-
-- 仅接收登记群内所有者的文字消息，默认必须 `@机器人`；普通消息逐条排队，按 `messageId` 去重。
-- 核对真实 `projectId`、项目路径和 `threadId`，连接桌面正在使用的同一个 App Server。没有旧 CLI 回退。
-- 桌面正在运行时先等候；只在目标轮次结束后，从分页历史读取最终回复并回到原消息位置。
-- `/status`、`/stop`、`/steer`、`/result`、`/reconcile` 和审批卡片。
-- 命令/文件审批核对请求和所有者；同意仅限显示了具体操作的请求。详情过长或缺失时要求到桌面确认。特殊权限、MCP 表单及模型追问提示回桌面处理。
-- 执行前落盘，结果落盘后才发送。未知提交不重跑；已尝试但回执丢失的回复不盲目补发，可用 `/result` 查询。
-- Windows 共享启动器固定二进制 SHA-256 和桌面安装版本；发现真实工具管道并保留安装版审批规则。临时连接证明有效期 60 秒，配置刷新/断线立即撤销。
-
-## 安装与配置
-
-需要 Windows、Node.js **22 或更高**、已登录的兼容 Codex 桌面。P0/P1 本机基线为 `26.908.9136.0`；升级后需重新验证，不只检查 CLI 版本字符串。
+## 2. 保存机器人凭据
 
 ```powershell
-npx --yes pnpm@10.33.0 install --frozen-lockfile
-npx --yes pnpm@10.33.0 build
+node bin/lark-channel-bridge.mjs secrets set --app-id cli_YOURAPPID --profile codex-desktop
 ```
 
-复制 [host.example.json](examples/desktop/host.example.json) 和 [bridge.example.json](examples/desktop/bridge.example.json) 到本机专用目录并填写绝对路径。不要提交真实配置、会话账本、工具管道或密钥。仓库的 `.p1-local/` 和 `*.local.json` 已忽略。
+按提示输入 App Secret。凭据使用项目的加密凭据库，受当前 Windows 用户边界保护。不要将密钥放进配置、命令参数、截图或仓库。这里仅使用 CLI 的凭据功能，不启动旧消息监听器。`deployment.json` 的 `legacy` 是历史字段名，新安装工具将凭据入口指向本运行包，无需另一份旧包。
 
-`host.json` 中：
+## 3. 读取桌面工具基线
 
-- `codexBinary` 与 `codexSha256` 指向经过验证的桌面配套二进制。
-- `desktopExe`、`desktopVersion` 指向对应 WindowsApps 安装包。
-- `endpoint` 是桌面和 bridge 共用地址；`backendEndpoint` 是启动器内部后台地址，两者必须不同且仅监听回环地址。
-- `connectionFile` 是启动器维护的临时证明，禁止手工填写旧 PID/管道。
-- `toolBindings` 明确列出本次接入的已有 `threadId` / 原生 `projectId`。启动器先核对保存的项目和路径，再在这些任务的首次 `thread/resume` 前加入已验证的桌面工具连接配置，避免桌面自动恢复抢先加载无工具的任务。其他任务不改写，不修改全局配置或任务审批策略。
-
-`bridge.json` 中填写实际 `chatId`、本人 `ownerOpenId`、原生 App Server `projectId`、`projectRoot` 和已有 `threadId`。原生项目 ID 与桌面工具返回的旧项目 ID 不能混用。`connectionFile`/`endpoint` 要与 host 相同；`stateFile` 必须独立保存，运行后不可换群继续沿用同一账本。`model` 可省略以沿用对话配置。
-
-`appSecretEnv` 只记录密钥环境变量名，例如 `LARK_APP_SECRET`。从本机安全存储注入值，不把值写入示例、脚本或 Git。`--check` 不需要飞书密钥。
-
-## 启动和回退
-
-关闭桌面之前，先独立验证后台启动参数和实际就绪状态：
+保持普通 Codex 打开，在 PowerShell 中读取主进程：
 
 ```powershell
-node bin/lark-chatgpt-host.mjs C:/bridge/host.json --check-server
+$desktop = @(Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'" |
+  Where-Object { $_.ExecutablePath -like '*OpenAI.Codex_*' -and $_.CommandLine -notmatch '--type=' })
+if ($desktop.Count -ne 1) { throw 'Expected one Codex desktop main process' }
+node bin/lark-chatgpt-setup.mjs probe $desktop[0].ProcessId $desktop[0].ExecutablePath D:\QIUBridge\catalog.json
 ```
 
-此检查会短暂启动本机测试后台，读取 `/readyz` 后停止该子进程，不接管桌面、不执行模型轮次或连接飞书。通过后才安排完整切换。WebSocket 客户端地址可带末尾 `/`，启动器传给 CLI 的 `--listen` 会使用不带路径的 `ws://IP:PORT`。
+只读取已证明归属的本机工具管道，保存完整工具名、桌面路径和版本，不启动消息服务或调用业务工具。输出文件须不存在。失败时核对插件、版本和权限，不复制别人的工具清单，也不固定工具数量。
 
-先结束桌面中的运行，再关闭普通 Codex 桌面。在独立 PowerShell 中操作；不要从将被关闭的桌面对话中直接启动生命周期切换。
+Codex 自带程序通常位于 `$env:LOCALAPPDATA\OpenAI\Codex\bin\<build>\codex.exe`。选用与当前桌面对应的实际程序，不使用 PATH 上另一份 Codex CLI。准备工具将计算并锁定其 SHA-256。
+
+## 4. 确认项目与对话标识
+
+`projectId` 是原生 App Server 项目 ID，`threadId` 是已有桌面对话 ID。不能用旧桌面项目 ID、群 ID、标题或目录名代替。
+
+在自己的 Codex 开发环境中，通过原生 `project/list`、`thread/read` 读取并核对项目根目录、对话归属和工作目录。若需直接检查，先正常退出全部 Codex 窗口，再用桌面自带程序开启仅本机监听的临时诊断后台：
 
 ```powershell
-node bin/lark-chatgpt-host.mjs C:/bridge/host.json --check
-node bin/lark-chatgpt-host.mjs C:/bridge/host.json --start
+& 'C:\Users\YOUR_USER\AppData\Local\OpenAI\Codex\bin\VERIFIED_BUILD\codex.exe' app-server --listen ws://127.0.0.1:19440
 ```
 
-启动器拒绝在已有普通桌面运行时接管。收到 `Shared desktop and tool catalog ready.` 后，在另一个终端运行：
+在另一终端列出原生项目：
 
 ```powershell
-node bin/lark-chatgpt-bridge.mjs C:/bridge/bridge.json --check
-node bin/lark-chatgpt-bridge.mjs C:/bridge/bridge.json --run
+node tools/query-native.mjs ws://127.0.0.1:19440 project/list '{}'
 ```
 
-`--check` 只读核对项目/对话及临时连接证明，不连接飞书、不执行模型轮次。`--run` 才开始消费飞书事件。**同一机器人只能有一个消息消费者**；开始测试前先确认旧 bridge 已停止消费，并让新旧实例使用相同 `LARK_CHANNEL_HOME`。程序复用上游应用锁，但无法阻止其他电脑、旧版无锁消费者或另一个配置目录的实例。
+查询器也支持 `thread/list`、`thread/read`。已有对话 ID 可从原生 `thread/list` 的结果获取，再以 `thread/read` 和参数 `{"threadId":"YOUR_THREAD_ID","includeTurns":false}` 核对。不要新建一条对话冒充原对话。查询结束后在临时后台按 `Ctrl+C`，再打开普通 Codex。
 
-每次提交新轮次前还会检查该任务实际运行的 `codex_app` MCP 状态及 `list_projects` 工具。仅目录可读、缓存目录存在或工具启动失败都不能放行；失败时不提交模型请求。
+这个后台仅供读取归属，不能替代正式启动时的实时空闲证明。查询器不执行模型、修改项目或批准操作。若协议不匹配，停止配置，参阅 [OpenAI App Server 文档](https://learn.chatgpt.com/docs/app-server)。
 
-停止时先在 bridge 终端按 Ctrl+C，等待它停止自己发起的轮次并断开飞书，再执行：
+## 5. 生成全新配置
+
+复制 `examples/desktop/setup.example.json` 到仓库外，填入自己的九个字段。使用绝对路径，`desktopVersion` 与探测结果一致，不填 App Secret。
 
 ```powershell
-node bin/lark-chatgpt-host.mjs C:/bridge/host.json --stop
+node bin/lark-chatgpt-setup.mjs init D:\QIUBridge\setup.json D:\QIUBridge\catalog.json D:\QIUBridge\state
+node bin/lark-chatgpt-deploy.mjs prepare D:\QIUBridge\state\deployment.json D:\QIUBridge\stage
+node bin/lark-chatgpt-deploy.mjs verify D:\QIUBridge\stage
+node bin/lark-chatgpt-runtime-supervisor.mjs --service-prepare D:\QIUBridge\stage D:\QIUBridge\service
 ```
 
-外部协调程序也可先调用 `node bin/lark-chatgpt-bridge.mjs C:/bridge/bridge.json --stop` 请求 bridge 正常退出，再停止 host；该停止入口不要求桌面仍在线。
+`state`、`stage`、`service` 均须尚不存在。工具生成单群配置、空的新账本及程序清单，只适用于**从未由该 Bridge 处理消息的新绑定**。已有用户必须复用原账本和绑定，禁止建空账本绕过 `uncertain` 或失败记录。
 
-启动器结束自己创建的桌面与后台进程，确认退出后请求普通桌面启动；不删除历史。看到请求恢复日志后还需确认普通桌面实际打开。强制结束启动器或电脑断电不保证自动恢复，属于后续故障演练范围。
+保存最后一步输出的 `manifestFile` 和 `manifestSha256`；下文 `MANIFEST_SHA256` 表示实际输出。之后不要移动或修改安装程序，否则校验会拒绝启动。
 
-仅核对已有桌面工具目录、不启动共享服务：
+## 6. 首次启动与验收
 
 ```powershell
-node bin/lark-chatgpt-host.mjs C:/bridge/host.json --check-tools <当前桌面主进程PID>
+node bin/lark-chatgpt-runtime-supervisor.mjs --service-launch D:\QIUBridge\service\service.json MANIFEST_SHA256
 ```
 
-## 群内命令
+若普通 Codex 仍在，程序等待你保存工作后**正常退出**，不会强关窗口；等待上限十分钟。确认任务空闲、队列和审批为空后，才自动打开受管桌面。不要同时手动打开 Codex或重复点击入口。
 
-默认都需要 `@机器人`。
+通过 `service\active-run.json` 的运行信息检查状态：
 
-| 输入 | 行为 |
-|---|---|
-| 普通文字 | 排队继续绑定对话，不把多条消息合成一轮 |
-| `/status` | 当前状态、排队数量、待核对数量、审批编号 |
-| `/stop` | 只中断本 bridge 的当前模型轮次；排队请求保留；已启动的外部命令可能继续运行；不停止桌面独立发起的轮次 |
-| `/steer 补充内容` | 向当前飞书轮次追加要求，校验当前 turnId |
-| 审批卡片按钮 | 仅显示当前服务端提供且可安全映射的同意本次、拒绝或取消；过期/重复/非所有者点击会被拒绝。9月23日命令审批仅提供同意和取消 |
-| `/approve 编号 accept\|decline\|cancel` | 卡片的文字命令入口，遵守相同权限和可选决定范围 |
-| `/result [messageId]` | 读取已保存结果，不再请求模型执行 |
-| `/reconcile` | 重新核对已知 turnId 的待核对任务，不重新提交 |
+```powershell
+$run = Get-Content -Raw -Encoding UTF8 D:\QIUBridge\service\active-run.json | ConvertFrom-Json
+node bin/lark-chatgpt-runtime-supervisor.mjs --status $run.planFile $run.planSha256
+```
 
-若 `turn/start` 已发送却没拿到 turnId，程序暂停新请求，提示在桌面核对。P1 不提供“假定没执行并重发”按钮。此时需由维护者核对历史、备份账本并明确原消息结果后处理；不得直接删除账本解除暂停。
+监督状态进入 `running` 后，在群里 @ 机器人发一条全新简单请求，核对唯一回执、项目和对话归属，并在桌面接续。再验证正常退出保持关闭和同入口重入。别人的验收不能替代自己的安装验证。
 
-## 实现位置与阶段取舍
+## 7. 登录入口
 
-新增入口位于 `src/desktop/`，复用上游 `@larksuite/channel`、原子写入和应用锁。P1 未把桌面后端塞入原有 CLI 的“进程退出即任务完成”执行器，也未注册到旧 profile/web console；通过独立 bin 明确选择桌面方式。原入口仍可用，两者不能同时消费同一机器人。
+首次验收通过后再设置登录启动。工具默认同时创建 Startup 和桌面快捷方式：
 
-消息账本暂用原子写入 JSON，配合单进程锁与串行调度。每轮的提交/运行/结果/回执分开保存。这满足固定单群的 P1，不宣称分布式事务或 exactly-once；SQLite、跨资源新建恢复和多群调度留给后续阶段。
+```powershell
+node bin/lark-chatgpt-runtime-supervisor.mjs --service-shortcuts-check D:\QIUBridge\service\service.json MANIFEST_SHA256
+node bin/lark-chatgpt-runtime-supervisor.mjs --service-install-startup D:\QIUBridge\service\service.json MANIFEST_SHA256
+```
 
-测试命令：`pnpm test:desktop`、`pnpm typecheck`、`pnpm build`。P0 的 `node:test` 原型使用 `pnpm test:p0` 单独运行。真实飞书联调使用 [验收步骤](docs/desktop-p1-acceptance.md)，不会随单元测试自动连接机器人。
+只需 Startup 时可删除新生成的桌面快捷方式。`Win+R` → `shell:startup`，确认只有一个 `QIU New Bridge`，没有恢复软件制造的 `(1)` 副本。关闭 Codex 自己的登录启动，让 Bridge 负责启动顺序。不要为此关闭安全软件或绕过单位策略。
 
-当前边界：仅文字输入和最终回复；不支持图片附件、自动建群、自动导出、桌面消息全量镜像和无人值守开机服务。回环端口依赖本机可信用户边界，不代表完成多用户鉴权或生产加固。电脑/后台崩溃和全部客户端失联的可靠恢复在 P3 验证。
+日常操作、升级与异常恢复见[运维指南](docs/desktop-p4-deployment.md)。更多群和自动建话题单独验收。

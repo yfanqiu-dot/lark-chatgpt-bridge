@@ -3,6 +3,7 @@ const configurationChanges = new Set(['config/batchWrite','config/value/write','
 // Feature enablement is an acknowledged configuration write too. The desktop
 // can perform it in the background without issuing a later config/read.
 const configurationWrites = new Set(['config/batchWrite','config/value/write','experimentalFeature/enablement/set']);
+export type ReadinessSnapshot = ReturnType<DesktopReadiness['snapshot']>;
 
 /** Observes the actual desktop connection; bridge traffic cannot make it ready. */
 export class DesktopReadiness {
@@ -15,7 +16,7 @@ export class DesktopReadiness {
   private configurationFailures = 0;
   private lastChange = 'not initialized';
   revision = 0;
-  constructor(private readonly invalidate: () => void, private readonly now = Date.now) {}
+  constructor(private readonly invalidate: (snapshot: ReadinessSnapshot) => void, private readonly now = Date.now) {}
 
   request(connection: object, message: RpcMessage): void {
     if (message.method === 'initialize' && message.params?.clientInfo?.name === 'Codex Desktop') {
@@ -54,5 +55,5 @@ export class DesktopReadiness {
   }
   snapshot() { return {desktopConnected:Boolean(this.connection),initialized:this.initialized,projectsRead:this.projects,configurationObserved:this.configured,pendingConfiguration:this.pendingConfiguration(),configurationFailures:this.configurationFailures,quietForMs:this.now()-this.changedAt,revision:this.revision,lastChange:this.lastChange}; }
   private pendingConfiguration(): string[] {return [...this.pending.values()].filter(r=>configurationChanges.has(r.method)).map(r=>r.method);}
-  private changed(reason: string): void { this.lastChange=reason;this.changedAt = this.now(); this.revision++; this.invalidate(); }
+  private changed(reason: string): void { this.lastChange=reason;this.changedAt = this.now(); this.revision++; this.invalidate(this.snapshot()); }
 }

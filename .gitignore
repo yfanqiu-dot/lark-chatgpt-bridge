@@ -25,5 +25,11 @@ tests-smoke/
 
 # Desktop bridge local identity, connection leases and validation logs
 .p1-local/
+.p2-local/
+.p3-local/
+.p4-local/
 .feishu-bridge/
 *.local.json
+
+# Distributable bundles contain generated dependencies and release metadata.
+release-artifacts/

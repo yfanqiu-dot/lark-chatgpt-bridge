@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import lockfile from 'proper-lockfile';
 import { createLarkChannel } from '@larksuite/channel';
+import { desktopOutboundConfig } from './outbound';
 import { parseDesktopConfig } from './config';
 import { DesktopBackend } from './backend';
 import { DesktopLedger } from './ledger';
@@ -12,6 +13,7 @@ import { acquireAppRuntimeLock } from '../runtime/locks';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { approvalCard, resolvedCard } from './cards';
 import { desktopInbound } from './inbound';
+import { ApprovalJournal } from './approval-journal';
 
 async function main(): Promise<void> {
   const [configPath, mode] = process.argv.slice(2);
@@ -36,21 +38,16 @@ async function main(): Promise<void> {
   const release = async () => { await releaseState(); await appLock.release(); };
   const binding = { appId: config.appId, chatId: config.chatId, ownerOpenId: config.ownerOpenId, projectId: config.projectId, projectRoot: config.projectRoot, threadId: config.threadId };
   const channel = createLarkChannel({ appId: config.appId, appSecret: secret, domain: 'https://open.feishu.cn', source: 'lark-chatgpt-bridge', resolveChatMode: true,
-    policy: { dmMode: 'disabled', requireMention: false, respondToMentionAll: false }, safety: { chatQueue: { enabled: false } }, respectProxyEnv: true, httpTimeoutMs: 30_000 });
-  const cards = new Map<string, string>();
+    policy: { dmMode: 'disabled', requireMention: false, respondToMentionAll: false }, safety: { chatQueue: { enabled: false } }, outbound: desktopOutboundConfig, respectProxyEnv: true, httpTimeoutMs: 30_000 });
+  const cards = new ApprovalJournal(`${config.stateFile}.approvals.json`, binding, {
+    send: async (chatId, request, replyTo, replyInThread) => (await channel.send(chatId, { card: approvalCard(request) }, { replyTo, replyInThread })).messageId,
+    close: async messageId => { await channel.updateCard(messageId, resolvedCard()); },
+  });
   const controller = new DesktopController(config, new DesktopLedger(config.stateFile, binding), backend, {
     send: async (chatId, text, replyTo, replyInThread) => (await channel.send(chatId, { markdown: text }, { replyTo, replyInThread })).messageId,
-    approval: async (chatId, a, replyTo, replyInThread) => {
-      const card = approvalCard(a);
-      const result = await channel.send(chatId, { card }, { replyTo, replyInThread });
-      if (!result.messageId) throw new Error('Approval card receipt missing');
-      cards.set(a.token, result.messageId);
-    },
-    resolved: async token => {
-      const messageId = cards.get(token); if (!messageId) return;
-      await channel.updateCard(messageId, resolvedCard());
-      cards.delete(token);
-    },
+    approval: (chatId, a, replyTo, replyInThread) => cards.publish(chatId, a, replyTo, replyInThread),
+    resolved: token => cards.resolved(token),
+    cardStatus: chatId => cards.pending(chatId),
   });
   let readyResolve!: () => void;
   let readyReject!: (e: unknown) => void;
@@ -75,12 +72,12 @@ async function main(): Promise<void> {
   let stopWatcher: ReturnType<typeof setInterval> | undefined;
   const shutdown = () => shutdownPromise ??= (async () => {
     clearInterval(stopWatcher);
-    try { await controller.shutdown(); } finally { try { await channel.disconnect(); } finally { await rm(`${config.stateFile}.stop`, { force: true }); await release(); } }
+    try { await controller.shutdown(); } finally { try { await cards.shutdown(); } finally { try { await channel.disconnect(); } finally { await rm(`${config.stateFile}.stop`, { force: true }); await release(); } } }
   })();
   const onSignal = () => { void shutdown().catch(e => { console.error(String(e)); process.exitCode = 1; }); };
   try {
     await rm(`${config.stateFile}.stop`, { force: true });
-    await channel.connect(); await controller.start(); readyResolve();
+    await channel.connect(); await cards.start(); await controller.start(); readyResolve();
     process.once('SIGINT', onSignal); process.once('SIGTERM', onSignal);
     stopWatcher = setInterval(() => { void readFile(`${config.stateFile}.stop`).then(shutdown).catch(e => {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') { console.error('Bridge shutdown failed:', String(e)); process.exitCode = 1; }

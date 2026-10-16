@@ -30,7 +30,7 @@ describe('Claude slash command visible behavior', () => {
   afterEach(async () => {
     vi.useRealTimers();
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
-  });
+  }, 30_000);
 
   it('lets unknown slash commands fall through as ordinary agent messages', async () => {
     const h = await createHarness();

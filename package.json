@@ -1,8 +1,8 @@
 {
   "name": "lark-channel-bridge",
   "private": true,
-  "version": "0.7.1",
-  "description": "Bridge Feishu/Lark messenger with local CLI coding agents",
+  "version": "0.8.0",
+  "description": "QIU Bridge: connect Feishu groups to real Codex desktop project conversations",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "publishConfig": {
@@ -18,8 +18,13 @@
   },
   "homepage": "https://github.com/yfanqiu-dot/lark-chatgpt-bridge#readme",
   "bin": {
+    "lark-chatgpt-setup": "./bin/lark-chatgpt-setup.mjs",
+    "lark-chatgpt-supervisor": "./bin/lark-chatgpt-supervisor.mjs",
+    "lark-chatgpt-runtime-supervisor": "./bin/lark-chatgpt-runtime-supervisor.mjs",
+    "lark-chatgpt-deploy": "./bin/lark-chatgpt-deploy.mjs",
     "lark-chatgpt-host": "./bin/lark-chatgpt-host.mjs",
     "lark-chatgpt-bridge": "./bin/lark-chatgpt-bridge.mjs",
+    "lark-chatgpt-topics": "./bin/lark-chatgpt-topics.mjs",
     "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
   },
   "exports": {
@@ -33,6 +38,12 @@
     "bin",
     "README.md",
     "README.zh.md",
+    "README.desktop.md",
+    "docs/desktop-p4-deployment.md",
+    "docs/compatibility.md",
+    "docs/releases/v0.8.0.md",
+    "examples/desktop",
+    "release.json",
     "LICENSE"
   ],
   "scripts": {
@@ -44,11 +55,13 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:desktop": "vitest run tests/unit/desktop",
+    "test:p3": "vitest run tests/unit/desktop tests/process/desktop-recovery.test.ts",
     "test:p0": "node --test experiments/codex-desktop/connection.test.mjs",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
     "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
     "ci:platform": "pnpm test && pnpm typecheck && pnpm build",
+    "release:bundle": "node tools/package-release.mjs",
     "prepare": "npm run build",
     "prepublishOnly": "pnpm typecheck && pnpm build"
   },

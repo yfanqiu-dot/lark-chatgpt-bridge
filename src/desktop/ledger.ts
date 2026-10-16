@@ -4,7 +4,8 @@ import { writeFileAtomic } from '../platform/atomic-write';
 export type DeliveryState = 'queued' | 'submitting' | 'running' | 'completed' | 'interrupted' | 'failed' | 'uncertain';
 export interface MessageRecord {
   messageId: string; prompt: string; replyInThread: boolean; state: DeliveryState;
-  turnId?: string; result?: string; receipt?: string; deliveryAttempted?: boolean; error?: string;
+  turnId?: string; queueClientId?: string; queueSubmissionId?: string;
+  result?: string; receipt?: string; deliveryAttempted?: boolean; error?: string;
 }
 export interface Binding { appId: string; chatId: string; ownerOpenId: string; projectId: string; projectRoot: string; threadId: string }
 export class DesktopLedger {
@@ -18,6 +19,11 @@ export class DesktopLedger {
       const ids = new Set<string>();
       for (const row of saved.messages) {
         if (!row || typeof row.messageId !== 'string' || ids.has(row.messageId) || typeof row.prompt !== 'string' || !['queued','submitting','running','completed','interrupted','failed','uncertain'].includes(row.state)) throw new Error('Malformed ledger');
+        if (typeof row.replyInThread !== 'boolean'
+          || ['turnId','queueClientId','queueSubmissionId','receipt'].some(key => row[key] !== undefined && typeof row[key] !== 'string')
+          || ['result','error'].some(key => row[key] !== undefined && typeof row[key] !== 'string')
+          || (row.deliveryAttempted !== undefined && typeof row.deliveryAttempted !== 'boolean')) throw new Error('Malformed ledger record');
+        if (row.queueClientId !== undefined && row.queueClientId !== row.messageId) throw new Error('Ledger queue client identity mismatch');
         ids.add(row.messageId);
       }
       this.rows = saved.messages;

@@ -9,9 +9,14 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { DesktopRpc, loopbackEndpoint } from './rpc';
 import { desktopToolOverrides, prepareResumeTools } from './resume-tools';
 import { cleanDesktopEnvironment, desktopPipes, desktopToolCatalog } from './windows-tools';
-import { DesktopReadiness } from './readiness';
+import { DesktopReadiness, type ReadinessSnapshot } from './readiness';
+import { launchPackagedDesktop, type PackagedDesktop } from './packaged-desktop';
+import {ListenerOwnerLease} from './listener-owner';
 
-export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; toolBindings?: Array<{threadId: string; projectId: string | null}> }
+export interface HostConfig { codexBinary: string; codexSha256: string; desktopExe: string; desktopVersion: string; projectRoot: string; endpoint: string; backendEndpoint: string; connectionFile: string; desktopQuitPolicy?: 'stop-with-desktop'; toolBindings?: Array<{threadId: string; projectId: string | null}>; topicRegistryFile?: string; topicProjects?: Array<{projectId: string; projectRoot: string}> }
+export function isCleanManagedDesktopExit(policy:HostConfig['desktopQuitPolicy'],verified:boolean,stopping:boolean,desktop:{exitCode:number|null;signalCode:NodeJS.Signals|null},server:{exitCode:number|null;signalCode:NodeJS.Signals|null},serverError?:Error):boolean{
+  return policy==='stop-with-desktop' && verified && !stopping && desktop.exitCode===0 && desktop.signalCode===null && server.exitCode===null && server.signalCode===null && !serverError;
+}
 const exec = promisify(execFile);
 const sleep = (ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
 // The CLI accepts a socket address, while WebSocket clients accept a URL ending in '/'.
@@ -37,6 +42,40 @@ function launchAppServer(cfg: HostConfig, env: NodeJS.ProcessEnv) {
     } finally { child.stderr!.removeListener('data',collect);child.stderr!.resume();startupStderr=''; }
   }, error:()=>startupError};
 }
+export function unexpectedChildExit(name: string, child: {exitCode: number | null; signalCode: NodeJS.Signals | null}, startupError?: Error): Error {
+  return new Error(`${name} exited during shared desktop session (code ${child.exitCode}, signal ${child.signalCode})${startupError ? `: ${startupError.message}` : ''}`);
+}
+export async function restoreOrdinaryDesktop(cfg:HostConfig):Promise<void> {
+  await rm(`${cfg.connectionFile}.restored.json`,{force:true});
+  const ordinary=await launchPackagedDesktop(cfg);
+  try{
+    const until=Date.now()+60_000;
+    let lastProbe='No tool probe completed';
+    while(Date.now()<until){
+      await ordinary.refresh();
+      if(ordinary.exitCode!==null)throw unexpectedChildExit('Ordinary desktop',ordinary);
+      let verified=false;
+      try{
+        const candidates=await desktopPipes(ordinary.pid,cfg.desktopExe);
+        const matches=[];
+        const failures:string[]=[];
+        for(const c of candidates){
+          try{if((await desktopToolCatalog(join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),c.pipe)).includes('list_projects'))matches.push(c);}
+          catch(e){failures.push(String(e));}
+        }
+        lastProbe=`${candidates.length} pipe candidates, ${matches.length} matching tool catalogs${failures.length?`; ${failures.join('; ')}`:''}`;
+        verified=matches.length===1;
+      }catch(e){lastProbe=String(e);}
+      if(verified){
+        await ordinary.detach();
+        await writeFileAtomic(`${cfg.connectionFile}.restored.json`,JSON.stringify({desktopPid:ordinary.pid,desktopVersion:cfg.desktopVersion,verifiedAt:Date.now(),packageIdentityVerified:true,toolsVerified:true}));
+        console.log('Ordinary packaged desktop and tool catalog verified.');return;
+      }
+      await sleep(1000);
+    }
+    throw new Error(`Ordinary desktop tools did not become ready within 60 seconds: ${lastProbe}`);
+  }catch(e){await ordinary.stop();throw e;}
+}
 export async function checkAppServer(cfg: HostConfig): Promise<void> {
   const server=launchAppServer(cfg,cleanDesktopEnvironment(process.env));
   try {await server.ready();}
@@ -51,6 +90,7 @@ async function stopOwnedChild(child?: ReturnType<typeof spawn>): Promise<boolean
   });
 }
 export async function validateHostConfig(raw: HostConfig): Promise<HostConfig> {
+  if(raw.desktopQuitPolicy!==undefined && raw.desktopQuitPolicy!=='stop-with-desktop')throw new Error('Invalid desktop quit policy');
   for(const key of ['codexBinary','desktopExe','projectRoot','connectionFile'] as const) if(typeof raw[key] !== 'string' || !isAbsolute(raw[key])) throw new Error(`${key} must be an absolute path`);
   const cfg = {...raw, endpoint:loopbackEndpoint(raw.endpoint),backendEndpoint:loopbackEndpoint(raw.backendEndpoint)};
   if(cfg.endpoint===cfg.backendEndpoint)throw new Error('Proxy and backend addresses must differ');
@@ -59,7 +99,26 @@ export async function validateHostConfig(raw: HostConfig): Promise<HostConfig> {
   const match=/[\\/]OpenAI\.Codex_([0-9.]+)_x64__2p2nqsd0c76g0[\\/]app[\\/]ChatGPT\.exe$/i.exec(cfg.desktopExe);
   if(!match || match[1]!==cfg.desktopVersion)throw new Error('Installed desktop version differs from configured version');
   if(cfg.toolBindings !== undefined && (!Array.isArray(cfg.toolBindings) || cfg.toolBindings.length>10 || cfg.toolBindings.some(b=>!b || typeof b.threadId!=='string' || !/^[\w-]+$/.test(b.threadId) || (b.projectId!==null && (typeof b.projectId!=='string' || !/^[\w-]+$/.test(b.projectId)))) || new Set(cfg.toolBindings.map(b=>b.threadId)).size!==cfg.toolBindings.length))throw new Error('Invalid tool bindings');
+  if(cfg.topicRegistryFile !== undefined && (!isAbsolute(cfg.topicRegistryFile) || !Array.isArray(cfg.topicProjects) || !cfg.topicProjects.length || cfg.topicProjects.some(p=>!p || typeof p.projectId!=='string' || !p.projectId || typeof p.projectRoot!=='string' || !isAbsolute(p.projectRoot))))throw new Error('Invalid topic registry or project allowlist');
+  if(cfg.topicRegistryFile === undefined && cfg.topicProjects !== undefined)throw new Error('Topic projects require a registry file');
+  if(cfg.topicProjects)cfg.topicProjects=await Promise.all(cfg.topicProjects.map(async p=>({...p,projectRoot:await realpath(p.projectRoot)})));
   return cfg;
+}
+
+/** Only a saved topic in the host allowlist may receive desktop tool wiring. */
+export async function registeredTopicBinding(cfg: HostConfig, threadId: string, readThread: (id: string) => Promise<any>): Promise<boolean> {
+  if(!cfg.topicRegistryFile || !cfg.topicProjects)return false;
+  let saved: any;
+  try{saved=JSON.parse(await readFile(cfg.topicRegistryFile,'utf8'));}
+  catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return false;throw e;}
+  if(saved.version!==1 || !Array.isArray(saved.topics))throw new Error('Malformed topic registry for host');
+  const row=saved.topics.find((r:any)=>r?.threadId===threadId && ['thread_ready','chat_creating','chat_ready','active'].includes(r.stage));
+  if(!row)return false;
+  const allowed=cfg.topicProjects.find(p=>p.projectId===row.projectId && resolve(p.projectRoot)===resolve(row.projectRoot));
+  if(!allowed)throw new Error('Topic project is not allowed by host');
+  const thread=await readThread(threadId);
+  if(thread?.id!==threadId || thread.projectId!==allowed.projectId || resolve(await realpath(thread.cwd))!==resolve(allowed.projectRoot))throw new Error('Topic task identity changed');
+  return true;
 }
 
 /** Owns only its child server/desktop. Start with the ordinary desktop closed. */
@@ -69,15 +128,29 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   const running=await exec('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" | Where-Object { $_.ExecutablePath -like '*OpenAI.Codex_*' -and $_.CommandLine -notmatch '--type=' }).Count"],{windowsHide:true,env,timeout:20_000});
   if(Number(running.stdout.trim())!==0)throw new Error('Close the ordinary Codex desktop before starting the shared host. No existing process was stopped.');
   await mkdir(dirname(cfg.connectionFile),{recursive:true});
+  if(cfg.desktopQuitPolicy && (!/^[a-f0-9-]{36}$/.test(process.env.BRIDGE_SUPERVISOR_RUN_ID??'') || process.env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE!==join(dirname(cfg.connectionFile),'broker-owner.json')))throw new Error('Managed host requires its supervisor owner lease');
+  const managedOwner=cfg.desktopQuitPolicy?new ListenerOwnerLease(process.env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE!,process.env.BRIDGE_SUPERVISOR_RUN_ID!):undefined;
+  await managedOwner?.assert();
   const release=await lockfile.lock(cfg.connectionFile,{realpath:false,retries:0});
   const backendUrl=new URL(cfg.backendEndpoint),proxyUrl=new URL(cfg.endpoint);
   const children = new Set<WebSocket>();
   let stopping=false;
+  let cleanDesktopQuit=false;
   let leaseWrites: Promise<void> = Promise.resolve();
-  const invalidate = () => { leaseWrites = leaseWrites.then(() => rm(cfg.connectionFile,{force:true})); void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; }); };
+  const invalidate = (snapshot?: ReadinessSnapshot, reason: 'desktop_readiness_changed'|'host_starting'|'lease_refresh_failed' = 'desktop_readiness_changed', errorSha256?: string) => {
+    const evidence={version:1,runId:process.env.BRIDGE_SUPERVISOR_RUN_ID??null,hostPid:process.pid,observedAt:Date.now(),reason,readiness:snapshot??null,...(errorSha256?{errorSha256}:{})};
+    leaseWrites=leaseWrites.then(async()=>{
+      // Withdraw first. Diagnostic I/O never keeps an obsolete lease alive or
+      // supplies an alternative readiness proof. No request/response bodies.
+      await rm(cfg.connectionFile,{force:true});
+      try{await writeFileAtomic(`${cfg.connectionFile}.invalidation.json`,JSON.stringify(evidence));}
+      catch{console.error('Lease invalidation evidence unavailable.');}
+    });
+    void leaseWrites.catch(e => { console.error('Lease invalidation failed:',String(e));stopping=true; });
+  };
   const readiness=new DesktopReadiness(invalidate);
   let proxy: WebSocketServer | undefined;
-  let desktop: ReturnType<typeof spawn> | undefined;
+  let desktop: PackagedDesktop | undefined;
   const appServer=launchAppServer(cfg,env),server=appServer.child;
   const pluginDir=join(dirname(cfg.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools');
   const toolThreads=new Set((cfg.toolBindings??[]).map(b=>b.threadId));
@@ -99,7 +172,8 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
   };
   const stop=()=>{stopping=true;};process.once('SIGINT',stop);process.once('SIGTERM',stop);
   try {
-    invalidate(); await leaseWrites;
+    invalidate(undefined,'host_starting'); await leaseWrites;
+    await rm(`${cfg.connectionFile}.restored.json`,{force:true});
     await rm(`${cfg.connectionFile}.stop`,{force:true});
     await appServer.ready();
     // Validate saved task identity before changing any native desktop resume.
@@ -126,7 +200,25 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
           let prepared=buffer;
           let message;try{message=JSON.parse(buffer.toString());}catch{}
           if(message){
-            try{prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,toolThreads,resumeConfig)));}
+            try{
+              const targets=new Set(toolThreads);
+              let observedThread: any;
+              const readTarget = async () => {
+                if (observedThread) return observedThread;
+                const check = new DesktopRpc(cfg.backendEndpoint);
+                try { await check.connect(); return observedThread = (await check.call('thread/read', {threadId:message.params?.threadId,includeTurns:false})).thread; }
+                finally { check.close(); }
+              };
+              if(message.method==='thread/resume' && !targets.has(message.params?.threadId)){
+                const matches=await registeredTopicBinding(cfg,message.params?.threadId,readTarget);
+                if(matches)targets.add(message.params.threadId);
+              }
+              prepared=Buffer.from(JSON.stringify(await prepareResumeTools(message,targets,resumeConfig,async()=>{
+                const thread = await readTarget();
+                if (!thread || thread.id !== message.params.threadId || !['idle','active','notLoaded'].includes(thread.status?.type)) throw new Error('Task state unavailable before tool wiring');
+                return thread.status.type === 'active';
+              })));
+            }
             catch{if(message.id!==undefined)down.send(JSON.stringify({id:message.id,error:{code:-32603,message:'Desktop tool wiring unavailable; task was not resumed'}}));return;}
             readiness.request(down,message);
           }
@@ -142,13 +234,15 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
       const close=()=>{if(closed)return;closed=true;children.delete(down);children.delete(up);down.terminate();up.terminate();readiness.close(down);};
       down.on('error',close);up.on('error',close);down.on('close',close);up.on('close',close);
     });
-    desktop=spawn(cfg.desktopExe,[],{env:{...env,CODEX_APP_SERVER_WS_URL:cfg.endpoint},cwd:cfg.projectRoot,stdio:'ignore'});
-    let desktopError:Error|undefined;desktop.on('error',e=>{desktopError=e;});
+    desktop=await launchPackagedDesktop(cfg,cfg.endpoint);
+    console.log('Owned packaged desktop started:',desktop.pid);
     let verifiedOnce=false,lastReadiness='';const startedAt=Date.now();
-    while(!stopping && server.exitCode===null && desktop.exitCode===null) {
+    while(!stopping && server.exitCode===null && server.signalCode===null && desktop.exitCode===null && desktop.signalCode===null) {
+      await desktop.refresh();
+      if(desktop.exitCode!==null)break;
       try { await readFile(`${cfg.connectionFile}.stop`,'utf8');stopping=true;break; }
       catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
-      if(appServer.error() || desktopError)throw appServer.error()??desktopError;
+      if(appServer.error())throw appServer.error();
       const snapshot=readiness.snapshot();
       const summary=JSON.stringify({...snapshot,quietForMs:Math.min(snapshot.quietForMs,15000)});
       if(summary!==lastReadiness){console.log('Desktop readiness:',summary);lastReadiness=summary;}
@@ -163,16 +257,30 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
           const match=matches[0]!;
           const definition=JSON.parse(await readFile(join(pluginDir,'.mcp.json'),'utf8')).mcpServers.codex_app;
           const mcpServer={...definition,command:process.execPath,args:[join(pluginDir,'server.mjs')],cwd:cfg.projectRoot};
-          const lease=JSON.stringify({version:1,endpoint:cfg.endpoint,verifiedAt:Date.now(),desktopPid:desktop.pid,pipeServerPid:match.serverPid,pipe:match.pipe,toolNames:match.toolNames,mcpServer,desktopVersion:cfg.desktopVersion,codexSha256:cfg.codexSha256});
+          const lease=JSON.stringify({version:1,endpoint:cfg.endpoint,backendEndpoint:cfg.backendEndpoint,hostPid:process.pid,backendPid:server.pid,verifiedAt:Date.now(),desktopPid:desktop.pid,pipeServerPid:match.serverPid,pipe:match.pipe,toolNames:match.toolNames,mcpServer,desktopVersion:cfg.desktopVersion,codexSha256:cfg.codexSha256});
           leaseWrites=leaseWrites.then(async()=>{
             if(!readiness.canLease(revision) || stopping)return;
             await writeFileAtomic(cfg.connectionFile,lease);
             if(!verifiedOnce){verifiedOnce=true;console.log('Shared desktop and tool catalog ready.');}
           });
           await leaseWrites;
-        }catch(e){invalidate();console.error('Desktop lease not refreshed:',String(e));}
+        }catch(e){invalidate(readiness.snapshot(),'lease_refresh_failed',createHash('sha256').update(e instanceof Error?e.message:'NonError').digest('hex'));console.error('Desktop lease not refreshed:',String(e));}
       }
       await sleep(10_000);
+    }
+    if(isCleanManagedDesktopExit(cfg.desktopQuitPolicy,verifiedOnce,stopping,desktop,server,appServer.error())){
+      await managedOwner!.assert();
+      // A clean GUI exit is distinct from SIGTERM, a stop request, a failed
+      // initialization, and an App Server fault. Never restore on this path.
+      await writeFileAtomic(`${cfg.connectionFile}.desktop-exit.json`,JSON.stringify({version:1,runId:process.env.BRIDGE_SUPERVISOR_RUN_ID,
+        hostPid:process.pid,desktopPid:desktop.pid,backendPid:server.pid,observedAt:Date.now(),exitCode:0,verifiedOnce:true,backendWasRunning:true}));
+      cleanDesktopQuit=true;
+    }else if(!stopping){
+      const reason=server.exitCode!==null || server.signalCode!==null
+        ? unexpectedChildExit('Owned App Server',server,appServer.error())
+        : unexpectedChildExit('Owned desktop',desktop);
+      console.error(reason.message);
+      throw reason;
     }
   } finally {
     process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
@@ -180,22 +288,27 @@ export async function runDesktopHost(cfg: HostConfig): Promise<void> {
     stopping=true;
     await leaseWrites.catch(()=>{});
     await rm(cfg.connectionFile,{force:true});
-    const desktopStopped=await stopOwnedChild(desktop);
+    const desktopStopped=desktop?await desktop.stop().catch(e=>{console.error('Owned desktop stop failed:',String(e));return false;}):true;
     for(const c of children)c.terminate();proxy?.close();
     const serverStopped=await stopOwnedChild(server);
-    await rm(`${cfg.connectionFile}.stop`,{force:true});await release();
-    if(desktop?.pid && desktopStopped && serverStopped){
-      const ordinary=spawn(cfg.desktopExe,[],{env,cwd:cfg.projectRoot,detached:true,stdio:'ignore'});
-      ordinary.on('error',e=>console.error('Ordinary desktop startup failed:',String(e)));ordinary.unref();
-      console.log('Shared children stopped; ordinary desktop startup requested.');
-    } else console.log('Shared host stopped. Check remaining owned processes before opening Codex normally.');
+    await rm(`${cfg.connectionFile}.stop`,{force:true});
+    try{
+      if(!cleanDesktopQuit && desktop?.pid && desktopStopped && serverStopped)await restoreOrdinaryDesktop(cfg);
+      else console.log('Shared host stopped. Check remaining owned processes before opening Codex normally.');
+    }finally{await release();}
   }
 }
 
 async function main() {
   const [path,mode]=process.argv.slice(2);
-  if(!path || !['--check','--check-server','--check-tools','--start','--stop'].includes(mode??''))throw new Error('Usage: lark-chatgpt-host <host.json> --check|--check-server|--check-tools <desktopPid>|--start|--stop');
+  if(!path || !['--check','--check-server','--check-tools','--start','--stop','--restore'].includes(mode??''))throw new Error('Usage: lark-chatgpt-host <host.json> --check|--check-server|--check-tools <desktopPid>|--start|--stop|--restore');
   const cfg=await validateHostConfig(JSON.parse(await readFile(path,'utf8')));
+  if(mode==='--restore'){
+    if(await lockfile.check(cfg.connectionFile,{realpath:false}))throw new Error('Shared host is still running; restore was not started');
+    const running=await exec('powershell.exe',['-NoProfile','-NonInteractive','-Command',"@(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" | Where-Object { $_.ExecutablePath -like '*OpenAI.Codex_*' -and $_.CommandLine -notmatch '--type=' }).Count"],{windowsHide:true,timeout:20_000});
+    if(Number(running.stdout.trim())!==0)throw new Error('Desktop already exists; verify it instead of starting another');
+    await restoreOrdinaryDesktop(cfg);return;
+  }
   if(mode==='--stop'){
     if(!await lockfile.check(cfg.connectionFile,{realpath:false}))throw new Error('No running host owns this configuration');
     await writeFileAtomic(`${cfg.connectionFile}.stop`,'Restore ordinary desktop startup');

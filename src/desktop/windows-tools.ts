@@ -2,10 +2,16 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { readdir } from 'node:fs/promises';
 const exec = promisify(execFile);
 
 export function cleanDesktopEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith('NODE_REPL_') && (!key.startsWith('CODEX_') || key === 'CODEX_HOME')));
+}
+/** powershell.exe is Windows PowerShell, not the pwsh that may launch Node.
+ * Let it construct its own module path instead of inheriting pwsh's modules. */
+export function windowsPowerShellEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(cleanDesktopEnvironment(source)).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
 }
 const discovery = String.raw`
 $ErrorActionPreference='Stop'
@@ -14,20 +20,33 @@ $taskExpectedPid=[int]$env:BRIDGE_DESKTOP_PID
 $taskExpectedExe=$env:BRIDGE_DESKTOP_EXE
 $taskProcess=Get-CimInstance Win32_Process -Filter "ProcessId = $taskExpectedPid"
 if(!$taskProcess -or $taskProcess.ExecutablePath -ne $taskExpectedExe -or $taskProcess.CommandLine -match '--type='){throw 'Desktop process identity changed'}
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public static class BridgePipeOwner { [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid); }'
-$taskMatches=@(foreach($taskPath in [IO.Directory]::GetFiles('\\.\pipe\')) {
-  $taskName=$taskPath.Substring($taskPath.LastIndexOf('\')+1)
-  if(!$taskName.StartsWith('codex-browser-use-')){continue}
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public static class BridgePipeOwner { [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid); [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int GetPackageFullName(IntPtr process, ref uint length, StringBuilder name); }'
+$taskPackageExpected=(Split-Path -Parent (Split-Path -Parent $taskExpectedExe) | Split-Path -Leaf)
+$taskHandle=Get-Process -Id $taskExpectedPid
+[uint32]$taskLength=0
+if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$null) -ne 122){throw 'Desktop has no package identity'}
+$taskPackage=[Text.StringBuilder]::new([int]$taskLength)
+if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$taskPackage) -ne 0 -or $taskPackage.ToString() -ne $taskPackageExpected){throw 'Desktop package identity changed'}
+$taskCandidates=ConvertFrom-Json $env:BRIDGE_DESKTOP_PIPE_NAMES
+$taskMatches=@(foreach($taskName in $taskCandidates) {
+  if($taskName -isnot [string] -or !$taskName.StartsWith('codex-browser-use-') -or $taskName -match '[\\/\x00]'){throw 'Invalid desktop pipe candidate'}
+  $taskPath='\\.\pipe\'+$taskName
   $taskPipe=[IO.Pipes.NamedPipeClientStream]::new('.',$taskName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous)
   try { $taskPipe.Connect(100); [uint32]$taskOwner=0; if([BridgePipeOwner]::GetNamedPipeServerProcessId($taskPipe.SafePipeHandle,[ref]$taskOwner) -and $taskOwner -eq $taskExpectedPid){[pscustomobject]@{pipe=$taskPath;serverPid=$taskOwner}} } catch {} finally { $taskPipe.Dispose() }
 })
 ConvertTo-Json -InputObject $taskMatches -Compress
 `;
+/** Node enumerates the pipe namespace without .NET Framework path normalization.
+ * Candidates still require the original packaged desktop and native server PID check. */
+export async function desktopPipeNames(): Promise<string[]> {
+  return (await readdir('\\\\.\\pipe\\')).filter(name => name.startsWith('codex-browser-use-') && !/[\\/\0]/.test(name));
+}
 export async function desktopPipes(pid: number, desktopExe: string): Promise<Array<{pipe: string; serverPid: number}>> {
   if (process.platform !== 'win32') throw new Error('Shared desktop host currently requires Windows');
+  const candidates = await desktopPipeNames();
   const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', discovery], {
     windowsHide: true, timeout: 20_000, encoding: 'utf8',
-    env: { ...cleanDesktopEnvironment(process.env), BRIDGE_DESKTOP_PID: String(pid), BRIDGE_DESKTOP_EXE: desktopExe },
+    env: { ...windowsPowerShellEnvironment(process.env), BRIDGE_DESKTOP_PID: String(pid), BRIDGE_DESKTOP_EXE: desktopExe, BRIDGE_DESKTOP_PIPE_NAMES: JSON.stringify(candidates) },
   });
   return JSON.parse(stdout.trim());
 }

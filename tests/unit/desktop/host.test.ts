@@ -5,11 +5,18 @@ import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { DesktopReadiness } from '../../../src/desktop/readiness';
 import { cleanDesktopEnvironment } from '../../../src/desktop/windows-tools';
-import { validateHostConfig, type HostConfig } from '../../../src/desktop/host';
+import { unexpectedChildExit, validateHostConfig, type HostConfig } from '../../../src/desktop/host';
 
 let dir:string;
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'desktop-host-'));});
 afterEach(async()=>{await rm(dir,{recursive:true,force:true});});
+
+it('reports which owned child ended during a shared session',()=>{
+  expect(unexpectedChildExit('Owned desktop',{exitCode:0,signalCode:null}).message)
+    .toContain('Owned desktop exited during shared desktop session (code 0, signal null)');
+  expect(unexpectedChildExit('Owned App Server',{exitCode:null,signalCode:'SIGTERM'},new Error('spawn failed')).message)
+    .toContain('Owned App Server exited during shared desktop session (code null, signal SIGTERM): spawn failed');
+});
 
 it('removes inherited task identity and stale pipe environment before desktop launch',()=>{
   expect(cleanDesktopEnvironment({PATH:'keep',CODEX_HOME:'keep',CODEX_THREAD_ID:'old',CODEX_APP_TOOLS_PIPE_PATH:'old',CODEX_APP_SERVER_WS_URL:'old',NODE_REPL_THREAD:'old'}))
@@ -35,6 +42,25 @@ function initialize(r:DesktopReadiness,c:object){
   r.request(c,{id:2,method:'project/list'});r.response(c,{id:2,result:{data:[]}});
   r.request(c,{id:3,method:'config/batchWrite'});r.response(c,{id:3,result:{}});
 }
+
+it('reports the exact configuration withdrawal before a later quiet-window poll without request bodies',()=>{
+  let now=0;const observations:unknown[]=[];const r=new DesktopReadiness(snapshot=>observations.push(snapshot),()=>now),c={};
+  initialize(r,c);now=15_000;expect(r.canLease()).toBe(true);
+  r.request(c,{id:9,method:'config/batchWrite',params:{private:'SECRET_REQUEST_BODY'}});
+  expect(observations.at(-1)).toMatchObject({lastChange:'request config/batchWrite',configurationObserved:false,pendingConfiguration:[],revision:r.revision});
+  expect(r.canLease()).toBe(false);expect(JSON.stringify(observations)).not.toContain('SECRET');
+  r.response(c,{id:9,result:{private:'SECRET_RESPONSE_BODY'}});
+  expect(observations.at(-1)).toMatchObject({lastChange:'response config/batchWrite',configurationObserved:false});
+  now+=14_999;expect(r.canLease()).toBe(false);now++;expect(r.canLease()).toBe(true);expect(JSON.stringify(observations)).not.toContain('SECRET');
+});
+
+it('records a desktop socket withdrawal while unrelated bridge traffic cannot supply a replacement proof',()=>{
+  let now=0;const observations:unknown[]=[];const r=new DesktopReadiness(snapshot=>observations.push(snapshot),()=>now),desktop={},bridge={};
+  initialize(r,desktop);now=15_000;expect(r.canLease()).toBe(true);r.close(desktop);
+  expect(observations.at(-1)).toMatchObject({lastChange:'desktop connection closed',desktopConnected:false});
+  const count=observations.length;r.request(bridge,{id:11,method:'config/read'});r.response(bridge,{id:11,result:{}});now+=60_000;
+  expect(observations).toHaveLength(count);expect(r.canLease()).toBe(false);
+});
 
 it('requires actual desktop initialization, successful configuration and a quiet window',()=>{
   let now=0,invalidations=0;const r=new DesktopReadiness(()=>invalidations++,()=>now);const c={};
