@@ -22,10 +22,12 @@ it.skipIf(process.platform!=='win32').each([
   const source=readFileSync(file,'utf8'),assignment=source.match(new RegExp('\\$'+variable+'=@\\(([^)]*)\\)'));
   expect(assignment).not.toBeNull();
   const names=[...assignment![1]!.matchAll(/'([^']+)'/g)].map(match=>match[1]!.toLowerCase());
-  expect(await nativeEnvironmentFixture(names)).toMatchObject({passed:true,marker:'NATIVE_PIPELINE_OK',stderrDrained:true,privateEnvironmentInherited:false});
+  const result=await nativeEnvironmentFixture(names);
+  expect(result,JSON.stringify(result)).toMatchObject({passed:true,marker:'NATIVE_PIPELINE_OK',stderrDrained:true,privateEnvironmentInherited:false});
 },45000);
 it.skipIf(process.platform!=='win32')('detects the missing PATHEXT regression with the same native fixture',async()=>{
   const source=readFileSync('bin/desktop-cold-launch.ps1','utf8'),assignment=source.match(/\$taskNames=@\(([^)]*)\)/)!;
   const names=[...assignment[1]!.matchAll(/'([^']+)'/g)].map(match=>match[1]!).filter(name=>name.toLowerCase()!=='pathext');
-  expect(await nativeEnvironmentFixture(names)).toMatchObject({passed:false,phase:'native-command',timedOut:false,nativeInvocationRejected:true});
+  const result=await nativeEnvironmentFixture(names);
+  expect(result,JSON.stringify(result)).toMatchObject({passed:false,phase:'native-command',timedOut:false,nativeInvocationRejected:true});
 },45000);
