@@ -1,0 +1,11 @@
+{
+  "appId": "cli_YOURAPPID",
+  "chatId": "oc_YOURGROUPID",
+  "ownerOpenId": "ou_YOUROPENID",
+  "projectId": "NATIVE_APP_SERVER_PROJECT_ID",
+  "projectRoot": "D:/projects/my-project",
+  "threadId": "EXISTING_DESKTOP_THREAD_ID",
+  "codexBinary": "C:/Users/YOUR_USER/AppData/Local/OpenAI/Codex/bin/VERIFIED_BUILD/codex.exe",
+  "desktopExe": "C:/Program Files/WindowsApps/OpenAI.Codex_VERIFIED_VERSION_x64__2p2nqsd0c76g0/app/ChatGPT.exe",
+  "desktopVersion": "VERIFIED_VERSION"
+}

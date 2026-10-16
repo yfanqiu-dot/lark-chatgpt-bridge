@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
-describe('README runtime contract', () => {
+describe('independent CLI documentation contract', () => {
   it('documents maintained runtime surfaces in user-visible docs', async () => {
     const docs = await readDocs();
 
@@ -95,8 +95,8 @@ describe('README runtime contract', () => {
 
 async function readDocs(): Promise<string> {
   const [en, zh] = await Promise.all([
-    readFile(new URL('../../../README.md', import.meta.url), 'utf8'),
-    readFile(new URL('../../../README.zh.md', import.meta.url), 'utf8'),
+    readFile(new URL('../../../docs/cli-backend.en.md', import.meta.url), 'utf8'),
+    readFile(new URL('../../../docs/cli-backend.zh.md', import.meta.url), 'utf8'),
   ]);
   return `${en}\n${zh}`;
 }
