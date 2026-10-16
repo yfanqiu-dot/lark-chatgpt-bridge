@@ -1,6 +1,6 @@
 # QIU Bridge 日常使用与运维
 
-适用于 v0.8.0 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
+适用于 v0.8.1 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
 
 ## 启动与退出
 
@@ -46,6 +46,10 @@ node bin/lark-chatgpt-runtime-supervisor.mjs --stop $run.planFile $run.planSha25
 `runtime.result.json` 中历史固定字段 `productionReady=false` 不是发布开关，不修改它来表示上线。判断依据是明确的版本、范围、监督状态、工具与消息回执、独立清理证据；已终止的运行也不会因为仓库发布而重新成为在线状态。
 
 ## 故障处理
+
+短暂飞书断线时，监听器保留原连接并启用 SDK 保活，监督程序最多等待三分钟。等待期间暂停新模型提交；连接连续稳定五秒后才恢复。等待时间从首次断线计起，反复抖动不会续期。身份、完整工具目录、锁、租约和群范围仍持续核对，任何异常都会暂停；不会重放已提交任务或盲目重发失败回执。
+
+`listener.connection.json` 保留最近连接状态、最多 32 次状态变化和错误摘要 SHA-256，关闭后仍保留；`runtime-health.listener-recovery.json` 记录有界恢复结果。它们不保存原始异常、凭据或消息正文。原有 `runtime-health.failure.json` 仍记录首次失败。历史版本没有具体连接状态时，不应从一次“未连接”推断其底层网络原因。
 
 1. 保存该次运行目录和原消息账本，在本机核对首次失败标签、计划/运行编号及完整进程身份。
 2. 确认消息渠道是否已暂停，普通桌面是否恢复；不要把 `restored` 当成监听已重启。

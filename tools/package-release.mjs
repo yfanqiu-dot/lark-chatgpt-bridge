@@ -15,7 +15,7 @@ const files=['bin','dist','examples/desktop','tools/query-native.mjs','README.md
 for(const file of files){await mkdir(dirname(join(bundle,file)),{recursive:true});await cp(join(root,file),join(bundle,file),{recursive:true});}
 const runtimePkg={...pkg};delete runtimePkg.scripts;delete runtimePkg.devDependencies;delete runtimePkg.pnpm;delete runtimePkg.packageManager;
 await writeFile(join(bundle,'package.json'),JSON.stringify(runtimePkg,null,2)+'\n','utf8');
-await writeFile(join(bundle,'release.json'),JSON.stringify({name:'QIU Bridge',version:pkg.version,revision,platform:'windows-x64',node:'22 LTS',runtimeBaseline:'63d3ba7d0fd83353327e678be76c7b17da10831a'},null,2)+'\n','utf8');
+await writeFile(join(bundle,'release.json'),JSON.stringify({name:'QIU Bridge',version:pkg.version,revision,platform:'windows-x64',node:'22 LTS',runtimeRevision:revision},null,2)+'\n','utf8');
 // Copy only the installed production graph, dereferencing pnpm links. No
 // registry re-resolution, dev dependencies, shell shims or global packages.
 async function packageRoot(name,from){

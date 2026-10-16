@@ -13,6 +13,7 @@ import { desktopPipes,desktopToolCatalog,cleanDesktopEnvironment,windowsPowerShe
 import { execFile,spawn,type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { TaskUacController } from './task-uac';
+import {LISTENER_RECONNECT_MS} from './listener-transport';
 
 type Deployment=Awaited<ReturnType<typeof verifyDeployment>>;
 type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'canStopLegacy'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'> & Partial<Pick<WindowsSupervisorControl,'legacyRetirement'>>;
@@ -185,8 +186,7 @@ export class DesktopRuntimePort implements SupervisorPort {
     if(this.lost || this.effects.now()>deadline)return;
     return structuredClone(this.sharedDesktop);
   }
-  private async listenerReadiness(){
-    const r=await json(join(this.directory,'listener.ready.json'));
+  private listenerChecks(r:any){
     // Persist fixed boolean checks only, never an untrusted heartbeat or lease.
     return {versionMatches:r.version===1,runMatches:r.runId===this.runId,pidMatches:r.pid===this.owned.listener?.pid,
       phaseReady:r.phase==='ready',connected:r.connectionState==='connected',
@@ -194,7 +194,48 @@ export class DesktopRuntimePort implements SupervisorPort {
       readyTimeValid:Number.isFinite(r.readyAt) && r.readyAt<=this.effects.now()+1000 && !!this.owned.listener && r.readyAt>=Date.parse(this.owned.listener.createdAt)-1000,
       scopeMatches:JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds)};
   }
+  private async listenerReadiness(){return this.listenerChecks(await json(join(this.directory,'listener.ready.json')));}
   private async listenerReady(){return Object.values(await this.listenerReadiness()).every(Boolean);}
+  private async awaitListenerRecovery(first:any):Promise<boolean>{
+    const expected=this.lastSharedContext,started=this.effects.now(),since=first.transport?.disconnectedSince;
+    const fixed=(r:any)=>{const c=this.listenerChecks(r);return Object.entries(c).every(([k,v])=>k==='phaseReady'||k==='connected'||v);};
+    // Only the original new-only listener's fresh transport transition is
+    // recoverable. Invalid/missing/stale/foreign markers still fail immediately.
+    if(this.channelMode!=='new-only'||!expected?.packageIdentityVerified||!expected.endpointOwnershipVerified||!expected.backend||!expected.desktop
+      ||!this.sharedDesktop||!sameProcess(expected.desktop,this.sharedDesktop)||!this.owned.listener||!fixed(first)
+      ||first.phase!=='reconnecting'||!['connecting','reconnecting','disconnected','connected'].includes(first.connectionState)
+      ||first.transport?.version!==1||!Number.isSafeInteger(since)||since<first.readyAt||since>started+1000)return false;
+    const until=Math.min(since+LISTENER_RECONNECT_MS,started+LISTENER_RECONNECT_MS);
+    let polls=0,lastState=first.connectionState;
+    const report=async(phase:string)=>writeFileAtomic(join(this.directory,'runtime-health.listener-recovery.json'),JSON.stringify({version:1,runId:this.runId,phase,
+      firstDisconnectedAt:since,startedAt:started,until,observedAt:this.effects.now(),elapsedMs:this.effects.now()-started,polls,lastState}));
+    await report('waiting');
+    try{
+      while(this.effects.now()<until){
+        if(this.lost)throw Error('Listener recovery owner lease lost');
+        try{await readFile(join(this.directory,'stop.request'));throw Error('Listener recovery stop requested');}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+        await this.legacyRetirement();
+        const i=await this.inventory();
+        if(i.desktop.length!==1||!sameProcess(i.desktop[0]!,expected.desktop)||['host','listener','broker'].some(role=>i[role as 'host'|'listener'|'broker'].length!==1
+          ||!sameProcess(i[role as 'host'|'listener'|'broker'][0]!,this.owned[role as 'host'|'listener'|'broker']!)))throw Error('Listener recovery original processes changed');
+        const fresh=await this.effects.context(this.sharedOwned(),true);
+        if(!sameProcess(fresh.host,expected.host)||!sameProcess(fresh.desktop,expected.desktop)||!sameProcess(fresh.backend,expected.backend)
+          ||fresh.endpoint!==expected.endpoint||fresh.backendEndpoint!==expected.backendEndpoint||fresh.desktopVersion!==expected.desktopVersion||fresh.codexSha256!==expected.codexSha256
+          ||fresh.packageIdentityVerified!==true||fresh.endpointOwnershipVerified!==true||JSON.stringify([...fresh.toolNames].sort())!==JSON.stringify([...this.input.snapshot.spec.expectedToolNames].sort())
+          ||!Number.isFinite(fresh.leaseVerifiedAt)||fresh.leaseVerifiedAt<expected.leaseVerifiedAt||fresh.leaseVerifiedAt>this.effects.now()+1000||this.effects.now()-fresh.leaseVerifiedAt>60000
+          ||!await this.effects.locksHeld())throw Error('Listener recovery context or locks changed');
+        const marker=await json(join(this.directory,'listener.ready.json'));polls++;lastState=['connected','connecting','reconnecting','disconnected','failed','unknown'].includes(marker.connectionState)?marker.connectionState:'unknown';
+        if(!fixed(marker)||marker.readyAt!==first.readyAt)throw Error('Listener recovery marker identity changed');
+        if(this.lost)throw Error('Listener recovery owner lease lost');
+        if(this.effects.now()>=until)throw Error('Listener recovery deadline exceeded');
+        if(Object.values(this.listenerChecks(marker)).every(Boolean)){this.lastSharedContext=fresh;await report('recovered');return true;}
+        if(marker.phase!=='reconnecting'||marker.transport?.version!==1||marker.transport.disconnectedSince!==since
+          ||!['connecting','reconnecting','disconnected','connected'].includes(marker.connectionState))throw Error('Listener recovery transition rejected');
+        await this.effects.pause();
+      }
+      throw Error('Listener recovery deadline exceeded');
+    }catch{await report('failed');return false;}
+  }
   async ready(){
     const deadline=this.effects.now()+130_000;
     do{
@@ -277,8 +318,8 @@ export class DesktopRuntimePort implements SupervisorPort {
       if(this.channelMode==='new-only')await this.legacyRetirement();
       stage='shared_context';await this.healthContext();
       stage='listener';if(!this.owned.listener)return this.healthFailure('listener_not_owned');
-      const checks=await this.listenerReadiness();
-      if(!Object.values(checks).every(Boolean))return this.healthFailure('listener_not_ready',{stage,checks});
+      const marker=await json(join(this.directory,'listener.ready.json')),checks=this.listenerChecks(marker);
+      if(!Object.values(checks).every(Boolean)&&!await this.awaitListenerRecovery(marker))return this.healthFailure('listener_not_ready',{stage,checks});
       stage='locks';if(!await this.effects.locksHeld())return this.healthFailure('runtime_locks_lost',{stage});
       return true;
     }catch(e){return this.healthFailure('health_read_failed',{stage,errorSha256:sha(e instanceof Error?e.message:'NonError')});}

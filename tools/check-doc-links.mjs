@@ -1,6 +1,6 @@
-import {readFile,access} from 'node:fs/promises';
+import {readFile,access,readdir} from 'node:fs/promises';
 import {dirname,resolve} from 'node:path';
-const files=['README.md','README.zh.md','README.desktop.md','docs/desktop-p4-deployment.md','docs/compatibility.md','docs/releases/v0.8.0.md','docs/cli-backend.en.md','docs/cli-backend.zh.md'];
+const files=['README.md','README.zh.md','README.desktop.md','docs/desktop-p4-deployment.md','docs/compatibility.md','docs/cli-backend.en.md','docs/cli-backend.zh.md',...(await readdir('docs/releases')).filter(f=>f.endsWith('.md')).map(f=>`docs/releases/${f}`)];
 const broken=[];
 for(const file of files){
   const text=await readFile(file,'utf8');

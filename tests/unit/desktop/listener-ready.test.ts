@@ -20,6 +20,13 @@ it('publishes identity and connection state, advances heartbeat and removes only
 it('keeps a marker belonging to a replacement instead of deleting it',async()=>{
   const values=env(),close=await publishListenerReady(['oc_test'],values,()=> 'connected',5000);await writeFile(values.BRIDGE_SUPERVISOR_READY_FILE,JSON.stringify({runId:'other',pid:999}),'utf8');await close();expect(JSON.parse(await readFile(values.BRIDGE_SUPERVISOR_READY_FILE,'utf8')).runId).toBe('other');
 });
+it('persists sanitized connection diagnostics after removing its readiness marker',async()=>{
+  const values=env(),close=await publishListenerReady(['oc_test'],values,()=>({state:'reconnecting',phase:'reconnecting',disconnectedSince:Date.now(),
+    reconnectAttempts:3,lastErrorSha256:'a'.repeat(64),transitions:[{at:Date.now(),state:'reconnecting',private:'TEST_PRIVATE'}],private:'TEST_PRIVATE'} as any),5000);
+  const marker=JSON.parse(await readFile(values.BRIDGE_SUPERVISOR_READY_FILE,'utf8'));expect(marker).toMatchObject({phase:'reconnecting',transport:{version:1,reconnectAttempts:3}});
+  await close();await expect(readFile(values.BRIDGE_SUPERVISOR_READY_FILE)).rejects.toMatchObject({code:'ENOENT'});
+  const bytes=await readFile(join(dir,'listener.connection.json'),'utf8');expect(bytes).not.toContain('TEST_PRIVATE');expect(JSON.parse(bytes)).toEqual(marker);
+});
 const ownerProof=(runId:string)=>({version:1,runId,owner:{pid:process.pid,parentPid:process.ppid,createdAt:new Date().toISOString(),executable:process.execPath,commandLineSha256:'a'.repeat(64)},packageFullName:'OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0',tokenSha256:'b'.repeat(64),revision:0,expiresAt:Date.now()+15000});
 it.each(['missing','expired','replaced'])('stops refreshing and invokes shutdown once when the owner is %s',async kind=>{
   const values={...env(),BRIDGE_SUPERVISOR_OWNER_LEASE_FILE:join(dir,'owner.json')},p=ownerProof(values.BRIDGE_SUPERVISOR_RUN_ID),lost=vi.fn();

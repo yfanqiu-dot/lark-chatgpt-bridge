@@ -18,6 +18,7 @@ import { TopicRouter } from './topic-router';
 import { TopicArchive } from './topic-archive';
 import { ApprovalJournal } from './approval-journal';
 import { publishListenerReady } from './listener-ready';
+import {ListenerTransport} from './listener-transport';
 
 async function main(): Promise<void> {
   const [configPath, mode, requestId, resourceId] = process.argv.slice(2);
@@ -65,14 +66,16 @@ async function main(): Promise<void> {
   catch (e) { await release(); throw e; }
   const archive = new TopicArchive(config,registry);
   const channel = createLarkChannel({appId:config.appId,appSecret:secret,domain:'https://open.feishu.cn',source:'lark-chatgpt-topics',resolveChatMode:true,
-    policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},outbound:desktopOutboundConfig,respectProxyEnv:true,httpTimeoutMs:30_000});
+    policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},outbound:desktopOutboundConfig,respectProxyEnv:true,httpTimeoutMs:30_000,
+    keepalive:{enabled:true}});
+  const transport=new ListenerTransport(()=>channel.getConnectionStatus());
   const cards = new ApprovalJournal(`${config.registryFile}.approvals.json`, {appId:config.appId,ownerOpenId:config.ownerOpenId,entryChatId:config.entryChatId}, {
     send:async(chatId,request,replyTo,replyInThread)=>(await channel.send(chatId,{card:approvalCard(request)},{replyTo,replyInThread})).messageId,
     close:async messageId=>{await channel.updateCard(messageId,resolvedCard());},
   }, 5_000, config.enabledChatIds);
   const send = async (chatId:string,text:string,replyTo:string,replyInThread:boolean) => (await channel.send(chatId,{markdown:text},{replyTo,replyInThread})).messageId;
   const router = new TopicRouter(config,registry,new TopicProvisioner(config,registry,topicResources(config,secret)),
-    bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound),{
+    bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound,{beforeSubmission:async cancelled=>{await transport.waitReady(cancelled);await readDesktopToolConfig(bound);}}),{
       send,
       approval:(chatId,request,replyTo,replyInThread)=>cards.publish(chatId,request,replyTo,replyInThread),
       resolved:token=>cards.resolved(token),
@@ -85,11 +88,12 @@ async function main(): Promise<void> {
     cardAction:async evt=>{try{await ready;}catch{return;}const value=evt.action.value as {desktopApproval?:unknown;decision?:unknown};if(typeof value?.desktopApproval!=='string'||typeof value.decision!=='string')return;
       try{await router.decideFromCard(evt.chatId,evt.operator.openId,value.desktopApproval,value.decision);return{toast:{type:'info',content:'决定已提交，等待服务端确认。'}};}
       catch(e){return{toast:{type:'error',content:String(e)}};}},
-    error:e=>console.error('Feishu channel error:',e.message),
+    error:e=>{transport.recordError(e);console.error('Feishu channel error recorded; inspect listener connection diagnostics.');},
   });
   let stopWatcher:ReturnType<typeof setInterval>|undefined,archiveWatcher:ReturnType<typeof setInterval>|undefined,shutdownPromise:Promise<void>|undefined;
   let clearReady=async()=>{};
   const shutdown=()=>shutdownPromise??=(async()=>{
+    transport.close();
     clearInterval(stopWatcher);clearInterval(archiveWatcher);
     try{await clearReady();}catch{console.error('Listener readiness cleanup failed');process.exitCode=1;}
     try{await router.shutdown();}finally{try{await archive.shutdown();}finally{try{await cards.shutdown();}finally{try{await channel.disconnect();}finally{await rm(`${config.registryFile}.stop`,{force:true});await release();}}}}
@@ -98,7 +102,7 @@ async function main(): Promise<void> {
   try{
     await rm(`${config.registryFile}.stop`,{force:true});
     await channel.connect();await cards.start();await router.start();
-    clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>channel.getConnectionStatus()?.state??'unknown',2500,()=>{
+    clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>transport.snapshot(),2500,()=>{
       console.error('Listener supervisor owner lease lost; shutting down.');process.exitCode=1;onSignal();
     });readyResolve();
     process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);

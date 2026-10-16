@@ -29,7 +29,7 @@ $taskPackage=[Text.StringBuilder]::new([int]$taskLength)
 if([BridgePipeOwner]::GetPackageFullName($taskHandle.Handle,[ref]$taskLength,$taskPackage) -ne 0 -or $taskPackage.ToString() -ne $taskPackageExpected){throw 'Desktop package identity changed'}
 $taskCandidates=ConvertFrom-Json $env:BRIDGE_DESKTOP_PIPE_NAMES
 $taskMatches=@(foreach($taskName in $taskCandidates) {
-  if($taskName -isnot [string] -or !$taskName.StartsWith('codex-browser-use-') -or $taskName -match '[\\/\x00]'){throw 'Invalid desktop pipe candidate'}
+  if($taskName -isnot [string] -or $taskName -notmatch '^codex-(browser-use|app-tools)-[\w-]+$'){throw 'Invalid desktop pipe candidate'}
   $taskPath='\\.\pipe\'+$taskName
   $taskPipe=[IO.Pipes.NamedPipeClientStream]::new('.',$taskName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous)
   try { $taskPipe.Connect(100); [uint32]$taskOwner=0; if([BridgePipeOwner]::GetNamedPipeServerProcessId($taskPipe.SafePipeHandle,[ref]$taskOwner) -and $taskOwner -eq $taskExpectedPid){[pscustomobject]@{pipe=$taskPath;serverPid=$taskOwner}} } catch {} finally { $taskPipe.Dispose() }
@@ -39,7 +39,7 @@ ConvertTo-Json -InputObject $taskMatches -Compress
 /** Node enumerates the pipe namespace without .NET Framework path normalization.
  * Candidates still require the original packaged desktop and native server PID check. */
 export async function desktopPipeNames(): Promise<string[]> {
-  return (await readdir('\\\\.\\pipe\\')).filter(name => name.startsWith('codex-browser-use-') && !/[\\/\0]/.test(name));
+  return (await readdir('\\\\.\\pipe\\')).filter(name => /^codex-(browser-use|app-tools)-[\w-]+$/.test(name));
 }
 export async function desktopPipes(pid: number, desktopExe: string): Promise<Array<{pipe: string; serverPid: number}>> {
   if (process.platform !== 'win32') throw new Error('Shared desktop host currently requires Windows');
