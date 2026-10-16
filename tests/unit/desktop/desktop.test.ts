@@ -75,6 +75,32 @@ const incoming = (id: string): InboundMessage => ({messageId:id,chatId:'oc_test'
 function replies(): ReplyPort & { sent: string[] } { return {sent:[],async send(_c,text){this.sent.push(text);return 'receipt'+this.sent.length;},async approval(){},async resolved(){}}; }
 
 describe('desktop boundaries and history', () => {
+  it.each(['browser-use','app-tools'])('accepts a fresh verified %s pipe but rejects another namespace',async kind=>{
+    const c=config(),m={version:1,endpoint:c.endpoint,verifiedAt:Date.now(),desktopPid:process.pid,pipeServerPid:process.pid,toolNames:['list_projects'],
+      pipe:`\\\\.\\pipe\\codex-${kind}-test`,mcpServer:{command:process.execPath,cwd:dir}};
+    await writeFile(c.connectionFile,JSON.stringify(m),'utf8');expect(await readDesktopToolConfig(c)).toHaveProperty('mcp_servers.codex_app');
+    m.pipe='\\\\.\\pipe\\unrelated-test';await writeFile(c.connectionFile,JSON.stringify(m),'utf8');await expect(readDesktopToolConfig(c)).rejects.toThrow('Invalid desktop tool pipe');
+  });
+  it('waits at transport admission before the durable submitting boundary and submits exactly once',async()=>{
+    const rpc=new FakeRpc();let release!:()=>void,entered!:()=>void,submissions=0;const waiting=new Promise<void>(r=>{entered=r;}),gate=new Promise<void>(r=>{release=r;});
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,beforeSubmission:async()=>{entered();await gate;}});
+    const h=hooks();h.submitting=async()=>{submissions++;};const result=b.execute('question',h);await waiting;
+    expect(submissions).toBe(0);expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
+    release();expect((await result).status).toBe('completed');expect(submissions).toBe(1);expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
+  });
+  it('never marks a failed transport wait as submitted or uncertain',async()=>{
+    const rpc=new FakeRpc();let submissions=0;const h=hooks();h.submitting=async()=>{submissions++;};
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),beforeSubmission:async()=>{throw Error('Transport recovery expired');}});
+    await expect(b.execute('question',h)).rejects.toThrow('Transport recovery expired');expect(submissions).toBe(0);
+    expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
+  });
+  it('cancels a transport admission wait without submitting a model request',async()=>{
+    const rpc=new FakeRpc();let entered!:()=>void,release!:()=>void,submissions=0;
+    const waiting=new Promise<void>(r=>{entered=r;}),gate=new Promise<void>(r=>{release=r;});
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),beforeSubmission:async cancelled=>{entered();await gate;expect(cancelled()).toBe(true);}});
+    const h=hooks();h.submitting=async()=>{submissions++;};const result=b.execute('question',h);await waiting;await b.stop();release();
+    expect((await result).status).toBe('interrupted');expect(submissions).toBe(0);expect(rpc.calls.some(c=>c.method==='thread/queue/add')).toBe(false);
+  });
   it('waits for a temporarily invalidated desktop lease before a new submission',async()=>{
     const c=config();
     const pending=readDesktopToolConfig(c,2000);

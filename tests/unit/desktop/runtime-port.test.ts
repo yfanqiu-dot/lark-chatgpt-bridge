@@ -62,6 +62,53 @@ async function configurationHarness(){
   const pause=h.effects.pause;h.effects.pause=async()=>{await pause();await writeFile(join(dir,'listener.ready.json'),JSON.stringify({version:1,runId,pid:6,readyAt:original.leaseVerifiedAt,updatedAt:h.clock(),phase:'ready',connectionState:'connected',enabledChatIds:['oc_c']}),'utf8');};
   return {...h,original,withdrawal,publish,missing,refresh:()=>{pending=false;}};
 }
+async function transportHarness(){
+  const h=await configurationHarness();h.refresh();
+  const marker:any={version:1,runId,pid:6,readyAt:h.original.leaseVerifiedAt,updatedAt:h.clock(),phase:'reconnecting',connectionState:'reconnecting',enabledChatIds:['oc_c'],
+    transport:{version:1,disconnectedSince:h.clock()}};
+  const publish=async()=>{marker.updatedAt=h.clock();await writeFile(join(dir,'listener.ready.json'),JSON.stringify(marker),'utf8');};await publish();
+  h.effects.pause=async()=>{h.advance(1000);await publish();};
+  return {...h,marker,publishMarker:publish};
+}
+it('lets the original transport reconnect with full fresh admission and no process relaunch',async()=>{
+  const h=await transportHarness(),pause=h.effects.pause,started=h.clock();
+  h.effects.pause=async()=>{await pause();if(h.clock()-started>=10000){h.marker.phase='ready';h.marker.connectionState='connected';delete h.marker.transport.disconnectedSince;await h.publishMarker();}};
+  expect(await h.port.health()).toBe(true);expect(h.events).toContain('refreshedCatalog');
+  expect(h.events.filter(e=>e.startsWith('launch:'))).toEqual(['launch:broker','launch:host','launch:listener']);expect(h.events).not.toContain('packageRestore');
+  expect(JSON.parse(await readFile(join(dir,'runtime-health.listener-recovery.json'),'utf8'))).toMatchObject({phase:'recovered',elapsedMs:10000});
+  await expect(readFile(join(dir,'runtime-health.failure.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+it('bounds an uninterrupted outage to the first timestamp',async()=>{
+  const h=await transportHarness(),started=h.clock();expect(await h.port.health()).toBe(false);expect(h.clock()-started).toBe(180000);
+  expect(JSON.parse(await readFile(join(dir,'runtime-health.listener-recovery.json'),'utf8'))).toMatchObject({phase:'failed',firstDisconnectedAt:started,until:started+180000});
+});
+it.each(['foreignRun','foreignPid','foreignScope','stale','failed','unknown','noTransport'])('never grants recovery for %s evidence',async kind=>{
+  const h=await transportHarness(),started=h.clock();
+  if(kind==='foreignRun')h.marker.runId='other';if(kind==='foreignPid')h.marker.pid=99;if(kind==='foreignScope')h.marker.enabledChatIds=['oc_other'];
+  if(kind==='stale'){h.advance(11000);}if(kind==='failed')h.marker.phase='failed';if(kind==='unknown')h.marker.connectionState='TEST_PRIVATE';if(kind==='noTransport')delete h.marker.transport;
+  await writeFile(join(dir,'listener.ready.json'),JSON.stringify(h.marker),'utf8');
+  expect(await h.port.health()).toBe(false);expect(h.clock()-started).toBe(kind==='stale'?11000:0);
+  await expect(readFile(join(dir,'runtime-health.listener-recovery.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+it.each(['desktop','listener','host','broker','locks','owner','stop','catalog','backend','oldLease','resetBudget','missing','privateState'])('fails recovery on %s without relaxing ownership',async kind=>{
+  const h=await transportHarness(),pause=h.effects.pause;let changed=false;
+  h.effects.pause=async()=>{await pause();if(changed)return;changed=true;
+    if(['desktop','listener','host','broker'].includes(kind))h.inventory[kind as 'desktop'|'listener'|'host'|'broker'][0]!.createdAt='2026-10-12T00:01:00.000Z';
+    if(kind==='locks')h.badLocks();if(kind==='owner')(h.port as any).lost=true;if(kind==='stop')await writeFile(join(dir,'stop.request'),'stop','utf8');
+    if(['catalog','backend','oldLease'].includes(kind))h.effects.context=async()=>({...h.original,leaseVerifiedAt:kind==='oldLease'?0:h.clock(),
+      ...(kind==='catalog'?{toolNames:['wrong']}:{}),...(kind==='backend'?{backend:{...h.original.backend,pid:99}}:{})});
+    if(kind==='resetBudget'){h.marker.transport.disconnectedSince++;await h.publishMarker();}
+    if(kind==='privateState'){h.marker.connectionState='TEST_PRIVATE';await h.publishMarker();}
+    if(kind==='missing')await rm(join(dir,'listener.ready.json'));
+  };
+  expect(await h.port.health()).toBe(false);expect(h.events.filter(e=>e==='launch:listener')).toHaveLength(1);
+  const bytes=await readFile(join(dir,'runtime-health.listener-recovery.json'),'utf8');expect(JSON.parse(bytes).phase).toBe('failed');expect(bytes).not.toContain('TEST_PRIVATE');
+});
+it('counts slow final verification against the recovery budget',async()=>{
+  const h=await transportHarness();let reads=0;const context=h.effects.context;
+  h.effects.context=async(...args)=>{const v=await context(...args);if(++reads===2){h.advance(180001);h.marker.phase='ready';h.marker.connectionState='connected';await h.publishMarker();}return {...v,leaseVerifiedAt:h.clock()};};
+  expect(await h.port.health()).toBe(false);expect(JSON.parse(await readFile(join(dir,'runtime-health.listener-recovery.json'),'utf8')).phase).toBe('failed');
+});
 it('keeps the original running desktop through a settings gap and requires new admission before health succeeds',async()=>{
   const h=await configurationHarness(),started=h.clock(),pause=h.effects.pause;let readDenied=false;
   h.effects.pause=async()=>{await pause();await expect(readDesktopToolConfig(h.input.host)).rejects.toMatchObject({code:'ENOENT'});readDenied=true;if(h.clock()-started>=20000)h.refresh();};

@@ -6,8 +6,8 @@ import {promisify} from 'node:util';
 import {expect,it} from 'vitest';
 import {desktopPipeNames,desktopPipes,windowsPowerShellEnvironment} from '../../../src/desktop/windows-tools';
 
-it.skipIf(process.platform!=='win32')('discovers a live pipe and omits it after the server closes',async()=>{
-  const name='codex-browser-use-test-'+randomUUID(),pipe='\\\\.\\pipe\\'+name,server=createServer(socket=>socket.end());
+it.skipIf(process.platform!=='win32').each(['browser-use','app-tools'])('discovers a live %s pipe and omits it after the server closes',async kind=>{
+  const name=`codex-${kind}-test-`+randomUUID(),pipe='\\\\.\\pipe\\'+name,server=createServer(socket=>socket.end());
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(pipe,resolve);});
   try{expect(await desktopPipeNames()).toContain(name);}finally{await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
   expect(await desktopPipeNames()).not.toContain(name);
@@ -16,7 +16,7 @@ it.skipIf(process.platform!=='win32')('rejects a non-packaged process even when 
   await expect(desktopPipes(process.pid,process.execPath)).rejects.toThrow();
 },20000);
 it.skipIf(process.platform!=='win32')('checks multiple real pipe owners across the Windows PowerShell 5 JSON boundary',async()=>{
-  const names=[0,1].map(()=> 'codex-browser-use-test-'+randomUUID()),servers=names.map(()=>createServer(socket=>socket.end())),exec=promisify(execFile);
+  const names=['browser-use','app-tools'].map(kind=> `codex-${kind}-test-`+randomUUID()),servers=names.map(()=>createServer(socket=>socket.end())),exec=promisify(execFile);
   const source=readFileSync('src/desktop/windows-tools.ts','utf8'),declaration=source.split('\n').find(line=>line.startsWith('Add-Type '))!,start=source.indexOf('$taskCandidates='),block=source.slice(start,source.indexOf('\n`;',start));
   expect(start).toBeGreaterThan(0);
   for(const [i,server] of servers.entries())await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen('\\\\.\\pipe\\'+names[i],resolve);});

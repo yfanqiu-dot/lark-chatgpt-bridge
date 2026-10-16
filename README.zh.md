@@ -16,7 +16,7 @@ Bridge 安装在**自己的 Windows 电脑**上，使用自己登录的 Codex �
 
 ## 如何开始
 
-1. 从 [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases) 下载 `qiu-bridge-v0.8.0-windows-x64.zip`，包含构建产物和运行依赖；电脑需另装 Node.js 22 LTS。
+1. 从 [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases) 下载 `qiu-bridge-v0.8.1-windows-x64.zip`，包含构建产物和运行依赖；电脑需另装 Node.js 22 LTS。
 2. 按[安装配置指南](README.desktop.md)准备机器人、原生项目与对话标识，用安装准备工具生成自己的配置。首次配置需要一定命令行经验。
 3. 先验证一个群的收发和桌面接续，再设置登录入口，按[运维说明](docs/desktop-p4-deployment.md)日常使用。
 
@@ -25,7 +25,7 @@ Bridge 安装在**自己的 Windows 电脑**上，使用自己登录的 Codex �
 ```powershell
 git clone https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git
 cd lark-chatgpt-bridge
-git checkout v0.8.0
+git checkout v0.8.1
 npx --yes pnpm@10.33.0 install --frozen-lockfile
 npx --yes pnpm@10.33.0 build
 node bin/lark-chatgpt-setup.mjs --help
@@ -33,9 +33,11 @@ node bin/lark-chatgpt-setup.mjs --help
 
 本分支通过 GitHub 发布。**不要把安装 npm 上的 `lark-channel-bridge` 当成安装本桌面版**；两者入口和会话机制不同。保留的包名用于兼容，本仓库关闭了 npm 发布。
 
-## 首版支持范围
+## 当前版本与支持范围
 
-`v0.8.0` 是首个打包发布的桌面版。运行核心已通过真实 Windows 登录、启动、正常退出、持续关闭五分钟、手动重入、延迟退出回执和清理验证。现场验收范围是一个已存在的群、一个所有者。macOS/Linux 通过代码测试和构建，不代表桌面运行支持；目前桌面版支持 **Windows x64**。
+`v0.8.1` 修复短暂断线导致立即暂停的问题：同一个飞书连接最多等待三分钟重连，连接稳定后才放行新的模型提交；超时或身份校验异常仍会暂停。也兼容新版 Codex 的桌面工具管道。详见[修复说明](docs/releases/v0.8.1.md)。
+
+首版 `v0.8.0` 的运行核心已通过真实 Windows 登录、启动、正常退出、持续关闭五分钟、手动重入、延迟退出回执和清理验证。现场验收范围是一个已存在的群、一个所有者。`v0.8.1` 已有自动回归和新版只读兼容核对，升级后仍需重新完成现场验收。macOS/Linux 通过代码测试和构建，不代表桌面运行支持；目前桌面版支持 **Windows x64**。
 
 自动建群和多项目路由已有代码与阶段验证，但首版受管部署默认只接入一个群，并关闭新话题创建。更多群须逐群核对。图片附件、桌面全部消息镜像、多用户托管和长期无人值守保证不在本版桌面支持范围；短时验收也不能替代长期运行观察。详见[兼容性与限制](docs/compatibility.md)。
 

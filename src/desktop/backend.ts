@@ -28,6 +28,7 @@ export interface BackendOptions {
   pollMs?: number;
   reconnectDelayMs?: number;
   queueMissingTimeoutMs?: number;
+  beforeSubmission?: (cancelled:()=>boolean)=>Promise<void>;
 }
 export class UncertainExecution extends Error {}
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -53,7 +54,7 @@ export async function readDesktopToolConfig(config: Pick<DesktopConfig, 'connect
   }
   if (!Number.isInteger(m.desktopPid) || m.desktopPid <= 0 || m.pipeServerPid !== m.desktopPid || !m.toolNames?.includes('list_projects')) throw new Error('Desktop tool endpoint not verified');
   try { process.kill(m.desktopPid, 0); } catch { throw new Error('Desktop process is unavailable'); }
-  if (!/^\\\\\.\\pipe\\codex-browser-use-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
+  if (!/^\\\\\.\\pipe\\codex-(browser-use|app-tools)-[\w-]+$/.test(m.pipe)) throw new Error('Invalid desktop tool pipe');
   if (!m.mcpServer?.command || !m.mcpServer?.cwd) throw new Error('Missing installed MCP definition');
   return desktopToolOverrides(m.mcpServer,m.pipe);
 }
@@ -188,6 +189,10 @@ export class DesktopBackend {
           await hooks.state('等待桌面当前任务结束'); await delay(this.options.pollMs ?? 1000);
         }
         if (this.stopping) return { turnId: '', status: 'interrupted', text: '已取消。' };
+        // A Feishu transport outage must not turn a durable queued request into
+        // a model submission. Cancellation exits before the uncertain boundary.
+        await this.options.beforeSubmission?.(()=>this.stopping||this.disconnected);
+        if(this.stopping||this.disconnected)return {turnId:'',status:'interrupted',text:'已取消，未提交模型请求。'};
         await hooks.submitting(); submitted = true;
         this.expectedClientId = clientMessageId;
         const result = await this.rpc!.call('thread/queue/add', {
