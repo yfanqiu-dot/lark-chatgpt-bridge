@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,8 +13,13 @@ import { CodexTopicResources, FeishuTopicResources, TOPIC_BOOTSTRAP_PROMPT } fro
 import { WebSocketServer } from 'ws';
 
 let dir: string;
-beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-p2-'))); });
-afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+beforeEach(async () => {
+  // These standalone RPC fixtures must not read a running desktop's supervisor
+  // identity or health files. Managed admission is tested separately.
+  for (const key of ['BRIDGE_SUPERVISOR_READY_FILE','BRIDGE_SUPERVISOR_RUN_ID','BRIDGE_SUPERVISOR_OWNER_LEASE_FILE']) vi.stubEnv(key,undefined);
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'desktop-p2-')));
+});
+afterEach(async () => { try { await rm(dir, { recursive: true, force: true }); } finally { vi.unstubAllEnvs(); } });
 const config = (): TopicConfig => parseTopicConfig({
   appId:'cli_test',appSecretEnv:'LARK_APP_SECRET',ownerOpenId:'ou_owner',entryChatId:'oc_entry',
   endpoint:'ws://127.0.0.1:9000/',connectionFile:join(dir,'connection.json'),registryFile:join(dir,'registry.json'),stateDir:join(dir,'state'),
