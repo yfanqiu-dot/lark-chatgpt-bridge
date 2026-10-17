@@ -52,7 +52,9 @@ export class CodexTopicResources implements Pick<TopicResources, 'verifyProject'
         const page: { data?: Array<{ id?: string; status?: string; completedAt?: unknown }> } = await rpc.call('thread/turns/list', { threadId: id, limit: 10, itemsView: 'notLoaded' });
         const turn = page.data?.find(item => item.id === turnId);
         if (turn?.status === 'completed' && turn.completedAt != null) return id;
-        if (turn && ['failed','interrupted','cancelled'].includes(turn.status ?? '')) throw new Error(`Desktop topic initialization ended as ${turn.status}; reconcile the saved task`);
+        // Paginated history may label an unfinished rollout interrupted. Only
+        // persisted completion is a terminal result, as in DesktopBackend.
+        if (turn?.completedAt != null && ['failed','interrupted','cancelled'].includes(turn.status ?? '')) throw new Error(`Desktop topic initialization ended as ${turn.status}; reconcile the saved task`);
         await new Promise(resolve => setTimeout(resolve, 500));
       }
       throw new Error('Desktop topic initialization is still running; reconcile the saved task before retrying');

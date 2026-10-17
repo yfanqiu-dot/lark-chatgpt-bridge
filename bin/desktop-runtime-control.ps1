@@ -44,7 +44,7 @@ public sealed class BridgePinnedProcessExit : IDisposable {
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   IntPtr handle; public int NativeError { get; private set; } public bool IdentityVerified { get; private set; }
   public DateTime KernelCreatedAt { get; private set; }
-  public static BridgePinnedProcessExit Open(int pid,DateTime expectedCreated) {
+  public static BridgePinnedProcessExit OpenSnapshot(int pid) {
     var result=new BridgePinnedProcessExit();result.handle=OpenProcess(0x00101000,false,pid);
     if(result.handle==IntPtr.Zero){result.NativeError=Marshal.GetLastWin32Error();return result;}
     Time created,exited,kernel,user;
@@ -52,10 +52,15 @@ public sealed class BridgePinnedProcessExit : IDisposable {
       result.NativeError=Marshal.GetLastWin32Error();if(result.NativeError==0)result.NativeError=87;return result;
     }
     result.KernelCreatedAt=DateTime.FromFileTimeUtc(created.Value);
-    // CIM creation times have microsecond resolution. Integer comparison
-    // retains that precision without floating-point rounding or PID reuse.
-    result.IdentityVerified=created.Value/10==expectedCreated.ToUniversalTime().ToFileTimeUtc()/10;
     return result;
+  }
+  public bool Bind(DateTime expectedCreated) {
+    // Match CIM microsecond precision without floating-point rounding.
+    IdentityVerified=NativeError==0 && handle!=IntPtr.Zero && KernelCreatedAt.ToFileTimeUtc()/10==expectedCreated.ToUniversalTime().ToFileTimeUtc()/10;
+    return IdentityVerified;
+  }
+  public static BridgePinnedProcessExit Open(int pid,DateTime expectedCreated) {
+    var result=OpenSnapshot(pid);result.Bind(expectedCreated);return result;
   }
   public bool IsExited(){
     if(NativeError!=0 || !IdentityVerified || handle==IntPtr.Zero)return false;
@@ -64,8 +69,51 @@ public sealed class BridgePinnedProcessExit : IDisposable {
   }
   public void Dispose(){if(handle!=IntPtr.Zero){CloseHandle(handle);handle=IntPtr.Zero;}}
 }
+public sealed class BridgePinnedProcessScan : IDisposable {
+  readonly object gate=new object();
+  readonly System.Collections.Generic.Dictionary<int,System.Collections.Generic.List<BridgePinnedProcessExit>> pins=new System.Collections.Generic.Dictionary<int,System.Collections.Generic.List<BridgePinnedProcessExit>>();
+  readonly System.Threading.ManualResetEvent stop=new System.Threading.ManualResetEvent(false);
+  readonly System.Threading.Thread worker;
+  public BridgePinnedProcessScan(){Capture();worker=new System.Threading.Thread(Run);worker.IsBackground=true;worker.Start();}
+  void Run(){while(!stop.WaitOne(25))Capture();}
+  void Capture(){
+    foreach(var process in System.Diagnostics.Process.GetProcesses()){
+      try{
+        var name=process.ProcessName;
+        if(name!="node" && name!="ChatGPT" && name!="codex" && name!="powershell" && name!="pwsh")continue;
+        var pin=BridgePinnedProcessExit.OpenSnapshot(process.Id);
+        if(pin.NativeError!=0){pin.Dispose();continue;}
+        lock(gate){
+          System.Collections.Generic.List<BridgePinnedProcessExit> list;
+          if(!pins.TryGetValue(process.Id,out list)){list=new System.Collections.Generic.List<BridgePinnedProcessExit>();pins.Add(process.Id,list);}
+          if(list.Exists(p=>p.KernelCreatedAt==pin.KernelCreatedAt))pin.Dispose();else list.Add(pin);
+        }
+      }catch(InvalidOperationException){}catch(ArgumentException){}catch(System.ComponentModel.Win32Exception){}
+      finally{process.Dispose();}
+    }
+  }
+  public BridgePinnedProcessExit Match(int pid,DateTime created){
+    lock(gate){System.Collections.Generic.List<BridgePinnedProcessExit> list;if(pins.TryGetValue(pid,out list))foreach(var pin in list)if(pin.Bind(created))return pin;return null;}
+  }
+  public void Dispose(){
+    stop.Set();worker.Join();lock(gate){foreach(var list in pins.Values)foreach(var pin in list)pin.Dispose();pins.Clear();}stop.Dispose();
+  }
+}
 '@}
-  return [BridgePinnedProcessExit]::Open([int]$process.ProcessId,$process.CreationDate)
+  if($null -ne $process){return [BridgePinnedProcessExit]::Open([int]$process.ProcessId,$process.CreationDate)}
+}
+function Open-SnapshotProcessExitObservations {
+  # Pin before and during the slower CIM query, including tools born while it
+  # runs. Only a creation-matched, signaled handle can prove an actual exit.
+  # This collector never supplies an inventory or substitutes for CIM.
+  $script:taskPinnedExits=@{}
+  $null=Open-ProcessExitObservation $null
+  $script:taskPinnedScan=[BridgePinnedProcessScan]::new()
+}
+function Close-SnapshotProcessExitObservations {
+  if($script:taskPinnedScan){$script:taskPinnedScan.Dispose();$script:taskPinnedScan=$null}
+  if($script:taskPinnedExits){foreach($taskPin in $script:taskPinnedExits.Values){$taskPin.Dispose()}}
+  $script:taskPinnedExits=$null
 }
 function New-VerifiedExitedRecord($process,$observation){
   if($Action -notin @('Snapshot','ColdSnapshot','SharedSnapshot') -or !$observation.IdentityVerified -or !$observation.IsExited()){throw 'Native exit proof is not available'}
@@ -98,9 +146,19 @@ function Resolve-ProcessMetadata($process){
   # handle before the re-read so an actual exit can be distinguished from an
   # unreadable live process. Mere disappearance still is not exit proof.
   if(!($process.CreationDate -is [DateTime]) -or [int]$process.ProcessId -le 0 -or !$process.Name){Throw-UnreadableProcess $process 'Process identity is not readable'}
-  $taskExitObservation=$null
+  $taskExitObservation=$null;$taskExitBorrowed=$false
   try{
-    if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){$taskExitObservation=Open-ProcessExitObservation $process}
+    if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
+      if($script:taskPinnedExits -and $script:taskPinnedExits.ContainsKey([int]$process.ProcessId)){
+        $taskPinned=$script:taskPinnedExits[[int]$process.ProcessId]
+        if($taskPinned.Bind($process.CreationDate)){$taskExitObservation=$taskPinned;$taskExitBorrowed=$true}
+      }
+      if(!$taskExitObservation -and $script:taskPinnedScan){
+        $taskPinned=$script:taskPinnedScan.Match([int]$process.ProcessId,$process.CreationDate)
+        if($taskPinned){$taskExitObservation=$taskPinned;$taskExitBorrowed=$true}
+      }
+      if(!$taskExitObservation){$taskExitObservation=Open-ProcessExitObservation $process}
+    }
     $taskFresh=@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$process.ProcessId) -ErrorAction Stop | Where-Object {$null -ne $_})
     if($taskFresh.Count -gt 1){Throw-UnreadableProcess $process 'Process identity is not readable'}
     if($taskFresh.Count -eq 1){
@@ -117,7 +175,7 @@ function Resolve-ProcessMetadata($process){
     if($taskExitObservation -and $taskExitObservation.NativeError -eq 5){throw 'Native process exit observation access denied: 0x80070005'}
     if($taskExitObservation -and $taskExitObservation.NativeError -notin @(0,87)){throw 'Native process exit observation failed'}
     Throw-UnreadableProcess $process 'Process identity is not readable'
-  }finally{if($taskExitObservation){$taskExitObservation.Dispose()}}
+  }finally{if($taskExitObservation -and !$taskExitBorrowed){$taskExitObservation.Dispose()}}
 }
 function Get-Identity($process){
   $process=Resolve-ProcessMetadata $process
@@ -302,6 +360,8 @@ if($Action -eq 'TaskPermissions'){
   exit 0
 }
 if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
+  try{
+  Open-SnapshotProcessExitObservations
   $script:taskVerifiedExits=[Collections.Generic.List[object]]::new()
   $taskObservedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $taskProcesses=@(Get-CimInstance Win32_Process)
@@ -335,6 +395,7 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   if($script:taskVerifiedExits.Count){$taskResult.verifiedExitedProcesses=@($script:taskVerifiedExits.ToArray())}
   $taskResult | ConvertTo-Json -Depth 6 -Compress
   exit 0
+  }finally{Close-SnapshotProcessExitObservations}
 }
 if($Action -in @('BackupTask','TaskRestoreNeeded','DisableTask','RestoreTask','StartLegacy')){
   if(!$BackupDirectory -or ![IO.Path]::IsPathRooted($BackupDirectory)){throw 'Task backup directory must be absolute'}

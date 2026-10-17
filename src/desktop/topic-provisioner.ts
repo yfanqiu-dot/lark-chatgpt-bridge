@@ -51,6 +51,12 @@ export class TopicProvisioner {
       const now = new Date().toISOString();
       row = await this.registry.add({ requestId, title, projectKey, projectId: project.projectId, projectRoot: project.projectRoot, stage: 'planned', createdAt: now, updatedAt: now });
     }
+    if (row.stage === 'thread_initializing' && row.threadId) {
+      // Resume the saved resource only after read-only native verification.
+      // Never repeat thread/start or its initialization turn.
+      await this.resources.verifyThread(project, row.threadId);
+      row = await this.registry.advance(requestId, 'thread_ready');
+    }
     if (row.stage === 'thread_creating' || row.stage === 'thread_initializing' || row.stage === 'chat_creating') throw new Error(`创建结果待人工核对（${row.stage}）；不会重试可能已成功的创建调用`);
     if (row.stage === 'planned') {
       row = await this.registry.advance(requestId, 'thread_creating');
