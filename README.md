@@ -15,7 +15,7 @@ The bridge runs on **your Windows computer**, using your signed-in Codex app and
 
 ## Start here
 
-1. Download `qiu-bridge-v0.8.1-windows-x64.zip` from [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases). It includes built JavaScript and production dependencies; Node.js 22 LTS is required separately.
+1. Download `qiu-bridge-v0.8.2-windows-x64.zip` from [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases). It includes built JavaScript and production dependencies; Node.js 22 LTS is required separately.
 2. Follow the [installation guide](README.desktop.md). Create your own bot, identify your native project/conversation, and generate a fresh configuration with the setup tool. First-time installation currently requires command-line experience; the detailed guide is in Chinese.
 3. Verify one group end to end before installing the login entry. See [operations](docs/desktop-p4-deployment.md) for daily startup, shutdown and recovery.
 
@@ -24,7 +24,7 @@ Source build:
 ```powershell
 git clone https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git
 cd lark-chatgpt-bridge
-git checkout v0.8.1
+git checkout v0.8.2
 npx --yes pnpm@10.33.0 install --frozen-lockfile
 npx --yes pnpm@10.33.0 build
 node bin/lark-chatgpt-setup.mjs --help
@@ -33,6 +33,8 @@ node bin/lark-chatgpt-setup.mjs --help
 **Installing the upstream `lark-channel-bridge` npm package does not install this desktop release.** This fork is distributed through GitHub Releases and source builds. The package name is retained for compatibility; npm publishing is disabled.
 
 ## Release scope
+
+Version 0.8.2 recognizes the pinned native queue rejection for unrelated, idle ephemeral desktop threads. Bound and durable threads still require full queue checks; active tasks, approvals, unknown errors and changed identities still stop admission. See [release notes](docs/releases/v0.8.2.md). Opening the desktop window is followed by admission checks; keep the desktop idle until readiness is verified.
 
 Version 0.8.1 adds bounded Feishu reconnection and supports discovery of the newer app-tools pipe. During a temporary outage, new model submissions wait for a stable connection; the same listener has up to three minutes to recover. An unrecovered or invalid connection still pauses the service. See [release notes](docs/releases/v0.8.1.md).
 

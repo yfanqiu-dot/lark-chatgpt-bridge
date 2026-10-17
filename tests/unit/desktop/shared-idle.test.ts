@@ -23,6 +23,14 @@ it('uses only native reads, checks original project/history and every loaded tas
   expect(r).toMatchObject({verified:true,source:'owned_shared_native',proof:{allDesktopTasksIdle:true,tasks:[{threadId:'original',queueCount:0}]}});
   expect(h.calls).not.toContain('tools/list');expect(h.calls.filter(m=>m==='thread/queue/list')).toHaveLength(4);expect(h.closed).toBe(1);
 });
+it('retains native ephemeral queue evidence while still checking the shared context twice',async()=>{
+  let contexts=0,queues=0;const h=harness((m,p)=>{
+    if(p.threadId!=='other')return;
+    if(m==='thread/read')return {thread:{id:'other',ephemeral:true,status:{type:'idle'}}};
+    if(m==='thread/queue/list'){queues++;throw new RpcError(-32600,'ephemeral thread does not support queued submissions: other');}
+  }),c=context();const r=await inspectSharedIdle(h.rpc,c,bindings,baseline,async()=>{contexts++;return c;});
+  expect(r.verified).toBe(true);expect(contexts).toBe(2);expect(queues).toBe(2);expect(r.unqueueableEphemeralThreadIds).toEqual(['other']);
+});
 it.each(['waitingOnApproval','queue','active'])('blocks %s on an unrelated loaded task',async condition=>{
   const h=harness((m,p)=>{
     if(p.threadId!=='other')return;

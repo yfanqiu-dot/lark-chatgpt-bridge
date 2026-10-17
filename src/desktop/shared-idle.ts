@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { inspectOrdinaryIdle, type OrdinaryReadRpc, type IdleBlocker } from './ordinary-idle';
+import { inspectOrdinaryIdle, type OrdinaryReadRpc, type IdleBlocker,type OrdinaryIdleObservation } from './ordinary-idle';
 import { sameProcess, type ProcessIdentity, type SupervisorBinding, type IdleProof } from './supervisor';
 import { RpcError, loopbackEndpoint } from './rpc';
 
@@ -24,7 +24,8 @@ export interface SharedIdleObservation {
   findings: string[];
   proof?: IdleProof;
   blocker?: IdleBlocker;
-  failure?: { method?: string; kind: string; code?: number };
+  failure?: OrdinaryIdleObservation['failure'];
+  unqueueableEphemeralThreadIds?:string[];
   /** Fixed counters and durations only. Diagnostic data never grants admission. */
   timing?: SharedAdmissionTiming;
   /** First unsolicited message in the native observation window. No body,
@@ -127,7 +128,7 @@ async function inspectSharedIdleCore(rpc: OrdinaryReadRpc, expected: SharedConte
     // after its last queue scan. No intervening read/mutation needs a third
     // identical OS query; still use the oldest native-read timestamp.
     if (rpc.changed || now()-started > 5000 || now() < started) return failed('shared_context_changed_or_stale');
-    return {verified:true,source:'owned_shared_native',findings:[],proof:{...observed.proof!,verifiedAt:started}};
+    return {verified:true,source:'owned_shared_native',findings:[],...(observed.unqueueableEphemeralThreadIds?{unqueueableEphemeralThreadIds:observed.unqueueableEphemeralThreadIds}:{}),proof:{...observed.proof!,verifiedAt:started}};
   } catch(e) {
     return {...failed('shared_native_read_unavailable'),failure:e instanceof RpcError ? {method:lastMethod,kind:'rpc_error',code:e.code} : {method:lastMethod,kind:'validation_or_transport_failed'}};
   } finally { rpc.close(); }

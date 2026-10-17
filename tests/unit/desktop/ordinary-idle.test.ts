@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { inspectOrdinaryIdle, OrdinaryPipeRpc, type OrdinaryReadRpc } from '../../../src/desktop/ordinary-idle';
-import { RpcError } from '../../../src/desktop/rpc';
+import { RpcError,isEphemeralQueueUnavailable } from '../../../src/desktop/rpc';
 
 const desktop = { pid: 42, parentPid: 1, createdAt: '2026-10-11T00:00:00.000Z', executable: process.execPath, commandLineSha256: 'a'.repeat(64) };
 const bindings = [{ threadId: 'original', projectId: 'project', projectRoot: tmpdir() }];
@@ -41,6 +41,29 @@ it('fails closed on unsupported native RPC and does not expose raw errors', asyn
   const h = reads(m => { if (m === 'thread/loaded/list') throw new RpcError(-32601, 'SECRET raw response'); });
   const report = await inspectOrdinaryIdle(h.rpc, desktop, bindings, tools, async () => desktop);
   expect(report).toMatchObject({ verified: false, findings: ['ordinary_native_rpc_unsupported'] }); expect(JSON.stringify(report)).not.toContain('SECRET'); expect(h.closed).toBe(1);
+});
+it('verifies an unrelated idle ephemeral thread twice using its exact native queue rejection',async()=>{
+  let queues=0;const h=reads((m,p)=>{
+    if(p.threadId!=='other-project')return;
+    if(m==='thread/read')return {thread:{id:p.threadId,ephemeral:true,status:{type:'idle'}}};
+    if(m==='thread/queue/list'){queues++;throw new RpcError(-32600,`ephemeral thread does not support queued submissions: ${p.threadId}`);}
+  });
+  const r=await inspectOrdinaryIdle(h.rpc,desktop,bindings,tools,async()=>desktop);
+  expect(r.verified).toBe(true);expect(queues).toBe(2);expect(r.unqueueableEphemeralThreadIds).toEqual(['other-project']);expect(r.proof!.tasks).toHaveLength(1);
+});
+it.each(['durable','bound','active','approval','unknownFlag','notLoaded','wrongCode','wrongMessage','foreignId','invalidType','kindChanged','laterPage','pending'])('rejects %s instead of treating invalid queues as empty',async fault=>{
+  let scans=0;const target=fault==='bound'?'original':'other-project';
+  const h=reads((m,p)=>{
+    if(p.threadId!==target)return;
+    if(m==='thread/read')return {thread:{id:target,projectId:'project',cwd:tmpdir(),ephemeral:fault==='durable'?false:fault==='invalidType'?'true':fault==='kindChanged'?++scans===1:true,
+      status:{type:fault==='active'?'active':fault==='notLoaded'?'notLoaded':'idle',activeFlags:fault==='approval'?['waitingOnApproval']:fault==='unknownFlag'?['unknown']:[]}}};
+    if(m==='thread/queue/list'){
+      if(fault==='pending')return {data:[{id:'queued'}]};if(fault==='laterPage'&&!p.cursor)return {data:[],nextCursor:'next'};
+      throw new RpcError(fault==='wrongCode'?-32601:-32600,fault==='wrongMessage'?'TEST_PRIVATE_ERROR':`ephemeral thread does not support queued submissions: ${fault==='foreignId'?'foreign':target}`);
+    }
+  });
+  const r=await inspectOrdinaryIdle(h.rpc,desktop,bindings,tools,async()=>desktop);expect(r.verified).toBe(false);expect(r.proof).toBeUndefined();expect(JSON.stringify(r)).not.toContain('TEST_PRIVATE_ERROR');
+  if(fault==='wrongMessage'){expect(r.findings).toEqual(['ordinary_native_request_rejected']);expect(r.failure).toMatchObject({method:'thread/queue/list',threadId:target,pass:1,ephemeral:true,errorSha256:expect.stringMatching(/^[a-f0-9]{64}$/)});}
 });
 it('records the exact second-pass blocker without reading its queue or exposing task content', async () => {
   let readsOfOther=0;
@@ -84,6 +107,12 @@ function frame(value: unknown): Buffer { const bytes = Buffer.from(JSON.stringif
 it('uses actual framed pipe reads with fragmented responses and forbids mutation methods', async () => {
   const h = await pipe((socket,r) => { const response = frame({ id: r.id, result: { tools: [] } }); socket.write(response.subarray(0,3)); setTimeout(() => socket.write(response.subarray(3)),10); });
   try { expect(await h.rpc.call('tools/list', {})).toEqual({ tools: [] }); await expect(h.rpc.call('thread/queue/add', {})).rejects.toThrow('only permits'); expect(h.requests).toHaveLength(1); } finally { h.rpc.close(); }
+});
+it.each(['exact','otherMethod','foreignId','unknown'])('retains only a matching ephemeral queue error on the framed pipe (%s)',async fault=>{
+  const h=await pipe((socket,r)=>socket.write(frame({id:r.id,error:{code:-32600,message:fault==='unknown'?'TEST_PRIVATE':`ephemeral thread does not support queued submissions: ${fault==='foreignId'?'foreign':'ephemeral'}`}})));
+  try{await h.rpc.call(fault==='otherMethod'?'thread/read':'thread/queue/list',{threadId:'ephemeral'});throw Error('Expected rejection');}
+  catch(e){expect(isEphemeralQueueUnavailable(e,'ephemeral')).toBe(fault==='exact');expect(String(e)).not.toContain('TEST_PRIVATE');}
+  finally{h.rpc.close();}
 });
 it.each(['invalid-json-root','oversized-frame','disconnect','timeout'])('rejects %s without replaying', async fault => {
   const h = await pipe((socket,r) => {

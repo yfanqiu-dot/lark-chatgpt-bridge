@@ -2,12 +2,22 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it,vi } from 'vitest';
 import { writeFileAtomic } from '../../../src/platform/atomic-write.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
 describe('atomic write retry', () => {
+  it('allows real file I/O retries to finish under an automatically advancing fake clock',async()=>{
+    const root=await tmpRoot(),path=join(root,'config.json');let attempts=0;
+    vi.useFakeTimers({shouldAdvanceTime:true});
+    try{
+      await writeFileAtomic(path,'persisted',{rename:async(from,to,fallback)=>{
+        if(++attempts<3)throw Object.assign(Error('busy'),{code:'EPERM'});await fallback(from,to);
+      }});
+      expect(attempts).toBe(3);expect(await readFile(path,'utf8')).toBe('persisted');
+    }finally{vi.useRealTimers();}
+  });
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
