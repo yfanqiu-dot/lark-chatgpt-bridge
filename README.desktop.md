@@ -4,6 +4,8 @@
 
 ## 1. 准备环境
 
+安装过程会重新打开受管 Codex。自动打开后还需要完成后台检查，先保持桌面空闲，不要立即在 Codex 或飞书发任务；检查通过才开始使用。详见[启动与退出](docs/desktop-p4-deployment.md#启动与退出)。
+
 - Windows x64、Windows PowerShell 5.1、Node.js 22 LTS。
 - 已安装并登录的 Codex 桌面，包含 `codex-app-tools` 插件及 `Invoke-CommandInDesktopPackage` 能力。已验收版本见[兼容表](docs/compatibility.md)。
 - 自己的飞书应用机器人，启用长连接事件订阅，订阅 `im.message.receive_v1`、交互卡片回调 `card.action.trigger`，具备读取群内 @ 消息、以机器人发送消息和卡片的权限。将机器人加入测试群，并完成应用权限发布。首版现场验证仅覆盖飞书国内租户。
