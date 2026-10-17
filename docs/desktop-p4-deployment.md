@@ -1,6 +1,6 @@
 # QIU Bridge 日常使用与运维
 
-适用于 v0.9.0 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
+适用于 v0.9.1 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
 
 ## 完整功能部署 v0.9.0
 
@@ -17,7 +17,7 @@
 
 然后按[安装指南](../README.desktop.md#5-生成全新配置)中的 `prepare`、`verify`、`--service-prepare` 命令生成**新的** stage 和 service 目录。使用新的清单 SHA 启动，正常退出当前 Codex，让 Bridge 自动打开受管桌面。新安装仍使用自己的空账本；已有安装复用原账本。
 
-在入口群 @ 机器人发送 `/topic new <projectKey> <名称>`。项目标识来自自己的 `topics.json`；新装向导默认使用 `main`。新话题先持久化其绑定账本，再进入 `active`，原绑定不得删除或改指另一条对话。创建回执不明时使用 `/topic resume <原消息编号>`；不会重复创建结果不明的资源。
+在入口群 @ 机器人发送 `/topic new <projectKey> <名称>`。项目标识来自自己的 `topics.json`；新装向导默认使用 `main`。新话题先持久化其绑定账本，再进入 `active`，原绑定不得删除或改指另一条对话。创建回执不明时使用 `/topic resume <原消息编号>`；不会重复创建结果不明的资源。v0.9.1 对已保存对话 ID、停在初始化阶段的请求，先只读核验同一对话的项目、目录和持久完成轮次，通过后接续建群；没有完成证明时仍暂停，不重新提交初始化输入。
 
 完整模式的 `listener.ready.json` 标记为 `scope: "registered-topics"`，包含匹配的入口群及 `allowTopicCreation: true`；此模式下 `enabledChatIds: []` 表示登记绑定范围，不能在默认单群模式中把空数组当作完整范围。各群的 `/status`、`/steer`、`/stop`、`/result`、`/reconcile` 和审批仍归属于该群自己的原生对话。新话题的本地文字记录位于对应项目的 `.lark-chatgpt-bridge` 中。
 

@@ -105,11 +105,54 @@ describe('P2 topic creation journal', () => {
     const maker=new TopicProvisioner(config(),store,r.port);
     await expect(maker.create('m1','alpha','资料')).rejects.toThrow('Initialization connection lost');
     expect(store.byRequest('m1')).toMatchObject({stage:'thread_initializing',threadId:'thread-saved'});
-    await expect(maker.create('m1','alpha','资料')).rejects.toThrow('不会重试');
+    const verify=r.port.verifyThread;r.port.verifyThread=async()=>{throw Error('No durable completion');};
+    await expect(maker.create('m1','alpha','资料')).rejects.toThrow('No durable completion');
     expect(r.calls.filter(call=>call.startsWith('chat:'))).toHaveLength(0);
+    r.port.verifyThread=verify;
     await maker.attachKnownThread('m1','thread-saved');
     expect((await maker.create('m1','alpha','资料')).stage).toBe('active');
   });
+  it('resumes a saved initialization through native verification without creating another task or turn', async () => {
+    const c=config(),store=new TopicRegistry(c.registryFile);await store.load();const r=resources();let creates=0;
+    r.port.createThread=async(_project,_title,saveId)=>{creates++;await saveId('saved-task');throw Error('Read interrupted before persisted completion');};
+    const maker=new TopicProvisioner(c,store,r.port);
+    await expect(maker.create('resume-init','alpha','资料')).rejects.toThrow('Read interrupted');
+    const reload=new TopicRegistry(c.registryFile);await reload.load(true);
+    const result=await new TopicProvisioner(c,reload,r.port).create('resume-init','alpha','资料');
+    expect(result).toMatchObject({stage:'active',threadId:'saved-task',chatId:'oc_new1'});expect(creates).toBe(1);
+    expect(r.calls.indexOf('verify-thread:saved-task')).toBeLessThan(r.calls.indexOf('chat:资料'));
+    expect(r.calls.filter(v=>v.startsWith('chat:'))).toHaveLength(1);
+  });
+});
+
+it.each(['interrupted','failed','cancelled'])('does not treat %s without completedAt as a terminal initialization', async status=>{
+  const server=new WebSocketServer({host:'127.0.0.1',port:0});await new Promise<void>(resolve=>server.once('listening',resolve));
+  const c=config();c.endpoint=`ws://127.0.0.1:${(server.address() as {port:number}).port}/`;
+  await writeFile(c.connectionFile,JSON.stringify({version:1,endpoint:c.endpoint,verifiedAt:Date.now(),desktopPid:process.pid,pipeServerPid:process.pid,toolNames:['list_projects'],pipe:'\\\\.\\pipe\\codex-browser-use-test',mcpServer:{command:process.execPath,cwd:dir}}),'utf8');
+  let reads=0,starts=0;
+  server.on('connection',socket=>socket.on('message',data=>{const m=JSON.parse(data.toString());if(m.id===undefined)return;let result:any={};
+    if(m.method==='thread/start')result={thread:{id:'new-task',projectId:'p-alpha',cwd:dir}};
+    if(m.method==='turn/start'){starts++;result={turn:{id:'bootstrap'}};}
+    if(m.method==='thread/turns/list'){reads++;result={data:[{id:'bootstrap',status:reads===1?status:'completed',completedAt:reads===1?null:1}]};}
+    socket.send(JSON.stringify({id:m.id,result}));
+  }));
+  try{expect(await new CodexTopicResources(c).createThread(c.projects[0]!,'资料',async()=>{})).toBe('new-task');expect(reads).toBe(2);expect(starts).toBe(1);}
+  finally{for(const socket of server.clients)socket.terminate();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
+it.each(['interrupted','failed','cancelled'])('still rejects a persisted %s initialization without retrying',async status=>{
+  const server=new WebSocketServer({host:'127.0.0.1',port:0});await new Promise<void>(resolve=>server.once('listening',resolve));
+  const c=config();c.endpoint=`ws://127.0.0.1:${(server.address() as {port:number}).port}/`;
+  await writeFile(c.connectionFile,JSON.stringify({version:1,endpoint:c.endpoint,verifiedAt:Date.now(),desktopPid:process.pid,pipeServerPid:process.pid,toolNames:['list_projects'],pipe:'\\\\.\\pipe\\codex-browser-use-test',mcpServer:{command:process.execPath,cwd:dir}}),'utf8');
+  let starts=0;
+  server.on('connection',socket=>socket.on('message',data=>{const m=JSON.parse(data.toString());if(m.id===undefined)return;let result:any={};
+    if(m.method==='thread/start')result={thread:{id:'new-task',projectId:'p-alpha',cwd:dir}};
+    if(m.method==='turn/start'){starts++;result={turn:{id:'bootstrap'}};}
+    if(m.method==='thread/turns/list')result={data:[{id:'bootstrap',status,completedAt:1}]};
+    socket.send(JSON.stringify({id:m.id,result}));
+  }));
+  try{await expect(new CodexTopicResources(c).createThread(c.projects[0]!,'资料',async()=>{})).rejects.toThrow(`ended as ${status}`);expect(starts).toBe(1);}
+  finally{for(const socket of server.clients)socket.terminate();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
 it('names a new native task on its creation connection after journaling the ID', async () => {
