@@ -54,8 +54,10 @@ afterEach(async () => {
 });
 
 describe('profile-aware account and config commands', () => {
+  // Real filesystem retries must progress while tests await I/O before
+  // explicitly advancing the clock for delayed command feedback.
   it('saves /config submit into the active v2 profile without flattening root config', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({shouldAdvanceTime:true});
     const h = await createHarness();
 
     await h.command('/config submit', {
@@ -91,7 +93,7 @@ describe('profile-aware account and config commands', () => {
   });
 
   it('persists the picked model and clears it when "default" is chosen', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({shouldAdvanceTime:true});
     const h = await createHarness();
 
     await h.command('/config submit', {
@@ -114,7 +116,7 @@ describe('profile-aware account and config commands', () => {
   });
 
   it('keeps the current message reply mode when the config submit payload omits it', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({shouldAdvanceTime:true});
     const h = await createHarness({
       preferences: {
         messageReply: 'text',
@@ -138,7 +140,7 @@ describe('profile-aware account and config commands', () => {
   });
 
   it('does not save a lark-cli identity change when applying the runtime policy fails', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({shouldAdvanceTime:true});
     identityPolicyMocks.applyLarkCliIdentityPolicy.mockResolvedValueOnce(false);
     const h = await createHarness();
 
@@ -170,7 +172,7 @@ describe('profile-aware account and config commands', () => {
   });
 
   it('rolls back lark-cli identity when saving config fails after applying the runtime policy', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({shouldAdvanceTime:true});
     const applied = deferred<boolean>();
     identityPolicyMocks.applyLarkCliIdentityPolicy
       .mockImplementationOnce(async () => applied.promise)
@@ -205,7 +207,7 @@ describe('profile-aware account and config commands', () => {
   });
 
   it('saves /account submit into the active v2 profile and profile-local keystore', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({shouldAdvanceTime:true});
     const h = await createHarness();
 
     await h.command('/account submit', {

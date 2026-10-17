@@ -2,6 +2,13 @@ export interface RpcMessage { id?: number | string; method?: string; params?: an
 export class RpcError extends Error {
   constructor(readonly code: number, message: string) { super(message); }
 }
+/** A pinned App Server rejects queues on ephemeral threads with this exact
+ * response. Other invalid requests, unknown methods and permissions are not
+ * evidence that a queue is empty or impossible. */
+export function isEphemeralQueueUnavailable(error:unknown,threadId:unknown):boolean {
+  return typeof threadId==='string'&&threadId.length<=128&&/^[\w-]+$/.test(threadId)&&error instanceof RpcError&&error.code===-32600
+    &&error.message===`ephemeral thread does not support queued submissions: ${threadId}`;
+}
 export function loopbackEndpoint(value: string): string {
   const u = new URL(value);
   if (u.protocol !== 'ws:' || !u.port || u.port === '0' || !['127.0.0.1', '[::1]'].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/') {
