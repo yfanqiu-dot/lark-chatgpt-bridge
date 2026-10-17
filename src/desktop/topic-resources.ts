@@ -3,6 +3,7 @@ import { DesktopRpc } from './rpc';
 import { readDesktopToolConfig } from './backend';
 import type { TopicConfig, TopicProject } from './topics';
 import { assertProjectThread, type TopicResources } from './topic-provisioner';
+import {assertListenerSubmissionOpen} from './listener-ready';
 
 async function withRpc<T>(endpoint: string, use: (rpc: DesktopRpc) => Promise<T>): Promise<T> {
   const rpc = new DesktopRpc(endpoint);
@@ -36,6 +37,7 @@ export class CodexTopicResources implements Pick<TopicResources, 'verifyProject'
     const root = await realpath(project.projectRoot);
     const config = await readDesktopToolConfig(this.config, 45_000);
     return withRpc(this.config.endpoint, async rpc => {
+      await assertListenerSubmissionOpen();
       const result = await rpc.call('thread/start', { cwd: root, projectId: project.projectId, config });
       const id = result.thread?.id;
       if (typeof id !== 'string' || !id) throw new Error('Desktop task ID missing from thread/start');

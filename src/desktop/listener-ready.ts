@@ -1,8 +1,18 @@
 import { readFile,rm } from 'node:fs/promises';
-import { dirname,isAbsolute } from 'node:path';
+import { dirname,isAbsolute,join } from 'node:path';
 import { writeFileAtomic } from '../platform/atomic-write';
 import {ListenerOwnerLease} from './listener-owner';
 import type {TransportSnapshot} from './listener-transport';
+/** Refuse new model input as soon as managed health fails, including the
+ * normal-exit observation interval before the listener is shut down. */
+export async function assertListenerSubmissionOpen(env=process.env):Promise<void>{
+  const path=env.BRIDGE_SUPERVISOR_READY_FILE,runId=env.BRIDGE_SUPERVISOR_RUN_ID,owner=env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE;
+  if(!path&&!runId&&!owner)return;
+  if(!path||!isAbsolute(path)||!runId||!/^[a-f0-9-]{36}$/.test(runId))throw Error('Invalid listener supervisor handshake');
+  try{await readFile(join(dirname(path),'runtime-health.failure.json'));}
+  catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw Error('消息服务状态无法核验，未提交新请求。');}
+  throw Error('消息服务正在暂停，未提交新请求；请保留原消息并核对运行状态。');
+}
 /** Optional supervisor handshake. Existing standalone listeners are unchanged.
  * This contains identity/scope only; never auth, prompts or message results. */
 export async function publishListenerReady(chatIds:readonly string[],env=process.env,connection:()=>string|TransportSnapshot=()=> 'connected',periodMs=2500,onOwnerLost?:()=>void,scope?:{mode:'registered-topics';entryChatId:string;allowTopicCreation:true}):Promise<()=>Promise<void>> {

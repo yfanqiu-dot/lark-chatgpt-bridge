@@ -2,12 +2,20 @@ import { afterEach,beforeEach,expect,it,vi } from 'vitest';
 import { mkdtemp,readFile,rm,writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { publishListenerReady } from '../../../src/desktop/listener-ready';
+import { publishListenerReady,assertListenerSubmissionOpen } from '../../../src/desktop/listener-ready';
 import {writeFileAtomic} from '../../../src/platform/atomic-write';
 let dir:string;const closers:Array<()=>Promise<void>>=[];
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'listener-ready-'));});
 afterEach(async()=>{for(const close of closers.splice(0))await close();await rm(dir,{recursive:true,force:true});});
 const env=()=>({BRIDGE_SUPERVISOR_READY_FILE:join(dir,'ready.json'),BRIDGE_SUPERVISOR_RUN_ID:'12345678-1234-1234-1234-123456789abc'});
+it('allows standalone submission and managed submission before a health failure',async()=>{
+  await expect(assertListenerSubmissionOpen({})).resolves.toBeUndefined();await expect(assertListenerSubmissionOpen(env())).resolves.toBeUndefined();
+});
+it.each(['current','foreign','malformed'])('blocks submission immediately for a %s health-failure marker before shutdown',async kind=>{
+  const values=env();await writeFile(join(dir,'runtime-health.failure.json'),kind==='malformed'?'bad':JSON.stringify({version:1,runId:kind==='current'?values.BRIDGE_SUPERVISOR_RUN_ID:'other',reason:'health_read_failed'}));
+  await expect(assertListenerSubmissionOpen(values)).rejects.toThrow('未提交新请求');
+});
+it.each([{BRIDGE_SUPERVISOR_RUN_ID:'bad'},{BRIDGE_SUPERVISOR_READY_FILE:'relative'}])('rejects an incomplete managed submission identity',async values=>{await expect(assertListenerSubmissionOpen(values)).rejects.toThrow('handshake');});
 it('does nothing for an existing listener without supervisor variables',async()=>{await(await publishListenerReady([],{}))();});
 it('publishes an explicit registered-topic scope, and rejects ambiguous scope widening',async()=>{
   const scope={mode:'registered-topics' as const,entryChatId:'oc_entry',allowTopicCreation:true as const},values=env();

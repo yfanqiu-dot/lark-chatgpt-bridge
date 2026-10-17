@@ -17,7 +17,7 @@ import { CodexTopicResources, topicResources } from './topic-resources';
 import { TopicRouter,topicDesktopConfig } from './topic-router';
 import { TopicArchive } from './topic-archive';
 import { ApprovalJournal } from './approval-journal';
-import { publishListenerReady } from './listener-ready';
+import { publishListenerReady,assertListenerSubmissionOpen } from './listener-ready';
 import {ListenerTransport} from './listener-transport';
 
 async function main(): Promise<void> {
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     const bound=topicDesktopConfig(config,row);
     await new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}).load();
   }),
-    bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound,{beforeSubmission:async cancelled=>{await transport.waitReady(cancelled);await readDesktopToolConfig(bound);}}),{
+    bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound,{beforeSubmission:async cancelled=>{await transport.waitReady(cancelled);await readDesktopToolConfig(bound);await assertListenerSubmissionOpen();}}),{
       send,
       approval:(chatId,request,replyTo,replyInThread)=>cards.publish(chatId,request,replyTo,replyInThread),
       resolved:token=>cards.resolved(token),

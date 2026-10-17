@@ -1,6 +1,6 @@
 # QIU Bridge 日常使用与运维
 
-适用于 v0.9.1 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
+适用于 v0.9.2 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
 
 ## 完整功能部署 v0.9.0
 

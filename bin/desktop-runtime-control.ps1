@@ -79,8 +79,9 @@ public sealed class BridgePinnedProcessScan : IDisposable {
   void Capture(){
     foreach(var process in System.Diagnostics.Process.GetProcesses()){
       try{
-        var name=process.ProcessName;
-        if(name!="node" && name!="ChatGPT" && name!="codex" && name!="powershell" && name!="pwsh")continue;
+        // Shared inventory includes every descendant, including conhost and
+        // arbitrary tool executables. Pin all accessible processes; only a
+        // matching CIM record and signaled handle can turn this into proof.
         var pin=BridgePinnedProcessExit.OpenSnapshot(process.Id);
         if(pin.NativeError!=0){pin.Dispose();continue;}
         lock(gate){
