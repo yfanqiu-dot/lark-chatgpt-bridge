@@ -1,6 +1,6 @@
 # Windows 桌面版安装配置
 
-适用于 QIU Bridge v0.9.3。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
+适用于 QIU Bridge v0.9.4。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
 
 ## 1. 准备环境
 
@@ -12,7 +12,7 @@
 - 一条已存在的桌面项目对话，以及群 `chat_id`、本人在此应用下的 `open_id`。
 - 电脑开机联网，无其他消费者同时接收同一飞书应用消息。旧 CLI 后端应先停止并停用，保留配置和记录。
 
-下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v0.9.3`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
+下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v0.9.4`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
 
 ## 2. 保存机器人凭据
 

@@ -16,7 +16,7 @@ Bridge 安装在**自己的 Windows 电脑**上，使用自己登录的 Codex �
 
 ## 如何开始
 
-1. 从 [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases) 下载 `qiu-bridge-v0.9.3-windows-x64.zip`，包含构建产物和运行依赖；电脑需另装 Node.js 22 LTS。
+1. 从 [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases) 下载 `qiu-bridge-v0.9.4-windows-x64.zip`，包含构建产物和运行依赖；电脑需另装 Node.js 22 LTS。
 2. 按[安装配置指南](README.desktop.md)准备机器人、原生项目与对话标识，用安装准备工具生成自己的配置。首次配置需要一定命令行经验。
 3. 先验证一个群的收发和桌面接续，再设置登录入口，按[运维说明](docs/desktop-p4-deployment.md)日常使用。
 
@@ -25,7 +25,7 @@ Bridge 安装在**自己的 Windows 电脑**上，使用自己登录的 Codex �
 ```powershell
 git clone https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git
 cd lark-chatgpt-bridge
-git checkout v0.9.3
+git checkout v0.9.4
 npx --yes pnpm@10.33.0 install --frozen-lockfile
 npx --yes pnpm@10.33.0 build
 node bin/lark-chatgpt-setup.mjs --help
@@ -35,7 +35,7 @@ node bin/lark-chatgpt-setup.mjs --help
 
 ## 当前版本与支持范围
 
-`v0.9.3` 将缺失进程信息的补查合并为批量查询，避免工具和控制台子进程集中退出时逐个查询耗尽扫描时效。原生身份、退出证明和五秒时效要求保持不变。包含 v0.9.2 的全部子进程退出证明、健康失败后提交前阻断，以及 v0.9.1 的新话题初始化与原请求接续修复。详见[补丁说明](docs/releases/v0.9.3.md)。
+`v0.9.4` 修复原生对话中断后自动队列调度暂停、消息已接收却一直等待的问题。只在对话空闲、原请求仍为队首且当前健康核验通过时，接续原来那条队列请求；保留顺序，不重新提交输入。包含 v0.9.1～v0.9.3 的话题初始化与进程扫描修复。详见[补丁说明](docs/releases/v0.9.4.md)。
 
 `v0.9.0` 增加完整功能的受管部署：入口群、全部已登记话题群、配置项目内的新建话题与接续、各群独立收发和控制、支持的审批卡片。在入口群使用 `/topic new <projectKey> <名称>`，会创建该项目的真实 Codex 对话和对应飞书私有群。首次安装仍默认单群；按[完整功能部署](docs/desktop-p4-deployment.md#完整功能部署-v090)显式启用。新增绑定可继续运行并在下次启动时复用，原绑定仍保持不变；历史不确定任务须先按原任务证据核对。详见[版本说明](docs/releases/v0.9.0.md)。
 
