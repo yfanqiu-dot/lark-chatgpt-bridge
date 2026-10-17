@@ -35,6 +35,18 @@ function resources() {
 }
 
 describe('P2 topic creation journal', () => {
+  it('keeps a known group resumable until its ledger is persisted before activation',async()=>{
+    const c=config(),store=new TopicRegistry(c.registryFile);await store.load();const r=resources();let fail=true;
+    const maker=new TopicProvisioner(c,store,r.port,async row=>{
+      expect(row.stage).toBe('chat_ready');expect(store.byChat(row.chatId!)).toBeUndefined();
+      if(fail)throw Error('ledger write failed');
+    });
+    await expect(maker.create('persist-first','alpha','new')).rejects.toThrow('ledger write failed');
+    expect(store.byRequest('persist-first')?.stage).toBe('chat_ready');fail=false;
+    expect((await maker.create('persist-first','alpha','new')).stage).toBe('active');
+    expect(r.calls.filter(v=>v.startsWith('thread:'))).toHaveLength(1);
+    expect(r.calls.filter(v=>v.startsWith('chat:'))).toHaveLength(1);
+  });
   it('accepts only an explicit command and rejects unlisted projects and unsafe names', async () => {
     expect(parseCreateTopic('新建话题：普通请求')).toBeUndefined();
     expect(parseCreateTopic('/topic new alpha 会议资料')).toEqual({projectKey:'alpha',title:'会议资料'});

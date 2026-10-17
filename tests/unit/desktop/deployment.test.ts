@@ -89,6 +89,31 @@ describe('P4 gray group scope', () => {
 const jsonFile = async (file: string) => JSON.parse(await readFile(file, 'utf8'));
 
 describe('P4 offline deployment and rollback guards', () => {
+  it('requires explicit registered-topic scope and preserves historical uncertain ledgers', async () => {
+    const f=await fixture(),before=await readFile(join(f.c.stateDir,'oc_a.json'));
+    await save(f.spec.topicConfigFile,{...f.c,enabledChatIds:undefined,allowTopicCreation:true});
+    await expect(prepareDeployment(f.spec,f.stage)).rejects.toThrow('exactly one');
+    await expect(prepareDeployment({...f.spec,scope:'registered-topics'},f.stage)).rejects.toThrow('uncertain');
+    expect(await readFile(join(f.c.stateDir,'oc_a.json'))).toEqual(before);
+    expect(()=>parseDeploymentSpec({...f.spec,scope:'anything'})).toThrow('scope');
+  });
+  it('admits appended registered topics without relaxing immutable old bindings or ledger identities',async()=>{
+    const f=await fixture();
+    for(const id of ['a','b']){const path=join(f.c.stateDir,`oc_${id}.json`),value=await jsonFile(path);value.messages[0].state='completed';await save(path,value);}
+    await save(f.spec.topicConfigFile,{...f.c,enabledChatIds:undefined,allowTopicCreation:true});
+    const spec={...f.spec,scope:'registered-topics' as const};await prepareDeployment(spec,f.stage);
+    const newRow={...f.registry.topics[0]!,requestId:'new-request',chatId:'oc_new',threadId:'thread-new'};
+    const newLedger=join(f.c.stateDir,'oc_new.json');
+    await save(newLedger,{version:1,binding:{appId:f.c.appId,chatId:'oc_new',ownerOpenId:f.c.ownerOpenId,projectId:'project',projectRoot:dir,threadId:'thread-new'},messages:[]});
+    f.registry.topics.push(newRow);await save(f.c.registryFile,f.registry);
+    const current=await verifyDeployment(f.stage);expect(current.ledgers).toHaveLength(4);expect(current.snapshot.bindings).toHaveLength(3);
+    const bytes=await readFile(newLedger);await save(newLedger,{...JSON.parse(bytes.toString()),binding:{chatId:'oc_foreign'}});
+    await expect(verifyDeployment(f.stage)).rejects.toThrow('Ledger identity');await writeFile(newLedger,bytes);
+    f.registry.topics[0]!.threadId='changed-original';await save(f.c.registryFile,f.registry);
+    await expect(verifyDeployment(f.stage)).rejects.toThrow('Original topic bindings changed');
+    f.registry.topics.shift();await save(f.c.registryFile,f.registry);
+    await expect(verifyDeployment(f.stage)).rejects.toThrow('Original topic bindings changed');
+  });
   it('preserves the managed quit policy through the actual source, copied host and cold plan chain',async()=>{
     const {spec,stage}=await fixture();spec.legacy.scheduledTaskName='LarkChannelBridge.Bot.codex';
     await mkdir(join(dir,'bin'));await mkdir(join(dir,'dist'));

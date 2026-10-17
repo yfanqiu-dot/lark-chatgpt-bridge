@@ -15,7 +15,7 @@ The bridge runs on **your Windows computer**, using your signed-in Codex app and
 
 ## Start here
 
-1. Download `qiu-bridge-v0.8.2-windows-x64.zip` from [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases). It includes built JavaScript and production dependencies; Node.js 22 LTS is required separately.
+1. Download `qiu-bridge-v0.9.0-windows-x64.zip` from [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases). It includes built JavaScript and production dependencies; Node.js 22 LTS is required separately.
 2. Follow the [installation guide](README.desktop.md). Create your own bot, identify your native project/conversation, and generate a fresh configuration with the setup tool. First-time installation currently requires command-line experience; the detailed guide is in Chinese.
 3. Verify one group end to end before installing the login entry. See [operations](docs/desktop-p4-deployment.md) for daily startup, shutdown and recovery.
 
@@ -24,7 +24,7 @@ Source build:
 ```powershell
 git clone https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git
 cd lark-chatgpt-bridge
-git checkout v0.8.2
+git checkout v0.9.0
 npx --yes pnpm@10.33.0 install --frozen-lockfile
 npx --yes pnpm@10.33.0 build
 node bin/lark-chatgpt-setup.mjs --help
@@ -34,13 +34,15 @@ node bin/lark-chatgpt-setup.mjs --help
 
 ## Release scope
 
+Version 0.9.0 adds an explicit managed deployment mode for the entry group, all registered topic groups and new owner-created topics across configured projects. Send `/topic new <projectKey> <title>` in the entry group to create a native project conversation and its private Feishu group. The default first-install mode still starts with one group. Enable the full scope through the [operations guide](docs/desktop-p4-deployment.md#完整功能部署-v090); original bindings stay pinned as new topics are appended. Historical uncertain work must be reconciled before expansion. See [release notes](docs/releases/v0.9.0.md).
+
 Version 0.8.2 recognizes the pinned native queue rejection for unrelated, idle ephemeral desktop threads. Bound and durable threads still require full queue checks; active tasks, approvals, unknown errors and changed identities still stop admission. See [release notes](docs/releases/v0.8.2.md). Opening the desktop window is followed by admission checks; keep the desktop idle until readiness is verified.
 
 Version 0.8.1 adds bounded Feishu reconnection and supports discovery of the newer app-tools pipe. During a temporary outage, new model submissions wait for a stable connection; the same listener has up to three minutes to recover. An unrecovered or invalid connection still pauses the service. See [release notes](docs/releases/v0.8.1.md).
 
 The 0.8.0 runtime baseline passed Windows login, startup, normal quit, five minutes remaining closed, manual re-entry, delayed quit receipts, and cleanup checks. Deployed acceptance covered one existing group and one owner. Version 0.8.1 has automated regression and read-only compatibility checks; these do not replace a new field acceptance after upgrading. Tests and builds also run on macOS/Linux; the desktop runtime is **Windows x64 only**.
 
-Topic creation and multi-project routing exist in the code, but managed deployment disables new topics and admits one group initially. Additional groups need individual reconciliation and validation. Images/attachments, all-desktop-message mirroring, multi-user hosting, and guaranteed unattended operation are outside the desktop support scope. Bounded acceptance does not establish long-duration reliability. See [compatibility and limits](docs/compatibility.md).
+Managed deployment initially admits one group; the explicit full mode supports registered topic groups, topic creation/resume, per-group controls and supported approval cards. Configure and verify each installation's projects and original bindings. Images/attachments, all-desktop-message mirroring, multi-user hosting, and guaranteed unattended operation are outside the desktop support scope. Bounded acceptance does not establish long-duration reliability. See [compatibility and limits](docs/compatibility.md).
 
 ```text
 Feishu group → local listener → shared App Server ← managed Codex desktop

@@ -16,19 +16,22 @@ const json=async(path:string)=>JSON.parse(await readFile(path,'utf8'));
 export interface ManagedServiceManifest {
   version:1; serviceId:string; serviceMode:'stop-with-desktop'; channelMode:'new-only';
   sourceStage:string; sourceSha256:string; directory:string; root:string; nodeExecutable:string;
-  codeRevision:string; enabledChatIds:string[]; allowTopicCreation:false;
+  codeRevision:string; scope?:'registered-topics'; enabledChatIds?:string[]; allowTopicCreation:boolean;
 }
 /** Preparation is read-only with respect to services and original business
  * files. Each invocation later creates a fresh expiring one-shot cold plan. */
 export async function prepareManagedService(sourceStage:string,directory:string,root:string){
   if(![sourceStage,directory,root].every(isAbsolute) || /["\r\n]/.test(sourceStage+directory+root))throw new Error('Invalid service paths');
   const d=await verifyDeployment(sourceStage);
-  if(d.topics.allowTopicCreation!==false || !d.topics.enabledChatIds?.length || d.host.desktopQuitPolicy)throw new Error('Service requires an explicit existing group scope');
+  if(d.host.desktopQuitPolicy || (d.snapshot.spec.scope==='registered-topics'
+    ? d.topics.enabledChatIds!==undefined || d.topics.allowTopicCreation!==true
+    : d.topics.allowTopicCreation!==false || !d.topics.enabledChatIds?.length))throw new Error('Service requires an explicit existing group or registered-topic scope');
   if(!d.snapshot.files.some(f=>f.path===join(root,'bin/desktop-service-start.ps1')))throw new Error('Service startup program missing from source proofs');
   await mkdir(directory,{recursive:false,mode:0o700});
   const manifest:ManagedServiceManifest={version:1,serviceId:randomUUID(),serviceMode:'stop-with-desktop',channelMode:'new-only',
     sourceStage:resolve(sourceStage),sourceSha256:sha(await readFile(join(sourceStage,'manifest.json'))),directory:resolve(directory),root:resolve(root),
-    nodeExecutable:d.snapshot.spec.legacy.executable,codeRevision:d.snapshot.spec.codeRevision,enabledChatIds:[...d.topics.enabledChatIds],allowTopicCreation:false};
+    nodeExecutable:d.snapshot.spec.legacy.executable,codeRevision:d.snapshot.spec.codeRevision,
+    ...(d.snapshot.spec.scope==='registered-topics'?{scope:'registered-topics' as const,allowTopicCreation:true}:{enabledChatIds:[...d.topics.enabledChatIds!],allowTopicCreation:false})};
   const path=join(directory,'service.json'),bytes=JSON.stringify(manifest,null,2)+'\n';
   await writeFile(path,bytes,{encoding:'utf8',flag:'wx',mode:0o600});
   return {manifestFile:path,manifestSha256:sha(bytes),servicesChanged:false,startupInstalled:false};
@@ -38,12 +41,13 @@ export async function readManagedService(path:string,proof:string){
   const bytes=await readFile(path);if(sha(bytes)!==proof)throw new Error('Service manifest changed');
   const m=JSON.parse(bytes.toString('utf8')) as ManagedServiceManifest;
   if(m.version!==1 || !/^[a-f0-9-]{36}$/.test(m.serviceId) || m.serviceMode!=='stop-with-desktop' || m.channelMode!=='new-only'
-    || !/^[a-f0-9]{64}$/.test(m.sourceSha256) || !/^[a-f0-9]{40}$/.test(m.codeRevision) || m.allowTopicCreation!==false
-    || !Array.isArray(m.enabledChatIds) || !m.enabledChatIds.length || m.enabledChatIds.some(id=>typeof id!=='string'||!id) || new Set(m.enabledChatIds).size!==m.enabledChatIds.length
+    || !/^[a-f0-9]{64}$/.test(m.sourceSha256) || !/^[a-f0-9]{40}$/.test(m.codeRevision)
+    || (m.scope==='registered-topics' ? m.allowTopicCreation!==true || m.enabledChatIds!==undefined
+      : m.scope!==undefined || m.allowTopicCreation!==false || !Array.isArray(m.enabledChatIds) || !m.enabledChatIds.length || m.enabledChatIds.some(id=>typeof id!=='string'||!id) || new Set(m.enabledChatIds).size!==m.enabledChatIds.length)
     || ![m.sourceStage,m.directory,m.root,m.nodeExecutable].every(p=>typeof p==='string'&&isAbsolute(p)&&!/["\r\n]/.test(p)) || resolve(m.directory)!==dirname(resolve(path)))throw new Error('Invalid managed service manifest');
   if(sha(await readFile(join(m.sourceStage,'manifest.json')))!==m.sourceSha256)throw new Error('Service source manifest changed');
   const d=await verifyDeployment(m.sourceStage);
-  if(d.snapshot.spec.codeRevision!==m.codeRevision || d.snapshot.spec.legacy.executable!==m.nodeExecutable || d.topics.allowTopicCreation!==false
+  if(d.snapshot.spec.codeRevision!==m.codeRevision || d.snapshot.spec.legacy.executable!==m.nodeExecutable || d.topics.allowTopicCreation!==m.allowTopicCreation || d.snapshot.spec.scope!==m.scope
     || JSON.stringify(d.topics.enabledChatIds)!==JSON.stringify(m.enabledChatIds) || d.host.desktopQuitPolicy)throw new Error('Service scope or source changed');
   if(!d.snapshot.files.some(f=>f.path===join(m.root,'bin/desktop-service-start.ps1')))throw new Error('Service startup proof missing');
   return m;

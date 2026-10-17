@@ -14,6 +14,7 @@ import { execFile,spawn,type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { TaskUacController } from './task-uac';
 import {LISTENER_RECONNECT_MS} from './listener-transport';
+import {topicChatEnabled} from './topics';
 
 type Deployment=Awaited<ReturnType<typeof verifyDeployment>>;
 type Control=Pick<WindowsSupervisorControl,'inventory'|'taskPermissions'|'canStopLegacy'|'coldSnapshot'|'backupTask'|'pauseTask'|'restoreTaskSetting'|'startLegacy'|'stopOwned'|'testIdentity'|'protectCapability'|'unprotectCapability'|'startOrdinary'> & Partial<Pick<WindowsSupervisorControl,'legacyRetirement'>>;
@@ -77,7 +78,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   async verifyBindings(closing=false){
     const current=await this.effects.verify();
     if(JSON.stringify(current.snapshot.bindings)!==JSON.stringify(this.input.snapshot.bindings))throw new Error('Runtime original bindings changed');
-    const selected=current.ledgers.filter(l=>current.topics.enabledChatIds?.includes(l.binding.chatId));
+    const selected=current.ledgers.filter(l=>topicChatEnabled(current.topics,l.binding.chatId));
     if(selected.some(l=>l.counts.queued || l.counts.running || l.counts.submitting || !closing && l.counts.uncertain))throw new Error('Gray ledger requires reconciliation');
     // Historical uncertain outside the gray scope is preserved. Any active
     // queue in any original group still forbids pausing the consumer.
@@ -192,7 +193,9 @@ export class DesktopRuntimePort implements SupervisorPort {
       phaseReady:r.phase==='ready',connected:r.connectionState==='connected',
       heartbeatFresh:Number.isFinite(r.updatedAt) && r.updatedAt<=this.effects.now()+1000 && this.effects.now()-r.updatedAt<=10_000,
       readyTimeValid:Number.isFinite(r.readyAt) && r.readyAt<=this.effects.now()+1000 && !!this.owned.listener && r.readyAt>=Date.parse(this.owned.listener.createdAt)-1000,
-      scopeMatches:JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds)};
+      scopeMatches:this.input.snapshot.spec.scope==='registered-topics'
+        ? JSON.stringify(r.enabledChatIds)==='[]'&&r.scope==='registered-topics'&&r.entryChatId===this.input.topics.entryChatId&&r.allowTopicCreation===true
+        : r.scope===undefined&&JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds)};
   }
   private async listenerReadiness(){return this.listenerChecks(await json(join(this.directory,'listener.ready.json')));}
   private async listenerReady(){return Object.values(await this.listenerReadiness()).every(Boolean);}

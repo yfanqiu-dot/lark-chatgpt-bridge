@@ -1,6 +1,27 @@
 # QIU Bridge 日常使用与运维
 
-适用于 v0.8.2 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
+适用于 v0.9.0 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
+
+## 完整功能部署 v0.9.0
+
+首次安装仍用单群验证基本收发。完整模式由部署清单中的 `"scope": "registered-topics"` 显式启用，接入入口群及注册表中全部已有话题群，并允许所有者在已配置项目中创建新话题。这里的“话题”是一条真实 Codex 对话及其独立飞书私有群。任意把机器人拉入的陌生群不会自动绑定对话，其他成员也不会获得所有者权限。
+
+升级完整模式时，先保存现有配置及账本，停止消费者并核验清理。复制 `host.json`、`topics.json`、`deployment.json` 到新的配置目录，保留实际注册表、已有对话、消息账本及审批记录路径。不要对已有安装运行新装向导，也不要修改旧清单中已固定的配置文件。
+
+在新的配置副本中：
+
+- `topics.json` 删除 `enabledChatIds`，设置 `allowTopicCreation: true`。保留自己的 `entryChatId`、`existing`、所有者及项目清单。
+- `host.json` 的 `topicProjects` 必须列出对应的真实项目 ID 和根目录；已有 `toolBindings`、程序版本与 SHA 重新核对后保留。
+- `deployment.json` 增加 `scope: "registered-topics"`，将 `hostConfigFile`、`topicConfigFile` 指向新副本，将程序路径与完整工具目录指向本次验证的安装。保持原凭据服务引用。
+- 对照原生历史处理每条 `uncertain`，保留原消息和核对证据。无法唯一证明归属或终态的任务继续暂停，不清账，不重新提交。
+
+然后按[安装指南](../README.desktop.md#5-生成全新配置)中的 `prepare`、`verify`、`--service-prepare` 命令生成**新的** stage 和 service 目录。使用新的清单 SHA 启动，正常退出当前 Codex，让 Bridge 自动打开受管桌面。新安装仍使用自己的空账本；已有安装复用原账本。
+
+在入口群 @ 机器人发送 `/topic new <projectKey> <名称>`。项目标识来自自己的 `topics.json`；新装向导默认使用 `main`。新话题先持久化其绑定账本，再进入 `active`，原绑定不得删除或改指另一条对话。创建回执不明时使用 `/topic resume <原消息编号>`；不会重复创建结果不明的资源。
+
+完整模式的 `listener.ready.json` 标记为 `scope: "registered-topics"`，包含匹配的入口群及 `allowTopicCreation: true`；此模式下 `enabledChatIds: []` 表示登记绑定范围，不能在默认单群模式中把空数组当作完整范围。各群的 `/status`、`/steer`、`/stop`、`/result`、`/reconcile` 和审批仍归属于该群自己的原生对话。新话题的本地文字记录位于对应项目的 `.lark-chatgpt-bridge` 中。
+
+依次验证入口群、旧话题群、新话题及跨项目路由，确认唯一新消息回执，再验证需要的控制与审批操作。正常退出后再次启动，确认新增绑定仍可接续，最后迁移唯一登录入口。完整模式保留相同的原生空闲、队列、工具目录、进程身份和健康检查。
 
 ## 启动与退出
 
@@ -25,7 +46,7 @@
 | `/stop` | 请求停止当前原生轮次 |
 | `/result <messageId>` | 明确取回指定消息已保存的结果 |
 
-审批卡片只对匹配的群、所有者和原生待审批请求生效。不要把普通文字“同意”当成所有操作的授权。首个受管部署关闭 `/topic new` 等资源创建；扩群、项目变更和自动建话题须另行验证。
+审批卡片只对匹配的群、所有者和原生待审批请求生效。不要把普通文字“同意”当成所有操作的授权。默认单群部署关闭 `/topic new` 等资源创建；完整模式按上文显式启用。
 
 ## 查看状态与主动停止
 
@@ -64,6 +85,8 @@ node bin/lark-chatgpt-runtime-supervisor.mjs --stop $run.planFile $run.planSha25
 5. 只有完成独立清理和原状态核对后，才创建新的唯一运行。启动入口对失败或不明确的上次运行会拒绝重试，这是保护行为。
 
 不要为排障关闭完整性校验、安全软件或单位策略。公开问题反馈只附脱敏标签、版本及复现步骤。
+
+历史请求可以在完整、唯一的原生轮次证据支持下核对终态。`reconciliation` 保存核对时间、证据摘要、原状态及核对出的原生结果，原错误通知和原回执保持原样；`/result` 显式返回核对出的答案。此类核对不能重新执行原输入，也不能把旧错误通知回执当作新答案已发送的证明。
 
 ## 更新或迁移
 

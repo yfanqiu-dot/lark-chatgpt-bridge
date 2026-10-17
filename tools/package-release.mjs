@@ -11,7 +11,7 @@ if(git(['status','--porcelain','--untracked-files=no']))throw Error('Commit the 
 const output=resolve('release-artifacts'),build=join(output,`build-${revision.slice(0,12)}`),bundle=join(build,`qiu-bridge-v${pkg.version}-windows-x64`);
 await mkdir(output,{recursive:true});await mkdir(build);await mkdir(bundle);
 const files=['bin','dist','examples/desktop','tools/query-native.mjs','README.md','README.zh.md','README.desktop.md','LICENSE','SECURITY.md',
-  'docs/desktop-p4-deployment.md','docs/compatibility.md','docs/cli-backend.en.md','docs/cli-backend.zh.md',`docs/releases/v${pkg.version}.md`];
+  'docs/desktop-p4-deployment.md','docs/compatibility.md','docs/cli-backend.en.md','docs/cli-backend.zh.md','docs/releases'];
 for(const file of files){await mkdir(dirname(join(bundle,file)),{recursive:true});await cp(join(root,file),join(bundle,file),{recursive:true});}
 const runtimePkg={...pkg};delete runtimePkg.scripts;delete runtimePkg.devDependencies;delete runtimePkg.pnpm;delete runtimePkg.packageManager;
 await writeFile(join(bundle,'package.json'),JSON.stringify(runtimePkg,null,2)+'\n','utf8');
