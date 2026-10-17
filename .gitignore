@@ -29,6 +29,7 @@ tests-smoke/
 .p3-local/
 .p4-local/
 .feishu-bridge/
+.lark-chatgpt-bridge/
 *.local.json
 
 # Distributable bundles contain generated dependencies and release metadata.

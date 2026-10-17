@@ -1,6 +1,10 @@
 import {readFile,access,readdir} from 'node:fs/promises';
 import {dirname,resolve} from 'node:path';
-const files=['README.md','README.zh.md','README.desktop.md','docs/desktop-p4-deployment.md','docs/compatibility.md','docs/cli-backend.en.md','docs/cli-backend.zh.md',...(await readdir('docs/releases')).filter(f=>f.endsWith('.md')).map(f=>`docs/releases/${f}`)];
+async function markdownFiles(dir){
+  const entries=await readdir(dir,{withFileTypes:true});
+  return (await Promise.all(entries.map(e=>e.isDirectory()?markdownFiles(`${dir}/${e.name}`):e.isFile()&&e.name.endsWith('.md')?[`${dir}/${e.name}`]:[]))).flat();
+}
+const files=['README.md','README.zh.md','README.desktop.md','README.topics.md','SECURITY.md',...await markdownFiles('docs')];
 const broken=[];
 for(const file of files){
   const text=await readFile(file,'utf8');
