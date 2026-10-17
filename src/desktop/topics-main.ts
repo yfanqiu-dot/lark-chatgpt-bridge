@@ -14,7 +14,7 @@ import { desktopInbound } from './inbound';
 import { parseTopicConfig, TopicRegistry, topicChatEnabled, validateTopicScope } from './topics';
 import { TopicProvisioner } from './topic-provisioner';
 import { CodexTopicResources, topicResources } from './topic-resources';
-import { TopicRouter } from './topic-router';
+import { TopicRouter,topicDesktopConfig } from './topic-router';
 import { TopicArchive } from './topic-archive';
 import { ApprovalJournal } from './approval-journal';
 import { publishListenerReady } from './listener-ready';
@@ -74,7 +74,10 @@ async function main(): Promise<void> {
     close:async messageId=>{await channel.updateCard(messageId,resolvedCard());},
   }, 5_000, config.enabledChatIds);
   const send = async (chatId:string,text:string,replyTo:string,replyInThread:boolean) => (await channel.send(chatId,{markdown:text},{replyTo,replyInThread})).messageId;
-  const router = new TopicRouter(config,registry,new TopicProvisioner(config,registry,topicResources(config,secret)),
+  const router = new TopicRouter(config,registry,new TopicProvisioner(config,registry,topicResources(config,secret),async row=>{
+    const bound=topicDesktopConfig(config,row);
+    await new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}).load();
+  }),
     bound => new DesktopController(bound,new DesktopLedger(bound.stateFile,{appId:bound.appId,chatId:bound.chatId,ownerOpenId:bound.ownerOpenId,projectId:bound.projectId,projectRoot:bound.projectRoot,threadId:bound.threadId}),new DesktopBackend(bound,{beforeSubmission:async cancelled=>{await transport.waitReady(cancelled);await readDesktopToolConfig(bound);}}),{
       send,
       approval:(chatId,request,replyTo,replyInThread)=>cards.publish(chatId,request,replyTo,replyInThread),
@@ -104,7 +107,7 @@ async function main(): Promise<void> {
     await channel.connect();await cards.start();await router.start();
     clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>transport.snapshot(),2500,()=>{
       console.error('Listener supervisor owner lease lost; shutting down.');process.exitCode=1;onSignal();
-    });readyResolve();
+    },config.enabledChatIds===undefined&&config.allowTopicCreation===true?{mode:'registered-topics',entryChatId:config.entryChatId,allowTopicCreation:true}:undefined);readyResolve();
     process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);
     stopWatcher=setInterval(()=>{void readFile(`${config.registryFile}.stop`,'utf8').then(shutdown).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT'){console.error('Topic bridge shutdown failed:',String(e));process.exitCode=1;}});},1000);
     let syncing=false;

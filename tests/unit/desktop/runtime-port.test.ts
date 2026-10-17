@@ -70,6 +70,14 @@ async function transportHarness(){
   h.effects.pause=async()=>{h.advance(1000);await publish();};
   return {...h,marker,publishMarker:publish};
 }
+it('verifies registered-topic listener policy and includes every binding in reconciliation checks',async()=>{
+  const h=await configurationHarness();h.refresh();h.input.snapshot.spec.scope='registered-topics';delete h.input.topics.enabledChatIds;h.input.topics.allowTopicCreation=true;
+  await expect(h.port.verifyBindings()).rejects.toThrow('reconciliation');
+  h.input.ledgers[1].counts={completed:1};await expect(h.port.verifyBindings()).resolves.toBeUndefined();
+  const marker={version:1,runId,pid:6,readyAt:h.clock(),updatedAt:h.clock(),phase:'ready',connectionState:'connected',enabledChatIds:[],scope:'registered-topics',entryChatId:'oc_entry',allowTopicCreation:true};
+  await writeFile(join(dir,'listener.ready.json'),JSON.stringify(marker),'utf8');expect(await h.port.health()).toBe(true);
+  await writeFile(join(dir,'listener.ready.json'),JSON.stringify({...marker,entryChatId:'oc_foreign'}),'utf8');expect(await h.port.health()).toBe(false);
+});
 it('lets the original transport reconnect with full fresh admission and no process relaunch',async()=>{
   const h=await transportHarness(),pause=h.effects.pause,started=h.clock();
   h.effects.pause=async()=>{await pause();if(h.clock()-started>=10000){h.marker.phase='ready';h.marker.connectionState='connected';delete h.marker.transport.disconnectedSince;await h.publishMarker();}};

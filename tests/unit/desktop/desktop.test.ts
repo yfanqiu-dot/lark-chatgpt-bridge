@@ -253,6 +253,21 @@ describe('durable single-group controller',()=>{
     expect(store.get('a')).toMatchObject({state:'completed',result:'actual final',deliveryAttempted:true});
     await c.receive({...incoming('b'),content:'/result'});await c.idle();expect(rpc.calls.filter(x=>x.method==='thread/queue/add')).toHaveLength(1);
   });
+  it('returns a verified historical result only on explicit retrieval while preserving the original notice receipt',async()=>{
+    const store=new DesktopLedger(config().stateFile,binding());await store.load();
+    await store.add({messageId:'historical',prompt:'old request',replyInThread:false,state:'completed',turnId:'native-old',result:'original uncertain notice',receipt:'original-notice-receipt',deliveryAttempted:true,
+      reconciliation:{version:1,priorState:'uncertain',nativeStatus:'completed',nativeTurnId:'native-old',nativeResult:'verified native answer',verifiedAt:Date.now(),evidenceSha256:'a'.repeat(64)}});
+    const rpc=new FakeRpc(),out=replies(),reloaded=new DesktopLedger(config().stateFile,binding()),c=new DesktopController(config(),reloaded,backend(rpc),out);
+    await c.start();expect(out.sent).toHaveLength(0);expect(rpc.calls).toHaveLength(0);
+    await c.receive({...incoming('retrieve'),content:'/result historical'});await c.idle();
+    expect(reloaded.get('retrieve')?.result).toBe('verified native answer');expect(out.sent).toHaveLength(1);
+    expect(reloaded.get('historical')).toMatchObject({result:'original uncertain notice',receipt:'original-notice-receipt'});expect(rpc.calls).toHaveLength(0);await c.shutdown();
+  });
+  it('rejects reconciliation evidence that claims a different native turn',async()=>{
+    await writeFile(config().stateFile,JSON.stringify({version:1,binding:binding(),messages:[{messageId:'old',prompt:'old',replyInThread:false,state:'completed',turnId:'original',
+      reconciliation:{version:1,priorState:'uncertain',nativeStatus:'completed',nativeTurnId:'foreign',nativeResult:'answer',verifiedAt:Date.now(),evidenceSha256:'a'.repeat(64)}}]}),'utf8');
+    await expect(new DesktopLedger(config().stateFile,binding()).load()).rejects.toThrow('reconciliation');
+  });
   it('refuses loading a ledger for a different project/chat binding',async()=>{
     const store=new DesktopLedger(config().stateFile,binding());await store.load();
     await expect(new DesktopLedger(config().stateFile,{...binding(),chatId:'oc_elsewhere'}).load()).rejects.toThrow('mismatch');

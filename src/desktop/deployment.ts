@@ -10,8 +10,11 @@ import { CodexTopicResources } from './topic-resources';
 import { assertProjectThread } from './topic-provisioner';
 import { DesktopRpc, RpcError } from './rpc';
 import type { Binding, DeliveryState } from './ledger';
+import { validateReconciliation } from './ledger';
 
 export interface DeploymentSpec {
+  /** Explicit opt-in to all registered bindings and owner-created topics. */
+  scope?: 'registered-topics';
   hostConfigFile: string;
   topicConfigFile: string;
   codeRevision: string;
@@ -49,10 +52,12 @@ const absolute = (path: unknown): string => {
 export function parseDeploymentSpec(raw: unknown): DeploymentSpec {
   if (!raw || typeof raw !== 'object') throw new Error('Invalid deployment spec');
   const r = raw as DeploymentSpec, legacy = r.legacy;
+  if (r.scope !== undefined && r.scope !== 'registered-topics') throw new Error('Invalid deployment scope');
   if (!/^[a-f0-9]{40}$/i.test(r.codeRevision)) throw new Error('A full Git codeRevision is required');
   if (!Array.isArray(r.artifactFiles) || !r.artifactFiles.length || !Array.isArray(r.expectedToolNames) || !r.expectedToolNames.includes('list_projects') || r.expectedToolNames.some(n => typeof n !== 'string' || !/^[a-zA-Z0-9_]+$/.test(n)) || new Set(r.expectedToolNames).size !== r.expectedToolNames.length) throw new Error('Invalid artifact or tool baseline');
   if (!legacy || typeof legacy.scheduledTaskName !== 'string' || !/^[\w.-]+$/.test(legacy.scheduledTaskName) || typeof legacy.profile !== 'string' || !/^[\w-]+$/.test(legacy.profile) || !Array.isArray(legacy.configFiles)) throw new Error('Invalid legacy launch references');
   const spec: DeploymentSpec = {
+    ...(r.scope ? { scope: r.scope } : {}),
     hostConfigFile: absolute(r.hostConfigFile), topicConfigFile: absolute(r.topicConfigFile), codeRevision: r.codeRevision.toLowerCase(),
     artifactFiles: r.artifactFiles.map(absolute), expectedToolNames: [...r.expectedToolNames].sort(),
     legacy: { scheduledTaskName: legacy.scheduledTaskName, executable: absolute(legacy.executable), entryPoint: absolute(legacy.entryPoint), profile: legacy.profile, configFiles: legacy.configFiles.map(absolute) },
@@ -73,7 +78,9 @@ async function configs(spec: DeploymentSpec): Promise<{ host: HostConfig; topics
     ...(raw.topicProjects !== undefined ? { topicProjects: raw.topicProjects.map((p: any) => ({ projectId: p.projectId, projectRoot: p.projectRoot })) } : {}),
   });
   const topics = parseTopicConfig(await json(spec.topicConfigFile));
-  if (topics.enabledChatIds?.length !== 1 || topics.allowTopicCreation !== false) throw new Error('Initial deployment requires exactly one gray chat and disabled topic creation');
+  if (spec.scope === 'registered-topics') {
+    if (topics.enabledChatIds !== undefined || topics.allowTopicCreation !== true) throw new Error('Registered-topic deployment requires all registered bindings and explicit topic creation');
+  } else if (topics.enabledChatIds?.length !== 1 || topics.allowTopicCreation !== false) throw new Error('Initial deployment requires exactly one gray chat and disabled topic creation');
   if (host.endpoint !== topics.endpoint || resolve(host.connectionFile) !== topics.connectionFile || !host.topicRegistryFile || resolve(host.topicRegistryFile) !== topics.registryFile) throw new Error('Host and topic deployment paths differ');
   for (const project of topics.projects) if (!host.topicProjects?.some(p => p.projectId === project.projectId && resolve(p.projectRoot) === project.projectRoot)) throw new Error('Topic project is absent from host allowlist');
   return { host, topics };
@@ -103,6 +110,7 @@ async function ledger(config: TopicConfig, binding: Binding): Promise<LedgerSumm
   for (const m of saved.messages) {
     if (!m || typeof m.messageId !== 'string' || ids.has(m.messageId) || !['queued', 'submitting', 'running', 'completed', 'interrupted', 'failed', 'uncertain'].includes(m.state) || (m.queueClientId !== undefined && m.queueClientId !== m.messageId)) throw new Error('Malformed ledger');
     ids.add(m.messageId);
+    validateReconciliation(m);
     const state = m.state as DeliveryState; counts[state] = (counts[state] ?? 0) + 1;
     if (typeof m.result === 'string' && m.result && !m.receipt) {
       if (!m.deliveryAttempted) savedResultsPending++;
@@ -200,7 +208,11 @@ export async function verifyDeployment(directory: string): Promise<{ snapshot: S
   const { host, topics } = await configs(spec), all = await bindings(topics);
   const required = [...new Set([spec.hostConfigFile, spec.topicConfigFile, host.codexBinary, host.desktopExe, spec.legacy.executable, spec.legacy.entryPoint, ...spec.legacy.configFiles, ...spec.artifactFiles])];
   if (snapshot.files.length !== required.length || required.some(p => !snapshot.files.some(f => f.path === p))) throw new Error('Deployment file proofs are incomplete');
-  if (JSON.stringify(all) !== JSON.stringify(snapshot.bindings)) throw new Error('Original topic bindings changed');
+  if (spec.scope === 'registered-topics') {
+    // New owner-provisioned bindings may be appended. Original bindings remain
+    // immutable, including currently inactive historical groups.
+    if (snapshot.bindings.some(old => !all.some(current => JSON.stringify(current) === JSON.stringify(old)))) throw new Error('Original topic bindings changed');
+  } else if (JSON.stringify(all) !== JSON.stringify(snapshot.bindings)) throw new Error('Original topic bindings changed');
   return { snapshot, host, topics, ledgers: await Promise.all(all.map(b => ledger(topics, b))) };
 }
 

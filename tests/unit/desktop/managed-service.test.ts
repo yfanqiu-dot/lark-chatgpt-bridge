@@ -23,6 +23,16 @@ const prepare=()=>prepareManagedService(source,service,root);
 it('prepares a sealed existing-group service without launching services or installing startup',async()=>{
   const p=await prepare();expect(await readManagedService(p.manifestFile,p.manifestSha256)).toMatchObject({serviceMode:'stop-with-desktop',enabledChatIds:['oc_original_c'],allowTopicCreation:false});expect(p.startupInstalled).toBe(false);expect(mock.launch).not.toHaveBeenCalled();await expect(prepare()).rejects.toThrow();
 });
+it('seals and launches explicit registered-topic scope, rejecting later policy changes',async()=>{
+  d.snapshot.spec.scope='registered-topics';d.topics={allowTopicCreation:true};
+  const p=await prepare(),m=await readManagedService(p.manifestFile,p.manifestSha256);
+  expect(m).toMatchObject({scope:'registered-topics',allowTopicCreation:true});expect(m.enabledChatIds).toBeUndefined();
+  await launchManagedService(p.manifestFile,p.manifestSha256);expect(mock.launch).toHaveBeenCalledOnce();
+  d.topics.enabledChatIds=['oc_c'];await expect(readManagedService(p.manifestFile,p.manifestSha256)).rejects.toThrow('scope');
+});
+it('does not infer registered-topic permission from a missing group list',async()=>{
+  d.topics={allowTopicCreation:true};await expect(prepare()).rejects.toThrow('scope');expect(mock.launch).not.toHaveBeenCalled();
+});
 it.each(['mode','scope','source','node','creation'])('rejects changed %s before creating a runtime',async condition=>{
   const p=await prepare(),m=JSON.parse(await readFile(p.manifestFile,'utf8'));
   if(condition==='mode')m.serviceMode='auto-reopen';if(condition==='scope')m.enabledChatIds.push('oc_new');if(condition==='source')m.sourceSha256='0'.repeat(64);if(condition==='node')m.nodeExecutable=join(root,'foreign.exe');if(condition==='creation')m.allowTopicCreation=true;

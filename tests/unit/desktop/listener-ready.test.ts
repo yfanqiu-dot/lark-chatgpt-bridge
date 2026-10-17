@@ -9,6 +9,14 @@ beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'listener-ready-'));});
 afterEach(async()=>{for(const close of closers.splice(0))await close();await rm(dir,{recursive:true,force:true});});
 const env=()=>({BRIDGE_SUPERVISOR_READY_FILE:join(dir,'ready.json'),BRIDGE_SUPERVISOR_RUN_ID:'12345678-1234-1234-1234-123456789abc'});
 it('does nothing for an existing listener without supervisor variables',async()=>{await(await publishListenerReady([],{}))();});
+it('publishes an explicit registered-topic scope, and rejects ambiguous scope widening',async()=>{
+  const scope={mode:'registered-topics' as const,entryChatId:'oc_entry',allowTopicCreation:true as const},values=env();
+  await expect(publishListenerReady([],values)).rejects.toThrow('handshake');
+  await expect(publishListenerReady(['oc_c'],values,()=> 'connected',5000,undefined,scope)).rejects.toThrow('handshake');
+  await expect(publishListenerReady([],values,()=> 'connected',5000,undefined,{...scope,entryChatId:'bad'})).rejects.toThrow('handshake');
+  const close=await publishListenerReady([],values,()=> 'connected',5000,undefined,scope);closers.push(close);
+  expect(JSON.parse(await readFile(values.BRIDGE_SUPERVISOR_READY_FILE,'utf8'))).toMatchObject({scope:'registered-topics',entryChatId:'oc_entry',allowTopicCreation:true,enabledChatIds:[],phase:'ready'});
+});
 it.each([{BRIDGE_SUPERVISOR_RUN_ID:'bad'},{BRIDGE_SUPERVISOR_READY_FILE:'relative'}])('rejects incomplete or invalid handshake',async value=>{await expect(publishListenerReady(['oc_test'],value)).rejects.toThrow();});
 it('publishes identity and connection state, advances heartbeat and removes only its own marker',async()=>{
   let state='connected';const values=env(),close=await publishListenerReady(['oc_test'],values,()=>state,100);closers.push(close);

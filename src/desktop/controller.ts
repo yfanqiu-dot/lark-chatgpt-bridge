@@ -62,7 +62,7 @@ export class DesktopController {
         await this.backend.decide(args[0]!, args[1]!); return '决定已提交，等待服务端确认。';
       case '/result': {
         const row = args[0] ? this.ledger.get(args[0]) : this.ledger.all().reverse().find(r => !r.prompt.startsWith('/') && r.result);
-        return row?.result ?? '没有已保存的结果。';
+        return row?.reconciliation?.nativeResult ?? row?.result ?? '没有已保存的结果。';
       }
       case '/reconcile': {
         if (this.worker) return '当前正在处理任务，请稍后核对。';

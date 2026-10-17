@@ -5,11 +5,12 @@ import {ListenerOwnerLease} from './listener-owner';
 import type {TransportSnapshot} from './listener-transport';
 /** Optional supervisor handshake. Existing standalone listeners are unchanged.
  * This contains identity/scope only; never auth, prompts or message results. */
-export async function publishListenerReady(chatIds:readonly string[],env=process.env,connection:()=>string|TransportSnapshot=()=> 'connected',periodMs=2500,onOwnerLost?:()=>void):Promise<()=>Promise<void>> {
+export async function publishListenerReady(chatIds:readonly string[],env=process.env,connection:()=>string|TransportSnapshot=()=> 'connected',periodMs=2500,onOwnerLost?:()=>void,scope?:{mode:'registered-topics';entryChatId:string;allowTopicCreation:true}):Promise<()=>Promise<void>> {
   const path=env.BRIDGE_SUPERVISOR_READY_FILE,runId=env.BRIDGE_SUPERVISOR_RUN_ID;
   const ownerPath=env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE;
   if(!path && !runId && !ownerPath)return async()=>{};
-  if(!path || !isAbsolute(path) || !runId || !/^[a-f0-9-]{36}$/.test(runId) || chatIds.length!==1 || new Set(chatIds).size!==1)throw new Error('Invalid listener supervisor handshake');
+  const validScope=scope?.mode==='registered-topics'&&/^oc_[a-zA-Z0-9]+$/.test(scope.entryChatId)&&scope.allowTopicCreation===true&&chatIds.length===0;
+  if(!path || !isAbsolute(path) || !runId || !/^[a-f0-9-]{36}$/.test(runId) || (scope!==undefined?!validScope:chatIds.length!==1 || new Set(chatIds).size!==1))throw new Error('Invalid listener supervisor handshake');
   if(ownerPath&&(!isAbsolute(ownerPath)||dirname(ownerPath)!==dirname(path)||typeof onOwnerLost!=='function'))throw new Error('Invalid listener owner handshake');
   const owner=ownerPath?new ListenerOwnerLease(ownerPath,runId):undefined;
   if(!Number.isSafeInteger(periodMs) || periodMs<10 || periodMs>5000)throw new Error('Invalid listener readiness interval');
@@ -28,7 +29,7 @@ export async function publishListenerReady(chatIds:readonly string[],env=process
       transport.transitions=raw.transitions.slice(-32).filter(v=>Number.isSafeInteger(v.at)&&v.at>=readyAt&&known.includes(v.state)).map(v=>({at:v.at,state:v.state}));
     }
     const phase=raw?(raw.phase==='ready'&&state==='connected'?'ready':raw.phase==='reconnecting'?'reconnecting':'failed'):state==='connected'?'ready':'disconnected';
-    const marker={version:1,runId,pid:process.pid,readyAt,updatedAt:Date.now(),phase,connectionState:state,enabledChatIds:[...chatIds],...(transport?{transport}:{})};
+    const marker={version:1,runId,pid:process.pid,readyAt,updatedAt:Date.now(),phase,connectionState:state,enabledChatIds:[...chatIds],...(scope?{scope:scope.mode,entryChatId:scope.entryChatId,allowTopicCreation:true}:{}),...(transport?{transport}:{})};
     if(transport)await writeFileAtomic(path.replace(/[^\\/]+$/,'listener.connection.json'),JSON.stringify(marker));
     await writeFileAtomic(path,JSON.stringify(marker));
   });return writes;};

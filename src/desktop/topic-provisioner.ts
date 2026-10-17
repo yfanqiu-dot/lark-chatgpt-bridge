@@ -15,7 +15,8 @@ export interface TopicResources {
 /** Recover known IDs; never repeat an irreversible call with an unknown result. */
 export class TopicProvisioner {
   private inflight = new Map<string, Promise<TopicRecord>>();
-  constructor(readonly config: TopicConfig, readonly registry: TopicRegistry, readonly resources: TopicResources) {}
+  constructor(readonly config: TopicConfig, readonly registry: TopicRegistry, readonly resources: TopicResources,
+    private readonly beforeActivate?: (row: TopicRecord) => Promise<void>) {}
   create(requestId: string, projectKey: string, title: string): Promise<TopicRecord> {
     const running = this.inflight.get(requestId); if (running) return running;
     const task = this.run(requestId, projectKey, title).finally(() => this.inflight.delete(requestId));
@@ -72,7 +73,12 @@ export class TopicProvisioner {
     }
     if (!row.chatId) throw new Error('Topic has no saved Feishu chat ID');
     await this.resources.verifyChat(row.chatId, this.config.ownerOpenId);
-    if (row.stage !== 'active') row = await this.registry.advance(requestId, 'active');
+    if (row.stage !== 'active') {
+      // Persist the bound ledger before exposing a new active registry row to
+      // deployment/health readers. A failed initialization stays resumable.
+      await this.beforeActivate?.(row);
+      row = await this.registry.advance(requestId, 'active');
+    }
     return row;
   }
 }

@@ -6,6 +6,15 @@ export interface MessageRecord {
   messageId: string; prompt: string; replyInThread: boolean; state: DeliveryState;
   turnId?: string; queueClientId?: string; queueSubmissionId?: string;
   result?: string; receipt?: string; deliveryAttempted?: boolean; error?: string;
+  /** Read-only native reconciliation preserves the original sent notice and
+   * receipt. The recovered answer is returned only by an explicit /result. */
+  reconciliation?: {version:1;priorState:'uncertain';nativeStatus:'completed'|'interrupted'|'failed';nativeTurnId:string;nativeResult:string;verifiedAt:number;evidenceSha256:string};
+}
+export function validateReconciliation(row: MessageRecord): void {
+  const r=row.reconciliation;if(r===undefined)return;
+  if(!r||r.version!==1||r.priorState!=='uncertain'||!['completed','interrupted','failed'].includes(r.nativeStatus)
+    ||r.nativeStatus!==row.state||r.nativeTurnId!==row.turnId||typeof r.nativeTurnId!=='string'||!r.nativeTurnId
+    ||typeof r.nativeResult!=='string'||!Number.isFinite(r.verifiedAt)||r.verifiedAt<=0||!/^[a-f0-9]{64}$/.test(r.evidenceSha256))throw new Error('Malformed native reconciliation');
 }
 export interface Binding { appId: string; chatId: string; ownerOpenId: string; projectId: string; projectRoot: string; threadId: string }
 export class DesktopLedger {
@@ -24,6 +33,7 @@ export class DesktopLedger {
           || ['result','error'].some(key => row[key] !== undefined && typeof row[key] !== 'string')
           || (row.deliveryAttempted !== undefined && typeof row.deliveryAttempted !== 'boolean')) throw new Error('Malformed ledger record');
         if (row.queueClientId !== undefined && row.queueClientId !== row.messageId) throw new Error('Ledger queue client identity mismatch');
+        validateReconciliation(row);
         ids.add(row.messageId);
       }
       this.rows = saved.messages;
