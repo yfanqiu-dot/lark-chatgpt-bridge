@@ -115,6 +115,35 @@ function Close-SnapshotProcessExitObservations {
   if($script:taskPinnedScan){$script:taskPinnedScan.Dispose();$script:taskPinnedScan=$null}
   if($script:taskPinnedExits){foreach($taskPin in $script:taskPinnedExits.Values){$taskPin.Dispose()}}
   $script:taskPinnedExits=$null
+  $script:taskMetadataRefresh=$null
+}
+function Read-SnapshotMetadataRefresh($processes){
+  if($Action -notin @('Snapshot','ColdSnapshot','SharedSnapshot')){throw 'Metadata refresh is read-only'}
+  # One bounded batch re-read of incomplete CIM identities. Re-reading each
+  # exited console/tool separately can consume the entire five-second proof
+  # budget. Keep the original records and all existing identity comparisons;
+  # an empty re-read still requires the same creation-matched exit handle.
+  $script:taskMetadataRefresh=@{}
+  try{
+    foreach($process in $processes){
+      if($process.ExecutablePath -and $process.CommandLine){continue}
+      if(!($process.CreationDate -is [DateTime]) -or [int]$process.ProcessId -le 0 -or !$process.Name){continue}
+      $taskRefreshId=[int]$process.ProcessId
+      if($script:taskMetadataRefresh.ContainsKey($taskRefreshId)){throw 'Duplicate snapshot process identity'}
+      $script:taskMetadataRefresh[$taskRefreshId]=@{original=$process;rows=@()}
+    }
+    $taskRefreshIds=@($script:taskMetadataRefresh.Keys | Sort-Object)
+    for($taskOffset=0;$taskOffset -lt $taskRefreshIds.Count;$taskOffset+=128){
+      $taskBatch=@($taskRefreshIds[$taskOffset..([Math]::Min($taskOffset+127,$taskRefreshIds.Count-1))])
+      $taskFilter=($taskBatch | ForEach-Object {'ProcessId = '+[int]$_}) -join ' OR '
+      $taskFreshRows=@(Get-CimInstance Win32_Process -Filter $taskFilter -ErrorAction Stop | Where-Object {$null -ne $_})
+      foreach($taskRow in $taskFreshRows){
+        $taskRefreshId=[int]$taskRow.ProcessId
+        if($taskRefreshId -notin $taskBatch){throw 'Unexpected metadata refresh process identity'}
+        $script:taskMetadataRefresh[$taskRefreshId].rows+=,$taskRow
+      }
+    }
+  }catch{$script:taskMetadataRefresh=$null;throw}
 }
 function New-VerifiedExitedRecord($process,$observation){
   if($Action -notin @('Snapshot','ColdSnapshot','SharedSnapshot') -or !$observation.IdentityVerified -or !$observation.IsExited()){throw 'Native exit proof is not available'}
@@ -160,7 +189,13 @@ function Resolve-ProcessMetadata($process){
       }
       if(!$taskExitObservation){$taskExitObservation=Open-ProcessExitObservation $process}
     }
-    $taskFresh=@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$process.ProcessId) -ErrorAction Stop | Where-Object {$null -ne $_})
+    if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot') -and $null -ne $script:taskMetadataRefresh -and $script:taskMetadataRefresh.ContainsKey([int]$process.ProcessId)){
+      $taskRefresh=$script:taskMetadataRefresh[[int]$process.ProcessId];$taskOriginal=$taskRefresh.original
+      if($taskOriginal.CreationDate -ne $process.CreationDate -or $taskOriginal.ParentProcessId -ne $process.ParentProcessId -or $taskOriginal.Name -cne $process.Name -or $taskOriginal.ExecutablePath -cne $process.ExecutablePath -or $taskOriginal.CommandLine -cne $process.CommandLine){Throw-UnreadableProcess $process 'Process identity is not readable'}
+      $taskFresh=@($taskRefresh.rows)
+    }else{
+      $taskFresh=@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$process.ProcessId) -ErrorAction Stop | Where-Object {$null -ne $_})
+    }
     if($taskFresh.Count -gt 1){Throw-UnreadableProcess $process 'Process identity is not readable'}
     if($taskFresh.Count -eq 1){
       $taskCurrent=$taskFresh[0]
@@ -366,6 +401,7 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
   $script:taskVerifiedExits=[Collections.Generic.List[object]]::new()
   $taskObservedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $taskProcesses=@(Get-CimInstance Win32_Process)
+  Read-SnapshotMetadataRefresh $taskProcesses
   $taskProcesses=@($taskProcesses | ForEach-Object {if($_.Name -in @('node.exe','ChatGPT.exe','codex.exe')){Resolve-ProcessMetadata $_}else{$_}})
   $taskResult=@{legacy=@();desktop=@();host=@();listener=@();broker=@()}
   foreach($taskProcess in @($taskProcesses | Where-Object {$_.Name -in @('node.exe','ChatGPT.exe','powershell.exe','pwsh.exe')})){
