@@ -15,7 +15,7 @@ The bridge runs on **your Windows computer**, using your signed-in Codex app and
 
 ## Start here
 
-1. Download `qiu-bridge-v0.9.3-windows-x64.zip` from [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases). It includes built JavaScript and production dependencies; Node.js 22 LTS is required separately.
+1. Download `qiu-bridge-v0.9.4-windows-x64.zip` from [Releases](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases). It includes built JavaScript and production dependencies; Node.js 22 LTS is required separately.
 2. Follow the [installation guide](README.desktop.md). Create your own bot, identify your native project/conversation, and generate a fresh configuration with the setup tool. First-time installation currently requires command-line experience; the detailed guide is in Chinese.
 3. Verify one group end to end before installing the login entry. See [operations](docs/desktop-p4-deployment.md) for daily startup, shutdown and recovery.
 
@@ -24,7 +24,7 @@ Source build:
 ```powershell
 git clone https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git
 cd lark-chatgpt-bridge
-git checkout v0.9.3
+git checkout v0.9.4
 npx --yes pnpm@10.33.0 install --frozen-lockfile
 npx --yes pnpm@10.33.0 build
 node bin/lark-chatgpt-setup.mjs --help
@@ -34,7 +34,7 @@ node bin/lark-chatgpt-setup.mjs --help
 
 ## Release scope
 
-Version 0.9.3 batches incomplete process metadata refreshes so concurrent tool and console exits do not each trigger a separate CIM lookup. Native identity, exit proof and five-second freshness checks remain unchanged. It includes the descendant exit proofs and input health gate from 0.9.2, plus safe topic initialization and resume from 0.9.1. See [patch notes](docs/releases/v0.9.3.md).
+Version 0.9.4 resumes an already accepted queue head when an interrupted native conversation remains idle with automatic dispatch paused. It verifies the original request and current health before starting that exact queue item, preserves queue order and never resubmits the input. It includes the process scan and topic initialization fixes from 0.9.1–0.9.3. See [patch notes](docs/releases/v0.9.4.md).
 
 Version 0.9.0 adds an explicit managed deployment mode for the entry group, all registered topic groups and new owner-created topics across configured projects. Send `/topic new <projectKey> <title>` in the entry group to create a native project conversation and its private Feishu group. The default first-install mode still starts with one group. Enable the full scope through the [operations guide](docs/desktop-p4-deployment.md#完整功能部署-v090); original bindings stay pinned as new topics are appended. Historical uncertain work must be reconciled before expansion. See [release notes](docs/releases/v0.9.0.md).
 

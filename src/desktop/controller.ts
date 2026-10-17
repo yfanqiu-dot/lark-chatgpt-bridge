@@ -105,7 +105,7 @@ export class DesktopController {
         state: async status => { this.status = status; },
         approval: request => this.replies.approval(this.config.chatId, request, row.messageId, row.replyInThread),
         resolved: token => this.replies.resolved(token),
-      }, resumeTurnId, row.messageId, Boolean(row.queueClientId) || recoverQueued);
+      }, resumeTurnId, row.messageId, Boolean(row.queueClientId) || recoverQueued, row.queueSubmissionId);
       await this.ledger.update(row.messageId, { state: result.status, turnId: result.turnId, result: result.text,
         ...(resumeTurnId || recoverQueued ? { receipt: undefined, deliveryAttempted: false, error: undefined } : {}) });
       this.status = result.status === 'completed' ? '已完成' : result.status === 'interrupted' ? '已停止' : '失败';

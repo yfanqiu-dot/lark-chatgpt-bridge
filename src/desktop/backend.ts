@@ -28,6 +28,7 @@ export interface BackendOptions {
   pollMs?: number;
   reconnectDelayMs?: number;
   queueMissingTimeoutMs?: number;
+  queueIdleStartDelayMs?: number;
   beforeSubmission?: (cancelled:()=>boolean)=>Promise<void>;
 }
 export class UncertainExecution extends Error {}
@@ -73,6 +74,8 @@ export class DesktopBackend {
   private connectionEpoch = 0;
   private expectedUserMessages: string[] = [];
   private expectedClientId?: string;
+  private expectedQueuedSubmissionId?: string;
+  private queueStartsUnconfirmed = new Set<string>();
   constructor(readonly config: DesktopConfig, private readonly options: BackendOptions = {}) {}
   pendingApprovals(): Approval[] { return structuredClone([...this.approvals.values()]); }
   get currentTurn(): string | undefined { return this.activeTurn; }
@@ -143,10 +146,11 @@ export class DesktopBackend {
     }while(true);
     throw new Error('Task desktop tool server is missing; no turn submitted');
   }
-  async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string, clientMessageId: string = randomUUID(), recoverQueued = false): Promise<TurnResult> {
+  async execute(prompt: string, hooks: BackendHooks, resumeTurnId?: string, clientMessageId: string = randomUUID(), recoverQueued = false, knownQueueSubmissionId?: string): Promise<TurnResult> {
     if (this.busy) throw new Error('Desktop turn already active');
     this.busy = true; this.stopping = false; this.disconnected = false; this.awaitingExecution = true; this.activeTurn = resumeTurnId; this.completedTurn = undefined;
     this.expectedUserMessages = [prompt]; this.expectedClientId = recoverQueued ? clientMessageId : undefined;
+    this.expectedQueuedSubmissionId = recoverQueued ? knownQueueSubmissionId : undefined;
     let submitted = Boolean(resumeTurnId || recoverQueued);
     try {
       await this.connect(Boolean(resumeTurnId || recoverQueued));
@@ -202,6 +206,7 @@ export class DesktopBackend {
         });
         if (!result.queuedSubmission?.id || result.queuedSubmission.clientUserMessageId !== clientMessageId)
           throw new UncertainExecution('Queue admission response has no matching submission ID');
+        this.expectedQueuedSubmissionId = result.queuedSubmission.id;
         await hooks.accepted?.(result.queuedSubmission.id);
         // Queue admission is atomic with the App Server's turn scheduler. It
         // cannot steer into a desktop-owned turn; map the persisted client ID
@@ -334,19 +339,24 @@ export class DesktopBackend {
     } while (cursor);
     return items;
   }
-  private async findQueuedSubmission(clientId: string): Promise<any | undefined> {
+  private async findQueuedSubmission(clientId: string): Promise<{ submission: any; first: boolean } | undefined> {
     let cursor: string | undefined; const seen = new Set<string>();
+    let firstId: string | undefined; let found: any;
     do {
       const page = await this.rpc!.call('thread/queue/list', { threadId: this.config.threadId, limit: 100, ...(cursor ? { cursor } : {}) });
       if (!Array.isArray(page.data)) throw new Error('Invalid queue page');
-      const matches = page.data.filter((item: any) => item.clientUserMessageId === clientId);
-      if (matches.length > 1) throw new UncertainExecution(`队列中存在重复客户端消息 ${clientId}；未重新提交。`);
-      if (matches.length) return matches[0];
+      for (const item of page.data) {
+        if (typeof item?.id !== 'string' || !item.id || typeof item.clientUserMessageId !== 'string') throw new Error('Invalid queued submission identity');
+        firstId ??= item.id;
+        if (item.clientUserMessageId !== clientId) continue;
+        if (found) throw new UncertainExecution(`队列中存在重复客户端消息 ${clientId}；未重新提交。`);
+        found = item;
+      }
       cursor = page.nextCursor ?? undefined;
       if (cursor && seen.has(cursor)) throw new Error('Repeated queue cursor');
       if (cursor) seen.add(cursor);
     } while (cursor);
-    return undefined;
+    return found ? { submission: found, first: found.id === firstId } : undefined;
   }
   private async findTurnForClientId(clientId: string, prompt: string): Promise<string | undefined> {
     let cursor: string | undefined; const seen = new Set<string>(); let found: string | undefined;
@@ -368,7 +378,7 @@ export class DesktopBackend {
     return found;
   }
   private async waitForQueuedTurn(clientId: string, prompt: string, hooks: BackendHooks): Promise<string | undefined> {
-    let missingSince: number | undefined;
+    let missingSince: number | undefined; let queuedSince: number | undefined;
     while (true) {
       const started = this.inbox.find(m => m.method === 'item/started' && m.params?.threadId === this.config.threadId
         && m.params?.item?.type === 'userMessage' && m.params.item.clientId === clientId);
@@ -377,8 +387,15 @@ export class DesktopBackend {
         return started.params.turnId;
       }
       const queued = await this.findQueuedSubmission(clientId);
+      if (queued && this.expectedQueuedSubmissionId && queued.submission.id !== this.expectedQueuedSubmissionId)
+        throw new UncertainExecution('原生队列编号与已接收回执不一致；未启动或重新提交。');
+      if (queued && !this.expectedQueuedSubmissionId) {
+        if (userMessageText({type:'userMessage',content:queued.submission.input}) !== prompt) throw new UncertainExecution('原队列内容无法核验；未启动或重新提交。');
+        this.expectedQueuedSubmissionId = queued.submission.id;
+        await hooks.accepted?.(queued.submission.id);
+      }
       if (this.stopping && queued) {
-        const removed = await this.rpc!.call('thread/queue/delete', { threadId: this.config.threadId, queuedSubmissionId: queued.id });
+        const removed = await this.rpc!.call('thread/queue/delete', { threadId: this.config.threadId, queuedSubmissionId: queued.submission.id });
         if (removed.deleted) return undefined;
       }
       if (!queued) {
@@ -391,10 +408,55 @@ export class DesktopBackend {
         if (Date.now() - missingSince >= (this.options.queueMissingTimeoutMs ?? 10_000)) throw new UncertainExecution(`客户端消息 ${clientId} 已不在队列且未找到原轮次；未重新提交。`);
       } else {
         missingSince = undefined;
+        queuedSince ??= Date.now();
         await hooks.state('等待桌面队列执行');
+        // A native interrupt pauses automatic queue dispatch, including across
+        // resume/restart. Start only this verified existing head item while
+        // idle; queue/start rejects an active/pending turn atomically.
+        if (!this.stopping && !this.disconnected && queued.first && Date.now() - queuedSince >= (this.options.queueIdleStartDelayMs ?? 1500)) {
+          const started = await this.startOwnQueuedSubmission(clientId, prompt, queued.submission.id);
+          if (started) return started;
+        }
       }
       await delay(this.options.pollMs ?? 1000);
     }
+  }
+  private async startOwnQueuedSubmission(clientId: string, prompt: string, queuedSubmissionId: string): Promise<string | undefined> {
+    const root = await realpath(this.config.projectRoot);
+    const readIdle = async () => {
+      const { thread } = await this.rpc!.call('thread/read', { threadId: this.config.threadId, includeTurns: false });
+      this.checkThread(thread, root);
+      if (thread.status?.type === 'active') return false;
+      if (thread.status?.type !== 'idle') throw new UncertainExecution('原队列对话状态无法核验；未启动或重新提交。');
+      return true;
+    };
+    if (!await readIdle()) return undefined;
+    if (await this.findTurnForClientId(clientId, prompt)) throw new UncertainExecution('原客户端消息同时存在于队列和轮次；未启动或重新提交。');
+    await this.verifyRuntimeTools();
+    // Starting an accepted queue item can begin model work, so apply the same
+    // live transport/health gate immediately before this mutation as queue/add.
+    await this.options.beforeSubmission?.(() => this.stopping || this.disconnected);
+    if (this.stopping || this.disconnected || !await readIdle()) return undefined;
+    const current = await this.findQueuedSubmission(clientId);
+    if (!current || !current.first) return undefined;
+    if (current.submission.id !== queuedSubmissionId || userMessageText({type:'userMessage',content:current.submission.input}) !== prompt)
+      throw new UncertainExecution('原队列编号或内容已改变；未启动或重新提交。');
+    if (this.queueStartsUnconfirmed.has(queuedSubmissionId)) throw new UncertainExecution('原队列启动响应仍待核对；未再次启动或重新提交。');
+    let response: any;
+    this.queueStartsUnconfirmed.add(queuedSubmissionId);
+    try { response = await this.rpc!.call('thread/queue/start', {threadId:this.config.threadId,queuedSubmissionId}); }
+    catch (e) {
+      if (e instanceof RpcError && e.code === -32600 && e.message === 'thread already has an active or pending turn') { this.queueStartsUnconfirmed.delete(queuedSubmissionId); return undefined; }
+      // Automatic dispatch can win this race. Recover its exact original turn
+      // by client ID; an unknown response never causes another queue/add/start.
+      const started = await this.findTurnForClientId(clientId, prompt);
+      if (started) { await this.verifyFirstUserMessage(started, prompt, clientId); this.queueStartsUnconfirmed.delete(queuedSubmissionId); return started; }
+      throw new UncertainExecution(`原队列启动响应待核对；未重新提交。${String(e)}`);
+    }
+    if (typeof response?.turn?.id !== 'string' || !response.turn.id) throw new UncertainExecution('原队列启动响应缺少轮次编号；未重新提交。');
+    await this.verifyFirstUserMessage(response.turn.id, prompt, clientId);
+    this.queueStartsUnconfirmed.delete(queuedSubmissionId);
+    return response.turn.id;
   }
   private async verifyFirstUserMessage(turnId: string, prompt: string, clientId?: string): Promise<void> {
     const until = Date.now() + 5_000;

@@ -6,7 +6,7 @@ import { DesktopBackend, UncertainExecution, readDesktopToolConfig, type Backend
 import { DesktopController, type ReplyPort, type InboundMessage } from '../../../src/desktop/controller';
 import { DesktopLedger, type Binding } from '../../../src/desktop/ledger';
 import { parseDesktopConfig, type DesktopConfig } from '../../../src/desktop/config';
-import { loopbackEndpoint, type RpcMessage } from '../../../src/desktop/rpc';
+import { loopbackEndpoint, RpcError, type RpcMessage } from '../../../src/desktop/rpc';
 import { desktopInbound } from '../../../src/desktop/inbound';
 
 let dir: string;
@@ -22,6 +22,7 @@ class FakeRpc implements RpcTransport {
   terminal = 'completed'; approval = false; dropStart = false; wrongThread = false; pageItems = true; desktopActive = false; threadLoaded = true;
   steerIntoDesktop = false; extraDesktopMessage = false; lastSubmittedPrompt = 'ignored'; lastClientId?: string; steered: string[] = [];
   queueRace = false; queueStay = false; queueDeleted = false; queueReads = 0;
+  queueStartError?: Error; queueStartConsumedRace = false; queueStartBusyRace = false;
   extraRequest?: RpcMessage;
   connectCount = 0;
   async connect() { this.connected = true; this.connectCount++; }
@@ -50,12 +51,20 @@ class FakeRpc implements RpcTransport {
         }
         result = { queuedSubmission:{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId} }; break;
       case 'thread/queue/list':
-        if (this.queueStay && !this.queueDeleted) result = {data:[{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId}]};
-        else if (this.queueRace && ++this.queueReads === 1) result = {data:[{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId}]};
+        if (this.queueStay && !this.queueDeleted) result = {data:[{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId,input:[{type:'text',text:this.lastSubmittedPrompt}]}]};
+        else if (this.queueRace && ++this.queueReads === 1) result = {data:[{id:'queued-'+this.lastClientId,clientUserMessageId:this.lastClientId,input:[{type:'text',text:this.lastSubmittedPrompt}]}]};
         else { this.queueRace = false; result = {data:[]}; }
         break;
+      case 'thread/queue/start':
+        if (this.queueStartBusyRace) { this.desktopActive=true; this.queueStartBusyRace=false; throw new RpcError(-32600,'thread already has an active or pending turn'); }
+        if (this.queueStartError) throw this.queueStartError;
+        if (params.queuedSubmissionId!=='queued-'+this.lastClientId) throw Error('Wrong queued submission selected');
+        this.queueStay=false;
+        this.emit({method:'item/started',params:{threadId:'thread',turnId:'turn',item:{type:'userMessage',clientId:this.lastClientId,content:[{type:'text',text:this.lastSubmittedPrompt}]}}});
+        if (this.queueStartConsumedRace) throw new RpcError(-32600,'queued submission no longer exists');
+        result={turn:{id:'turn'}};break;
       case 'thread/queue/delete': this.queueDeleted = true; result = {deleted:true}; break;
-      case 'thread/turns/list': result = { data: params.cursor ? [{id:'turn',status:this.terminal,completedAt:this.terminal==='inProgress'?null:1}] : [{id:'unrelated',status:'completed',completedAt:1}], nextCursor: params.cursor ? null : 'turns2' }; break;
+      case 'thread/turns/list': result = this.queueStay ? {data:[],nextCursor:null} : { data: params.cursor ? [{id:'turn',status:this.terminal,completedAt:this.terminal==='inProgress'?null:1}] : [{id:'unrelated',status:'completed',completedAt:1}], nextCursor: params.cursor ? null : 'turns2' }; break;
       case 'thread/items/list': result = params.turnId === 'unrelated' ? {data:[]} : params.cursor || !this.pageItems
         ? {data:[...this.steered.map(text=>({turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text}]}})),
           ...(this.extraDesktopMessage?[{turnId:params.turnId,item:{type:'userMessage',content:[{type:'text',text:'desktop follow-up'}]}}]:[]),
@@ -150,6 +159,79 @@ describe('desktop boundaries and history', () => {
     expect((await b.execute('queued group request',h)).status).toBe('interrupted');
     expect(rpc.queueDeleted).toBe(true);
     expect(rpc.calls.some(c=>c.method==='turn/interrupt')).toBe(false);
+  });
+  it.each([false,true])('starts only the verified native queue head after interrupted dispatch, recovery=%s',async recover=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;rpc.lastClientId='paused-client';rpc.lastSubmittedPrompt='paused request';
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    expect((await b.execute('paused request',hooks(),undefined,'paused-client',recover)).status).toBe('completed');
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(recover?0:1);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/start').map(c=>c.params)).toEqual([{threadId:'thread',queuedSubmissionId:'queued-paused-client'}]);
+    expect(rpc.calls.some(c=>['turn/start','turn/steer','turn/interrupt'].includes(c.method))).toBe(false);
+  });
+  it('does not select its own queued input ahead of an earlier desktop queue item',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;const original=rpc.call.bind(rpc);let waiting=0;
+    rpc.call=async(method,params)=>{const r:any=await original(method,params);if(method==='thread/queue/list')r.data.unshift({id:'desktop-first',clientUserMessageId:'desktop-client',input:[{type:'text',text:'desktop work'}]});return r;};
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0}),h=hooks();h.state=async s=>{if(s==='等待桌面队列执行'&&++waiting===2)await b.stop();};
+    expect((await b.execute('question',h)).status).toBe('interrupted');
+    expect(rpc.calls.some(c=>c.method==='thread/queue/start')).toBe(false);expect(rpc.calls.filter(c=>c.method==='thread/queue/delete')).toHaveLength(1);
+    expect(rpc.calls.find(c=>c.method==='thread/queue/delete')?.params.queuedSubmissionId).toBe('queued-'+rpc.lastClientId);
+  });
+  it.each(['input','id'])('refuses a changed queued %s before starting an accepted request',async field=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;const original=rpc.call.bind(rpc);let reads=0;
+    rpc.call=async(method,params)=>{const r:any=await original(method,params);if(method==='thread/queue/list'&&++reads>1){if(field==='input')r.data[0].input=[{type:'text',text:'edited request'}];else r.data[0].id='replacement';}return r;};
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    await expect(b.execute('question',hooks())).rejects.toBeInstanceOf(UncertainExecution);expect(rpc.calls.some(c=>c.method==='thread/queue/start')).toBe(false);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
+  });
+  it('rejects duplicated client identities across queue pages before starting either',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;const original=rpc.call.bind(rpc);
+    rpc.call=async(method,params)=>{const r:any=await original(method,params);if(method==='thread/queue/list')r.nextCursor=params.cursor?null:'next';return r;};
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    await expect(b.execute('question',hooks())).rejects.toThrow('重复客户端消息');expect(rpc.calls.some(c=>c.method==='thread/queue/start')).toBe(false);
+  });
+  it('preserves the accepted native queue ID across reconciliation and refuses a replacement',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;rpc.lastClientId='stable';rpc.lastSubmittedPrompt='question';
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    await expect(b.execute('question',hooks(),undefined,'stable',true,'original-accepted-id')).rejects.toBeInstanceOf(UncertainExecution);
+    expect(rpc.calls.some(c=>['thread/queue/add','thread/queue/start'].includes(c.method))).toBe(false);
+  });
+  it('applies the live submission health gate again before starting an already accepted queue item',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;let gates=0;
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0,beforeSubmission:async()=>{if(++gates===2)throw Error('Managed health failed');}});
+    await expect(b.execute('question',hooks())).rejects.toBeInstanceOf(UncertainExecution);expect(gates).toBe(2);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);expect(rpc.calls.some(c=>c.method==='thread/queue/start')).toBe(false);
+  });
+  it('honors cancellation during the accepted-queue health gate without starting or interrupting a turn',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;let gates=0;let b:DesktopBackend;
+    b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0,beforeSubmission:async()=>{if(++gates===2)await b.stop();}});
+    expect((await b.execute('question',hooks())).status).toBe('interrupted');expect(rpc.queueDeleted).toBe(true);
+    expect(rpc.calls.some(c=>['thread/queue/start','turn/interrupt'].includes(c.method))).toBe(false);
+  });
+  it('waits after an atomic busy rejection while the native desktop turn owns execution',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;rpc.queueStartBusyRace=true;const original=rpc.call.bind(rpc);
+    rpc.call=async(method,params)=>{const r:any=await original(method,params);if(method==='thread/read'&&rpc.desktopActive&&!rpc.queueStartBusyRace){rpc.desktopActive=false;rpc.queueStay=false;rpc.emit({method:'item/started',params:{threadId:'thread',turnId:'turn',item:{type:'userMessage',clientId:rpc.lastClientId,content:[{type:'text',text:rpc.lastSubmittedPrompt}]}}});}return r;};
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    expect((await b.execute('question',hooks())).status).toBe('completed');expect(rpc.calls.filter(c=>c.method==='thread/queue/start')).toHaveLength(1);
+    expect(rpc.calls.some(c=>['turn/steer','turn/interrupt'].includes(c.method))).toBe(false);
+  });
+  it('recovers an automatic-dispatch race by original client identity without adding or starting again',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;rpc.queueStartConsumedRace=true;
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    expect((await b.execute('question',hooks())).status).toBe('completed');
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/start')).toHaveLength(1);expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
+  });
+  it('does not repeat an unconfirmed queue start during same-client reconciliation',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;rpc.queueStartError=new Error('Start response lost');
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    await expect(b.execute('question',hooks(),undefined,'stable')).rejects.toBeInstanceOf(UncertainExecution);
+    await expect(b.execute('question',hooks(),undefined,'stable',true)).rejects.toBeInstanceOf(UncertainExecution);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/start')).toHaveLength(1);expect(rpc.calls.filter(c=>c.method==='thread/queue/add')).toHaveLength(1);
+  });
+  it('requires original first-user identity even when queue/start returns a turn ID',async()=>{
+    const rpc=new FakeRpc();rpc.queueStay=true;rpc.steerIntoDesktop=true;
+    const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueIdleStartDelayMs:0});
+    await expect(b.execute('question',hooks())).rejects.toBeInstanceOf(UncertainExecution);
+    expect(rpc.calls.filter(c=>c.method==='thread/queue/start')).toHaveLength(1);expect(rpc.calls.some(c=>c.method==='turn/interrupt')).toBe(false);
   });
   it('leaves a missing queued submission uncertain without adding it again',async()=>{
     const rpc=new FakeRpc();const b=new DesktopBackend(config(),{rpcFactory:()=>rpc,toolConfig:async()=>({}),pollMs:1,queueMissingTimeoutMs:20});
