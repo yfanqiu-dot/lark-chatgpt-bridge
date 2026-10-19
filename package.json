@@ -40,6 +40,8 @@
     "README.zh.md",
     "README.desktop.md",
     "README.topics.md",
+    "docs/user-guide.en.md",
+    "docs/user-guide.zh.md",
     "docs/office-workflows.en.md",
     "docs/office-workflows.zh.md",
     "docs/development.md",

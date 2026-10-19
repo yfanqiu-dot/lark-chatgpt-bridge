@@ -2,7 +2,7 @@
 
 For a configured QIU Bridge v0.10.0 installation whose messaging channel is ready. Verify one group before enabling more topics.
 
-[Overview](../README.md) · [中文案例](office-workflows.zh.md) · [Installation](../README.desktop.md) · [Operations](desktop-p4-deployment.md)
+[Complete user guide](user-guide.en.md) · [Overview](../README.md) · [中文案例](office-workflows.zh.md) · [Installation](../README.desktop.md) · [Operations](desktop-p4-deployment.md)
 
 ## Where it helps
 
@@ -76,7 +76,7 @@ The bridge returns text. View generated spreadsheets or charts on your computer,
 
 ### Give different workstreams their own context
 
-With full mode enabled, mention the bot in the **entry group**:
+With full mode enabled, send directly in DM control or mention the bot in the **entry group**:
 
 ```text
 /topic new main Weekly report
@@ -107,7 +107,7 @@ Once those capabilities are configured, you can ask it to summarize an accessibl
 | Stop this group's task | `/stop` | Already launched external commands may continue |
 | Retrieve a saved answer | `/result` | Does not rerun the task; `/result <messageId>` selects a request |
 | Reconcile uncertain work | `/reconcile` | Checks the original request rather than submitting it again |
-| Create a workstream | `/topic new main Customer proposal` | Entry group only, with creation enabled |
+| Create a workstream | `/topic new main Customer proposal` | Enabled DM control or entry group |
 
 If an answer is delayed, check status and saved results before repeating the request. Sleep, connectivity, Codex updates and permission issues can affect execution. See [operations](desktop-p4-deployment.md) for recovery.
 

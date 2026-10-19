@@ -4,7 +4,7 @@
 
 For an individual who already uses Codex: draft reports while away, organize meeting notes, and follow separate workstreams without repeatedly explaining the background. Work runs on your own Windows computer, which must stay on and connected.
 
-[中文介绍](README.zh.md) · [Download v0.10.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md) · [Operations](docs/desktop-p4-deployment.md)
+[中文介绍](README.zh.md) · [Download v0.10.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) · **[Complete user guide and tips](docs/user-guide.en.md)** · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md)
 
 ## Ways to use it
 
@@ -14,7 +14,7 @@ For an individual who already uses Codex: draft reports while away, organize mee
 | Meeting actions | “Turn the notes pasted below into tasks, owners and due dates. Mark anything unstated as unconfirmed.” |
 | Customer briefing | “Use the project files to summarize confirmed needs, missing information and five questions for the meeting.” |
 | Data summary | “If you can read sales.csv, total sales by region, check missing values and explain the calculation. Preserve the source file.” |
-| Separate workstreams | With full mode enabled, send `/topic new main Weekly report` in the entry group to create a conversation and its private Feishu group. |
+| Separate workstreams | With full mode enabled, send `/topic new main Weekly report` in DM control or the entry group to create a conversation and its private Feishu group. |
 
 These examples need materials accessible on the bridge computer. Data analysis needs a suitable tool. Feishu documents, calendars, tasks and Base operations require separately configured Codex tools and authorization; the bridge does not grant those capabilities. See [complete prompts and workflows](docs/office-workflows.en.md).
 
@@ -28,7 +28,7 @@ Mention the bot in a bound group and state the material, goal and constraints. F
 |---|---|
 | `/status` | Inspect running, queued, uncertain and approval states |
 | `/steer Additional instructions` | Append instructions to an eligible active turn |
-| `/stop` | Request a stop; already launched external commands may continue |
+| `/stop` | Stop the current conversation's active task; queued requests remain and external commands may continue |
 | `/result [messageId]` | Retrieve a saved answer without rerunning the task |
 | `/reconcile` | Check the original uncertain request |
 
@@ -40,7 +40,9 @@ Topic creation is available in its enabled entry group or explicit owner DM. Rep
 2. [Download the bundle](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) and follow the [installation guide](README.desktop.md), currently in Chinese. Configure your project and real conversation, then verify one group. Initial setup requires some command-line experience.
 3. Install the login entry. Enable and verify full mode through [operations](docs/desktop-p4-deployment.md) if you need more topics or projects.
 
-Start through `QIU New Bridge` and wait for readiness checks. Normally quitting the managed desktop also closes its messaging channel. This desktop version is distributed through GitHub Releases; installing the upstream `lark-channel-bridge` npm package does not install it.
+Once the login entry is installed, Windows user login attempts startup automatically; no daily shortcut click is needed. For manual re-entry, use `QIU New Bridge` and wait for readiness checks. Normally quitting the managed desktop also closes its messaging channel. This desktop version is distributed through GitHub Releases; installing the upstream `lark-channel-bridge` npm package does not install it.
+
+See the [user guide](docs/user-guide.en.md) for all commands, approvals, queues, interruptions, files and troubleshooting. Unified topic rename/archive/disable/unbind/delete commands are not implemented. Deleting a bound conversation may block later startup for the entire Bridge; read [topic management](docs/user-guide.en.md#rename-archive-and-delete) first.
 
 ## Release and boundaries
 

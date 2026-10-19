@@ -4,7 +4,7 @@
 
 适合已使用 Codex 的个人用户：出门后整理草稿、会后梳理待办、分事项持续跟进，减少重复交代材料和背景。工作由自己的 Windows 电脑处理，需保持开机联网。
 
-[下载 v0.10.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) · [安装配置](README.desktop.md) · [办公案例与提问模板](docs/office-workflows.zh.md) · [日常操作](docs/desktop-p4-deployment.md) · [English](README.md)
+[下载 v0.10.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) · **[完整使用手册与小技巧](docs/user-guide.zh.md)** · [安装配置](README.desktop.md) · [办公案例与提问模板](docs/office-workflows.zh.md) · [English](README.md)
 
 ## 可以怎样用
 
@@ -14,7 +14,7 @@
 | 会议行动项 | “把下面粘贴的会议文字整理成事项、负责人、截止时间；未明确的内容写待确认。” |
 | 客户会前准备 | “根据项目内已有的客户资料，列出已知需求、缺失信息和会上应确认的五个问题。” |
 | 数据小结 | “如果能读取项目里的 sales.csv，按地区汇总销售额，检查空值，说明统计口径，保留原文件。” |
-| 不同事项分别跟进 | 启用完整模式后，在入口群发送 `/topic new main 周报整理`，创建独立对话及对应私有群。 |
+| 不同事项分别跟进 | 启用完整模式后，在单聊主控或入口群发送 `/topic new main 周报整理`，创建独立对话及对应私有群。 |
 
 这些是提问示例，所用材料须能被运行 Bridge 的电脑访问。数据分析需要相应工具。飞书云文档、日历、任务和多维表格操作还需要 Codex 另行配置工具并授权，安装 Bridge 不会自动获得这些能力。[查看完整示例与使用流程](docs/office-workflows.zh.md)。
 
@@ -28,7 +28,7 @@
 |---|---|
 | `/status` | 查看运行、排队、待核对和审批情况 |
 | `/steer 补充要求` | 给当前活动轮次补充指令 |
-| `/stop` | 请求停止本群任务；已启动的外部命令可能继续运行 |
+| `/stop` | 请求停止本对话的当前活动任务；不清空队列，已启动的外部命令可能继续运行 |
 | `/result [消息编号]` | 取回已保存结果，不重新执行任务 |
 | `/reconcile` | 按原请求核对不确定状态 |
 
@@ -40,7 +40,9 @@
 2. [下载安装包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0)，按[安装指南](README.desktop.md)配置项目和真实桌面对话，先验证一个群。首次配置需要一定命令行经验。
 3. 再设置登录入口；需要更多话题或项目时，按[运维说明](docs/desktop-p4-deployment.md)启用并验证完整模式。
 
-从 `QIU New Bridge` 入口启动，等待检查就绪后使用。正常退出受管 Codex 时，消息渠道也关闭。桌面版通过 GitHub Releases 分发；npm 上的 `lark-channel-bridge` 不是本桌面版安装入口。
+设置登录入口后，登录 Windows 自动尝试启动，无需每天再点击 `QIU New Bridge`；手动重入使用同一入口，等待检查就绪后使用。正常退出受管 Codex 时，消息渠道也关闭。桌面版通过 GitHub Releases 分发；npm 上的 `lark-channel-bridge` 不是本桌面版安装入口。
+
+完整命令、审批、排队、中断、附件限制、故障处理及话题管理见[使用手册](docs/user-guide.zh.md)。本版尚无统一改名、归档、停用、解绑或删除命令；直接删除绑定对话可能影响整个 Bridge 的后续启动，操作前请读[话题管理边界](docs/user-guide.zh.md#7-话题改名归档和删除)。
 
 ## 版本与边界
 
