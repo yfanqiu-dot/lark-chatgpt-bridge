@@ -42,7 +42,7 @@ Start through `QIU New Bridge` and wait for readiness checks. Normally quitting 
 
 ## Release and boundaries
 
-**v0.9.5** fixes Windows PowerShell module-path compatibility at login, permits fresh admission after a fully restored health failure, and adds redacted startup diagnostics with a failure notice. See [patch notes](docs/releases/v0.9.5.md).
+**v0.9.5** fixes Windows PowerShell module-path compatibility at login, waits for normal desktop activity before fresh admission, permits reentry after fully restored supported failures, and adds redacted startup diagnostics with a failure notice. See [patch notes](docs/releases/v0.9.5.md).
 
 Desktop support covers Windows x64, one configured owner and text interaction in registered groups. Images, attachments, full desktop-message mirroring, multi-user hosting and guaranteed unattended operation are outside this release's scope. Codex tools and permissions still apply. A local Windows sandbox `setup refresh had errors` issue remains unresolved; approved execution was verified. Each installation and Codex update needs its own checks. See [compatibility and limits](docs/compatibility.md).
 

@@ -88,6 +88,10 @@ it('reenters a fully restored health failure once, preserving original evidence 
   expect(evidence).toMatchObject({previousRunId:originalRunId,stateSha256:sha(oldState),resultSha256:sha(oldResult),previousErrorCode:'runtime_health_failed',noPriorChannelProcesses:true,previousEvidencePreserved:true,messageReplayAllowed:false});
   expect(mock.launch).toHaveBeenCalledTimes(2);
 });
+it('permits a new admission after a fully restored, explicitly classified startup busy timeout',async()=>{
+  const h=await restoredHealthFailure();h.state.errorCode=h.result.errorCode='shared_admission_busy_timeout';await h.save();
+  await launchManagedService(h.p.manifestFile,h.p.manifestSha256);expect(mock.launch).toHaveBeenCalledTimes(2);
+});
 it.each(['restore-unverified','wrong-policy','wrong-run','rollback-failed','other-error','invalid-identity','retirement-changed','listener-live','journal-owned'])('blocks failed-run reentry when %s, retaining its original pointer',async condition=>{
   const h=await restoredHealthFailure();let release:(()=>Promise<void>)|undefined;
   if(condition==='restore-unverified')h.result.ordinaryRestoreVerified=false;

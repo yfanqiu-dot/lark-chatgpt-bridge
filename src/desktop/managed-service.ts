@@ -80,7 +80,7 @@ export async function launchManagedService(path:string,proof:string){
       releasePrevious=await lockfile.lock(join(p.directory,'supervisor.json'),{realpath:false,retries:0,stale:10_000});
       const stateBytes=await readFile(join(p.directory,'supervisor.json')),resultBytes=await readFile(join(p.directory,'runtime.result.json'));
       const s=JSON.parse(stateBytes.toString('utf8')),r=JSON.parse(resultBytes.toString('utf8'));
-      const restoredHealthFailure=s.phase==='restored' && s.errorCode==='runtime_health_failed' && r.errorCode===s.errorCode
+      const restoredHealthFailure=s.phase==='restored' && ['runtime_health_failed','shared_admission_busy_timeout'].includes(s.errorCode) && r.errorCode===s.errorCode
         && s.channelMode==='new-only' && s.serviceMode==='stop-with-desktop' && s.startMode==='cold'
         && r.channelMode===s.channelMode && r.serviceMode===s.serviceMode && r.ordinaryRestoreVerified===true
         && s.ordinaryProof?.packageIdentityVerified===true && s.ordinaryProof.toolsExact===true
