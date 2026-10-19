@@ -43,6 +43,10 @@ export class ColdExitObservationUnavailable extends Error {
     this.name = 'ColdExitObservationUnavailable';
   }
 }
+export class SharedAdmissionBusyTimeout extends Error {
+  readonly code='shared_admission_busy_timeout';
+  constructor(){super('Desktop task remained active during bounded startup admission');this.name='SharedAdmissionBusyTimeout';}
+}
 function isUnavailableColdRead(error: unknown): error is ColdExitObservationUnavailable {
   const value = error as Partial<ColdExitObservationUnavailable> | null;
   return error instanceof Error && value?.name === 'ColdExitObservationUnavailable' && value.code === 'cold_exit_observation_unavailable'
@@ -129,7 +133,7 @@ export function sameProcess(a: ProcessIdentity, b: ProcessIdentity): boolean {
 }
 class SupervisorFailure extends Error { constructor(readonly code: string) { super(code); } }
 const fail = (code: string): never => { throw new SupervisorFailure(code); };
-const codeOf = (e: unknown, fallback: string) => e instanceof SupervisorFailure ? e.code : fallback;
+const codeOf = (e: unknown, fallback: string) => e instanceof SupervisorFailure || e instanceof SharedAdmissionBusyTimeout ? e.code : fallback;
 
 /** One journal writer; restart resumes rollback, never a forward launch. */
 export class SupervisorJournal {

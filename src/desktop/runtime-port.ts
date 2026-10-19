@@ -3,7 +3,7 @@ import { readFile,writeFile } from 'node:fs/promises';
 import { dirname,join,resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { BrokerOwnerLease } from './broker-lease';
-import { sameProcess,validRetirementProof,type SupervisorPort,type ProcessIdentity,type SupervisorState,type OrdinaryProof } from './supervisor';
+import { sameProcess,validRetirementProof,SharedAdmissionBusyTimeout,type SupervisorPort,type ProcessIdentity,type SupervisorState,type OrdinaryProof } from './supervisor';
 import { verifyDeployment,pendingApprovalChats } from './deployment';
 import { WindowsSupervisorControl } from './supervisor-windows';
 import { inspectOwnedShared,readOwnedSharedContext,readOwnedSharedIdentity } from './shared-inspector';
@@ -53,6 +53,7 @@ export class DesktopRuntimePort implements SupervisorPort {
   private lease?:BrokerOwnerLease;
   private lost=false;
   private sharedObservation=0;
+  private sharedAdmissionDeadline?:number;
   private sharedDesktop?:ProcessIdentity;
   private lastSharedContext?:SharedContext;
   private retirementDefinition?:{taskPresent:boolean;definitionSha256:string};
@@ -144,9 +145,45 @@ export class DesktopRuntimePort implements SupervisorPort {
   }
   private sharedOwned(){if(!this.owned.host || !this.owned.broker)throw new Error('Shared runtime not owned');return {host:this.owned.host,broker:this.owned.broker,...(this.owned.listener?{listener:this.owned.listener}:{})};}
   async sharedIdle(){
-    const r=await this.effects.shared(this.sharedOwned());
-    await writeFile(join(this.directory,`shared-idle-${++this.sharedObservation}.json`),JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
-    if(!r.verified || !r.proof)throw new Error('Shared native admission unavailable');this.sharedDesktop=structuredClone(r.proof.desktop);return r.proof;
+    const observation=++this.sharedObservation,started=this.effects.now(),expected=this.lastSharedContext;
+    let deadline=this.sharedAdmissionDeadline??started+600_000;
+    const file=join(this.directory,`shared-idle-${observation}.json`);let attempts=0;
+    for(;;){
+      if(this.lost)throw new Error('Startup admission owner lease lost');
+      try{await readFile(join(this.directory,'stop.request'));throw new Error('Startup admission stop requested');}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+      const r=await this.effects.shared(this.sharedOwned());attempts++;
+      if(this.lost)throw new Error('Startup admission owner lease lost');
+      if(r.verified && r.proof){
+        if(this.sharedAdmissionDeadline!==undefined && this.effects.now()>=deadline)throw new SharedAdmissionBusyTimeout();
+        await writeFile(file,JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
+        if(attempts>1)await writeFileAtomic(join(this.directory,'shared-admission-wait.json'),JSON.stringify({version:1,observation,phase:'idle-verified',attempts,startedAt:started,observedAt:this.effects.now(),deadline}));
+        this.sharedDesktop=structuredClone(r.proof.desktop);return r.proof;
+      }
+      const blocker=r.blocker,now=this.effects.now();
+      const busy=this.channelMode==='new-only'&&this.input.host.desktopQuitPolicy==='stop-with-desktop'&&expected?.packageIdentityVerified===true&&expected.endpointOwnershipVerified===true
+        &&r.source==='owned_shared_native'&&r.findings.length===1&&r.findings[0]==='shared_task_active'&&!r.failure&&!r.activity
+        &&blocker?.status==='active'&&blocker.waitingApproval===false&&typeof blocker.threadId==='string'&&/^[\w-]{1,128}$/.test(blocker.threadId)
+        &&Number.isFinite(blocker.observedAt)&&blocker.observedAt<=now+1000&&now-blocker.observedAt<=5000;
+      if(!busy){await writeFile(file,JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});throw new Error('Shared native admission unavailable');}
+      deadline=this.sharedAdmissionDeadline??=now+600_000;
+      // Busy is an observation, never an idle proof. Keep every rejected read
+      // and wait only for this precise condition, before any listener intent.
+      await writeFile(join(this.directory,`shared-idle-${observation}.busy-${attempts}.json`),JSON.stringify(r),{encoding:'utf8',flag:'wx',mode:0o600});
+      if(now<started)throw new Error('Startup admission clock changed');
+      if(now>=deadline)throw new SharedAdmissionBusyTimeout();
+      await this.effects.verify();await this.legacyRetirement();
+      const i=await this.inventory();
+      if(i.legacy.length||i.listener.length||i.desktop.length!==1||!sameProcess(i.desktop[0]!,expected.desktop)
+        ||i.host.length!==1||!sameProcess(i.host[0]!,this.owned.host!)||i.broker.length!==1||!sameProcess(i.broker[0]!,this.owned.broker!))throw new Error('Startup admission processes changed');
+      const fresh=await this.effects.context(this.sharedOwned(),true);
+      if(!sameProcess(fresh.host,expected.host)||!sameProcess(fresh.desktop,expected.desktop)||!sameProcess(fresh.backend,expected.backend)
+        ||fresh.endpoint!==expected.endpoint||fresh.backendEndpoint!==expected.backendEndpoint||fresh.desktopVersion!==expected.desktopVersion||fresh.codexSha256!==expected.codexSha256
+        ||fresh.packageIdentityVerified!==true||fresh.endpointOwnershipVerified!==true||JSON.stringify([...fresh.toolNames].sort())!==JSON.stringify([...this.input.snapshot.spec.expectedToolNames].sort())
+        ||!Number.isFinite(fresh.leaseVerifiedAt)||fresh.leaseVerifiedAt>this.effects.now()+1000||this.effects.now()-fresh.leaseVerifiedAt>60000||!await this.effects.locksHeld())throw new Error('Startup admission context or locks changed');
+      if(this.effects.now()>=deadline)throw new SharedAdmissionBusyTimeout();
+      await writeFileAtomic(join(this.directory,'shared-admission-wait.json'),JSON.stringify({version:1,observation,phase:'waiting-for-desktop-task',attempts,startedAt:started,observedAt:this.effects.now(),deadline}));
+      await this.effects.pause();
+    }
   }
   async desktopQuit(options:{waitForReceipt?:boolean}={}):Promise<ProcessIdentity|undefined>{
     if(this.channelMode!=='new-only' || this.input.host.desktopQuitPolicy!=='stop-with-desktop' || !this.sharedDesktop || !this.owned.host || this.lost)return;

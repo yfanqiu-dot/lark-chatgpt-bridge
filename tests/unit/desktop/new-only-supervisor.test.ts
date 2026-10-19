@@ -2,7 +2,7 @@ import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {DesktopSupervisor,SupervisorJournal,ColdExitObservationUnavailable,type SupervisorPort,type SupervisorInventory,type LegacyRetirementProof,type SupervisorState} from '../../../src/desktop/supervisor';
+import {DesktopSupervisor,SupervisorJournal,ColdExitObservationUnavailable,SharedAdmissionBusyTimeout,type SupervisorPort,type SupervisorInventory,type LegacyRetirementProof,type SupervisorState} from '../../../src/desktop/supervisor';
 import {isCleanManagedDesktopExit} from '../../../src/desktop/host';
 let dir:string;
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'new-only-'));});
@@ -66,6 +66,11 @@ it.each(['enabled','old-process','stale'])('blocks %s retirement before requesti
 });
 it.each(['broker','host','listener'])('cleans a known %s failure without ever reactivating legacy',async role=>{
   const h=fixture();h.fail(role);const s=await h.run();expect(s).toMatchObject({phase:'restored',errorCode:'supervisor_operation_failed'});expect(h.forbidden).not.toHaveBeenCalled();expect(h.inventory.legacy).toEqual([]);expect(h.inventory.desktop).toEqual([id(6)]);expect(await readFile(h.path,'utf8')).not.toContain('TEST_PRIVATE');
+});
+it('retains the specific startup busy timeout and verified cleanup without ever creating a listener',async()=>{
+  const h=fixture();h.port.sharedIdle=async()=>{throw new SharedAdmissionBusyTimeout();};
+  const state=await h.run();expect(state).toMatchObject({phase:'restored',errorCode:'shared_admission_busy_timeout',ordinaryProof:{packageIdentityVerified:true,toolsExact:true}});
+  expect(h.events).not.toContain('start:listener');expect(h.inventory.host).toEqual([]);expect(h.inventory.broker).toEqual([]);expect(h.forbidden).not.toHaveBeenCalled();
 });
 it.each(['broker','host','listener'])('preserves an ambiguous %s identity without a relaunch or foreign stop',async role=>{
   const h=fixture();h.fail(role,true);expect(await h.run()).toMatchObject({phase:'blocked',rollbackErrorCode:'owned_process_unconfirmed'});expect(h.events.filter(e=>e===`start:${role}`)).toHaveLength(1);expect(h.forbidden).not.toHaveBeenCalled();

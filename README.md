@@ -4,7 +4,7 @@
 
 For an individual who already uses Codex: draft reports while away, organize meeting notes, and follow separate workstreams without repeatedly explaining the background. Work runs on your own Windows computer, which must stay on and connected.
 
-[中文介绍](README.zh.md) · [Download v0.9.4](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.4) · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md) · [Operations](docs/desktop-p4-deployment.md)
+[中文介绍](README.zh.md) · [Download v0.9.5](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.5) · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md) · [Operations](docs/desktop-p4-deployment.md)
 
 ## Ways to use it
 
@@ -35,14 +35,14 @@ Topic creation is available only in its enabled entry group. Replace `main` with
 ## Get started
 
 1. Prepare Windows x64, Node.js 22 LTS, a signed-in Codex desktop app and your own Feishu bot.
-2. [Download the bundle](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.4) and follow the [installation guide](README.desktop.md), currently in Chinese. Configure your project and real conversation, then verify one group. Initial setup requires some command-line experience.
+2. [Download the bundle](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.5) and follow the [installation guide](README.desktop.md), currently in Chinese. Configure your project and real conversation, then verify one group. Initial setup requires some command-line experience.
 3. Install the login entry. Enable and verify full mode through [operations](docs/desktop-p4-deployment.md) if you need more topics or projects.
 
 Start through `QIU New Bridge` and wait for readiness checks. Normally quitting the managed desktop also closes its messaging channel. This desktop version is distributed through GitHub Releases; installing the upstream `lark-channel-bridge` npm package does not install it.
 
 ## Release and boundaries
 
-**v0.9.4** fixes accepted messages remaining queued after interruption and includes earlier topic-initialization and process-scan fixes. See [patch notes](docs/releases/v0.9.4.md).
+**v0.9.5** fixes Windows PowerShell module-path compatibility at login, waits for normal desktop activity before fresh admission, permits reentry after fully restored supported failures, and adds redacted startup diagnostics with a failure notice. See [patch notes](docs/releases/v0.9.5.md).
 
 Desktop support covers Windows x64, one configured owner and text interaction in registered groups. Images, attachments, full desktop-message mirroring, multi-user hosting and guaranteed unattended operation are outside this release's scope. Codex tools and permissions still apply. A local Windows sandbox `setup refresh had errors` issue remains unresolved; approved execution was verified. Each installation and Codex update needs its own checks. See [compatibility and limits](docs/compatibility.md).
 
@@ -52,6 +52,6 @@ Personal configuration, ledgers and credentials are excluded from source and rel
 
 [Design and acceptance summary](docs/development.md) · [Independent CLI backend](docs/cli-backend.en.md) · [Security](SECURITY.md) · [Issues](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/issues)
 
-For a source build, check out `v0.9.4`, run `npx --yes pnpm@10.33.0 install --frozen-lockfile` and `npx --yes pnpm@10.33.0 build`. Development checks: `pnpm test`, `pnpm typecheck`, `pnpm build`.
+For a source build, check out `v0.9.5`, run `npx --yes pnpm@10.33.0 install --frozen-lockfile` and `npx --yes pnpm@10.33.0 build`. Development checks: `pnpm test`, `pnpm typecheck`, `pnpm build`.
 
 Based on [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge), under the [MIT license](LICENSE). Independent community integration, not an OpenAI or Feishu product. Remove credentials and private conversation content from issue reports.

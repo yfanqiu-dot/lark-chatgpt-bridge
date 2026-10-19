@@ -1,6 +1,6 @@
 # 办公场景与使用指南
 
-适用于已经完成配置、消息渠道就绪的 QIU Bridge v0.9.4。先从一个群验证收发，再根据需要启用多话题。
+适用于已经完成配置、消息渠道就绪的 QIU Bridge v0.9.5。先从一个群验证收发，再根据需要启用多话题。
 
 [返回中文介绍](../README.zh.md) · [English examples](office-workflows.en.md) · [安装配置](../README.desktop.md) · [运维说明](desktop-p4-deployment.md)
 

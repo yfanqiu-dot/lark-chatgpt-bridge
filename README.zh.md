@@ -4,7 +4,7 @@
 
 适合已使用 Codex 的个人用户：出门后整理草稿、会后梳理待办、分事项持续跟进，减少重复交代材料和背景。工作由自己的 Windows 电脑处理，需保持开机联网。
 
-[下载 v0.9.4](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.4) · [安装配置](README.desktop.md) · [办公案例与提问模板](docs/office-workflows.zh.md) · [日常操作](docs/desktop-p4-deployment.md) · [English](README.md)
+[下载 v0.9.5](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.5) · [安装配置](README.desktop.md) · [办公案例与提问模板](docs/office-workflows.zh.md) · [日常操作](docs/desktop-p4-deployment.md) · [English](README.md)
 
 ## 可以怎样用
 
@@ -35,14 +35,14 @@
 ## 如何开始
 
 1. 准备 Windows x64、Node.js 22 LTS、已登录的 Codex 桌面及自己的飞书机器人。
-2. [下载安装包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.4)，按[安装指南](README.desktop.md)配置项目和真实桌面对话，先验证一个群。首次配置需要一定命令行经验。
+2. [下载安装包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.5)，按[安装指南](README.desktop.md)配置项目和真实桌面对话，先验证一个群。首次配置需要一定命令行经验。
 3. 再设置登录入口；需要更多话题或项目时，按[运维说明](docs/desktop-p4-deployment.md)启用并验证完整模式。
 
 从 `QIU New Bridge` 入口启动，等待检查就绪后使用。正常退出受管 Codex 时，消息渠道也关闭。桌面版通过 GitHub Releases 分发；npm 上的 `lark-channel-bridge` 不是本桌面版安装入口。
 
 ## 版本与边界
 
-当前为 **v0.9.4**，修复中断后新消息可能一直排队的问题，包含此前的话题初始化与进程扫描修复，见[版本说明](docs/releases/v0.9.4.md)。
+当前为 **v0.9.5**，修复登录入口的 PowerShell 模块路径兼容问题；启动时会等待正常桌面任务结束，再核对接入。已完整恢复的指定故障可重新准入，启动失败会记录脱敏诊断并提示，见[版本说明](docs/releases/v0.9.5.md)。
 
 支持范围是 Windows x64、单个配置所有者、已登记群的文字交互。图片附件、桌面全部消息镜像、多用户托管和长期无人值守保证不在本版支持范围。各项工作仍受 Codex 工具及权限约束；本机验收遇到的 Windows 沙盒 `setup refresh had errors` 问题尚未修复，审批后执行已验证成功。新安装及 Codex 升级均需重新核对，详见[兼容性与限制](docs/compatibility.md)。
 
@@ -52,6 +52,6 @@
 
 [开发设计与验收摘要](docs/development.md) · [原独立 CLI 后端说明](docs/cli-backend.zh.md) · [安全说明](SECURITY.md) · [问题反馈](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/issues)
 
-源码构建：检出 `v0.9.4`，运行 `npx --yes pnpm@10.33.0 install --frozen-lockfile` 和 `npx --yes pnpm@10.33.0 build`；开发检查使用 `pnpm test`、`pnpm typecheck`、`pnpm build`。
+源码构建：检出 `v0.9.5`，运行 `npx --yes pnpm@10.33.0 install --frozen-lockfile` 和 `npx --yes pnpm@10.33.0 build`；开发检查使用 `pnpm test`、`pnpm typecheck`、`pnpm build`。
 
 基于 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge) 开发，采用 [MIT 许可证](LICENSE)。社区第三方集成，非 OpenAI 或飞书官方产品。问题反馈请移除密钥、私人对话和业务账本。

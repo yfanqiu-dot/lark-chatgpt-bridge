@@ -70,6 +70,50 @@ async function transportHarness(){
   h.effects.pause=async()=>{h.advance(1000);await publish();};
   return {...h,marker,publishMarker:publish};
 }
+
+async function startupBusyHarness(){
+  const h=harness(false,'new-only');h.inventory.legacy=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
+  h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
+  const context={host:h.ids.host,desktop:h.ids.shared,backend:{...identity(8),parentPid:4},endpoint:'ws://127.0.0.1:9998/',backendEndpoint:'ws://127.0.0.1:9999/',
+    leaseVerifiedAt:h.clock(),desktopVersion:h.input.host.desktopVersion,codexSha256:'c'.repeat(64),toolNames:['list_projects'],packageIdentityVerified:true,endpointOwnershipVerified:true};
+  h.effects.context=async()=>({...context,leaseVerifiedAt:h.clock()});
+  await h.port.legacyRetirement();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.ready();await h.port.sharedIdle();
+  const successful=h.effects.shared;
+  const busy=()=>({verified:false,source:'owned_shared_native' as const,findings:['shared_task_active'],blocker:{threadId:'desktop-task',status:'active' as const,pass:1,observedAt:h.clock(),waitingApproval:false,activeFlagCount:0}});
+  return {...h,context,successful,busy};
+}
+it('waits for desktop activity at the final listener gate, preserves rejected reads, then uses a fresh complete proof once',async()=>{
+  const h=await startupBusyHarness();let reads=0;
+  h.effects.shared=async owned=>++reads<3?h.busy():h.successful(owned);
+  h.effects.pause=async()=>{expect(h.events).not.toContain('launch:listener');await expect(readFile(join(dir,'launch-listener.intent.json'))).rejects.toThrow();h.advance(1000);};
+  await h.port.startListener(runId,async()=>{await h.port.sharedIdle();});
+  expect(reads).toBe(3);expect(h.events.filter(event=>event==='launch:listener')).toHaveLength(1);
+  expect(JSON.parse(await readFile(join(dir,'shared-idle-2.json'),'utf8'))).toMatchObject({verified:true});
+  expect(JSON.parse(await readFile(join(dir,'shared-idle-2.busy-1.json'),'utf8'))).toMatchObject({verified:false,findings:['shared_task_active']});
+  expect(JSON.parse(await readFile(join(dir,'shared-admission-wait.json'),'utf8'))).toMatchObject({phase:'idle-verified',attempts:3});
+});
+it.each(['approval','unknown-finding','stale-blocker','context','listener-present','retirement','locks','stop','timeout'])('does not create a listener while startup activity has %s',async condition=>{
+  const h=await startupBusyHarness();h.effects.shared=async()=>{
+    const result=h.busy();if(condition==='approval')result.blocker.waitingApproval=true;if(condition==='unknown-finding')result.findings=['shared_history_incompatible'];if(condition==='stale-blocker')result.blocker.observedAt-=6000;return result;
+  };
+  if(condition==='context')h.effects.context=async()=>({...h.context,backend:{...h.context.backend,pid:99},leaseVerifiedAt:h.clock()});
+  if(condition==='listener-present')h.inventory.listener=[h.ids.listener];
+  if(condition==='retirement')h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'f'.repeat(64)});
+  if(condition==='locks')h.badLocks();
+  if(condition==='stop')await writeFile(join(dir,'stop.request'),'stop','utf8');
+  if(condition==='timeout')h.effects.pause=async()=>{h.advance(600_000);};
+  await expect(h.port.startListener(runId,async()=>{await h.port.sharedIdle();})).rejects.toThrow();
+  expect(h.events).not.toContain('launch:listener');await expect(readFile(join(dir,'launch-listener.intent.json'))).rejects.toThrow();
+});
+it('rejects a complete idle observation received after the startup wait budget',async()=>{
+  const h=await startupBusyHarness();let reads=0;h.effects.shared=async owned=>{if(++reads===1)return h.busy();h.advance(600_000);return h.successful(owned);};
+  await expect(h.port.sharedIdle()).rejects.toMatchObject({code:'shared_admission_busy_timeout'});expect(h.events).not.toContain('launch:listener');
+});
+it('does not reset the startup busy budget between idle observations',async()=>{
+  const h=await startupBusyHarness();let reads=0;h.effects.shared=async owned=>++reads===1?h.busy():h.successful(owned);
+  await h.port.sharedIdle();h.advance(600_000);h.effects.shared=async()=>h.busy();
+  await expect(h.port.sharedIdle()).rejects.toMatchObject({code:'shared_admission_busy_timeout'});expect(h.events).not.toContain('launch:listener');
+});
 it('verifies registered-topic listener policy and includes every binding in reconciliation checks',async()=>{
   const h=await configurationHarness();h.refresh();h.input.snapshot.spec.scope='registered-topics';delete h.input.topics.enabledChatIds;h.input.topics.allowTopicCreation=true;
   await expect(h.port.verifyBindings()).rejects.toThrow('reconciliation');
