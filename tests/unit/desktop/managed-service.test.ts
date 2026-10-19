@@ -10,16 +10,16 @@ vi.mock('../../../src/desktop/runtime-supervisor',()=>({prepareColdRuntime:mock.
 vi.mock('../../../src/desktop/supervisor-windows',()=>({WindowsSupervisorControl:{prepare:mock.control}}));
 import {prepareManagedService,readManagedService,launchManagedService} from '../../../src/desktop/managed-service';
 const sha=(data:string|Buffer)=>createHash('sha256').update(data).digest('hex');
-let root:string,source:string,service:string,d:any,inventory:any;
+let root:string,source:string,service:string,d:any,inventory:any,bootAt:string,machineSha256:string;
 const originalRunId='11111111-1111-4111-8111-111111111111';
 beforeEach(async()=>{
-  vi.resetAllMocks();root=await mkdtemp(join(tmpdir(),'managed-service-'));source=join(root,'source');service=join(root,'service');await mkdir(source);await writeFile(join(source,'manifest.json'),'TEST_SOURCE','utf8');
+  vi.resetAllMocks();bootAt=new Date(Date.now()-3600_000).toISOString();machineSha256='e'.repeat(64);root=await mkdtemp(join(tmpdir(),'managed-service-'));source=join(root,'source');service=join(root,'service');await mkdir(source);await writeFile(join(source,'manifest.json'),'TEST_SOURCE','utf8');
   d={host:{},topics:{enabledChatIds:['oc_original_c'],allowTopicCreation:false},snapshot:{files:[{path:join(root,'bin/desktop-service-start.ps1')}],spec:{codeRevision:'a'.repeat(40),legacy:{executable:process.execPath}}}};
   mock.verify.mockImplementation(async()=>d);inventory={legacy:[],desktop:[],host:[],listener:[],broker:[]};
-  mock.control.mockResolvedValue({inventory:async()=>inventory,legacyRetirement:async()=>({version:1,observedAt:Date.now(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)})});
+  mock.control.mockResolvedValue({systemBoot:async()=>({version:1,bootedAt:bootAt,machineSha256,observedAt:Date.now()}),inventory:async()=>inventory,legacyRetirement:async()=>({version:1,observedAt:Date.now(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)})});
   mock.prepare.mockImplementation(async(_source,dir)=>{await mkdir(dir);return {planFile:join(dir,'plan.json'),planSha256:'c'.repeat(64)};});mock.launch.mockResolvedValue({identity:{pid:99}});
 });
-afterEach(async()=>{await rm(root,{recursive:true,force:true});});
+afterEach(async()=>{vi.restoreAllMocks();await rm(root,{recursive:true,force:true});});
 const prepare=()=>prepareManagedService(source,service,root);
 it('prepares a sealed existing-group service without launching services or installing startup',async()=>{
   const p=await prepare();expect(await readManagedService(p.manifestFile,p.manifestSha256)).toMatchObject({serviceMode:'stop-with-desktop',enabledChatIds:['oc_original_c'],allowTopicCreation:false});expect(p.startupInstalled).toBe(false);expect(mock.launch).not.toHaveBeenCalled();await expect(prepare()).rejects.toThrow();
@@ -112,4 +112,54 @@ it('does not retry a fresh ambiguous launch after successful old-run reentry adm
   await expect(launchManagedService(h.p.manifestFile,h.p.manifestSha256)).rejects.toThrow('unconfirmed');
   mock.plan.mockRejectedValueOnce(Error('unresolved fresh plan'));
   await expect(launchManagedService(h.p.manifestFile,h.p.manifestSha256)).rejects.toThrow();expect(mock.prepare).toHaveBeenCalledTimes(2);expect(mock.launch).toHaveBeenCalledTimes(2);
+});
+
+async function interruptedBoot(missingResult=false){
+  const h=await restoredHealthFailure(),at=Date.now();
+  Object.assign(h.state,{version:1,revision:10,updatedAt:new Date(at).toISOString(),phase:'blocked',legacyPauseAttempted:false,desktopCloseAttempted:false,owned:{},rollbackErrorCode:'rollback_operation_failed'});
+  Object.assign(h.result,{version:1,phase:'blocked',completedAt:new Date(at).toISOString(),ordinaryRestoreVerified:false,messageServicePaused:null,rollbackErrorCode:'rollback_operation_failed'});
+  await h.save();if(missingResult)await rm(join(h.dir,'runtime.result.json'));
+  mock.plan.mockResolvedValue({serviceMode:'stop-with-desktop',codeRevision:'a'.repeat(40),directory:h.dir,planId:'original-plan',mode:'cold',channelMode:'new-only',createdAt:new Date(at).toISOString()});
+  bootAt=new Date(at+60_000).toISOString();vi.spyOn(Date,'now').mockReturnValue(at+120_000);
+  return h;
+}
+it.each([false,true])('admits a fresh plan on a proven new boot, preserving failed cleanup and missing-result=%s evidence',async missing=>{
+  const h=await interruptedBoot(missing),old=await readFile(join(h.dir,'supervisor.json'));
+  await launchManagedService(h.p.manifestFile,h.p.manifestSha256);
+  const active=JSON.parse(await readFile(h.pointerFile,'utf8')),dir=dirname(active.planFile);
+  const evidence=JSON.parse(await readFile(join(dir,'previous-run-reentry.json'),'utf8'));
+  expect(evidence).toMatchObject({reason:'previous_windows_boot',previousRollbackErrorCode:'rollback_operation_failed',resultAbsent:missing,messageReplayAllowed:false,ordinaryRestoreWasVerified:false});
+  expect(await readFile(join(h.dir,'supervisor.json'))).toEqual(old);
+  const boot=await readFile(join(dir,'service-boot.json'));expect(sha(boot)).toBe(active.bootProofSha256);
+  expect(mock.launch).toHaveBeenCalledTimes(2);
+});
+it('admits an interrupted running generation on a new boot without inventing a terminal result',async()=>{
+  const h=await interruptedBoot(true);h.state.phase='running';delete h.state.errorCode;delete h.state.rollbackErrorCode;
+  await writeFile(join(h.dir,'supervisor.json'),JSON.stringify(h.state),'utf8');
+  await launchManagedService(h.p.manifestFile,h.p.manifestSha256);
+  const pointer=JSON.parse(await readFile(h.pointerFile,'utf8'));
+  expect(JSON.parse(await readFile(join(dirname(pointer.planFile),'previous-run-reentry.json'),'utf8'))).toMatchObject({reason:'previous_windows_boot',resultAbsent:true,previousErrorCode:null,previousRollbackErrorCode:null});
+  await expect(readFile(join(h.dir,'runtime.result.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+it.each(['same-boot','different-machine','changed-proof','missing-proof','invalid-proof','future-proof','wrong-run','malformed-result','new-journal','live-role','retirement-changed','ledger-uncertain','boot-changed'])('refuses cross-boot recovery with %s and retains original evidence',async condition=>{
+  const h=await interruptedBoot();
+  const bootFile=join(h.dir,'service-boot.json'),record=JSON.parse(await readFile(bootFile,'utf8')),pointer=JSON.parse(h.pointerBytes.toString('utf8'));
+  if(condition==='same-boot')bootAt=record.boot.bootedAt;
+  if(condition==='different-machine')machineSha256='f'.repeat(64);
+  if(condition==='changed-proof')await writeFile(bootFile,'{}','utf8');
+  if(condition==='missing-proof'){delete pointer.bootProofSha256;await writeFile(h.pointerFile,JSON.stringify(pointer),'utf8');}
+  if(condition==='invalid-proof'||condition==='future-proof'){
+    record.boot.observedAt=condition==='invalid-proof'?'invalid':Date.now()+1;
+    const bytes=JSON.stringify(record);await writeFile(bootFile,bytes,'utf8');pointer.bootProofSha256=sha(bytes);await writeFile(h.pointerFile,JSON.stringify(pointer),'utf8');
+  }
+  if(condition==='wrong-run'){h.result.runId='foreign';await h.save();}
+  if(condition==='malformed-result')await writeFile(join(h.dir,'runtime.result.json'),'null','utf8');
+  if(condition==='new-journal'){h.state.updatedAt=new Date(Date.now()).toISOString();await h.save();}
+  if(condition==='live-role')inventory.host=[{pid:20}];
+  if(condition==='retirement-changed'){h.state.newBaseline.retirement.definitionSha256='f'.repeat(64);await h.save();}
+  if(condition==='ledger-uncertain')mock.prepare.mockRejectedValueOnce(Error('ledger uncertain'));
+  if(condition==='boot-changed'){const c=await mock.control.mock.results[0]!.value;let count=0;c.systemBoot=async()=>({version:1,machineSha256,bootedAt:++count===1?bootAt:new Date(Date.now()-1).toISOString(),observedAt:Date.now()});}
+  const original=await readFile(h.pointerFile);
+  await expect(launchManagedService(h.p.manifestFile,h.p.manifestSha256)).rejects.toThrow();
+  expect(await readFile(h.pointerFile)).toEqual(original);expect(mock.launch).toHaveBeenCalledOnce();
 });

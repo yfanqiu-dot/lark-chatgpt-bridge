@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('Snapshot','ColdSnapshot','SharedSnapshot','TaskRetirement','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
+  [Parameter(Mandatory=$true)][ValidateSet('BootIdentity','Snapshot','ColdSnapshot','SharedSnapshot','TaskRetirement','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','ProtectCapability','UnprotectCapability','StartOrdinary','StopOwned','CloseDesktop','BackupTask','DisableTask','RestoreTask','StartLegacy')][string]$Action,
   [Parameter(Mandatory=$true)][string]$ConfigFile,
   [string]$IdentityFile,
   [ValidateSet('legacy','desktop','host','listener')][string]$Role,
@@ -18,6 +18,13 @@ foreach($taskPath in @($taskConfig.desktopExe,$taskConfig.legacy.executable,$tas
 function Get-Sha($text){
   $taskHash=[Security.Cryptography.SHA256]::Create()
   try{return ([BitConverter]::ToString($taskHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}finally{$taskHash.Dispose()}
+}
+if($Action -eq 'BootIdentity'){
+  $taskBoot=(Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+  $taskMachine=(Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
+  if($taskBoot -isnot [DateTime] -or $taskMachine -notmatch '^[a-fA-F0-9-]{36}$'){throw 'System boot identity unavailable'}
+  @{version=1;machineSha256=(Get-Sha $taskMachine.ToLowerInvariant());bootedAt=$taskBoot.ToUniversalTime().ToString('o');observedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress
+  exit 0
 }
 function Throw-UnreadableProcess($process,[string]$reason){
   # Only process identifiers and missing-field flags. Never emit command text,
