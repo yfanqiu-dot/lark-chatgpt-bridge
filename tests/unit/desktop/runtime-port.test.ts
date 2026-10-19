@@ -17,7 +17,7 @@ function harness(recovery=false,channelMode?:'new-only'){
   const registry=join(dir,'registry.json'),bindings=[{threadId:'original',projectId:'project',projectRoot:dir}];
   const input:any={host:{connectionFile:join(dir,'connection.json'),desktopVersion:'26.1007.2314.0'},topics:{registryFile:registry,enabledChatIds:['oc_c'],appSecretEnv:'LARK_APP_SECRET',appId:'cli_test',ownerOpenId:'ou_owner',entryChatId:'oc_entry'},
     snapshot:{bindings,spec:{expectedToolNames:['list_projects']}},ledgers:[{binding:{chatId:'oc_c'},counts:{completed:1}},{binding:{chatId:'oc_a'},counts:{uncertain:1}}]};
-  let clock=Date.now(),packageFails=false,tools=true,context=true,locks=true,secret=true,runtimeRun=runId;
+  let clock=Date.now(),packageFails=false,tools=true,context=true,locks=true,foreignRegistryLock=false,secret=true,runtimeRun=runId;
   const checkStop=async()=>{
     for(const role of ['listener','host'] as const){const path=role==='host'?`${input.host.connectionFile}.stop`:`${registry}.stop`;
       try{await readFile(path);if(inventory[role].length){inventory[role]=[];if(role==='host')inventory.desktop=[ids.ordinary];}}catch{}
@@ -37,14 +37,15 @@ function harness(recovery=false,channelMode?:'new-only'){
     async command(){events.push('packageRestore');if(packageFails)throw new Error('TEST_PRIVATE_ERROR');inventory.desktop=[ids.ordinary];},
     async secret(){events.push('secret');if(!secret)throw new Error('TEST_PRIVATE_SECRET_ERROR');return 'TEST_MEMORY_SECRET';},
     async shared(){events.push('shared');return {verified:true,source:'owned_shared_native',findings:[],proof:{verifiedAt:clock,desktop:inventory.desktop[0]!,allDesktopTasksIdle:true,toolsExact:true,tasks:bindings.map(b=>({...b,status:'idle',queueCount:0,waitingApproval:false}))}};},
-    async context(){events.push('context');if(!context)throw new Error('Not ready');return {} as any;},async ordinaryTools(){events.push('tools');return tools;},locksHeld:async()=>locks,
+    async context(){events.push('context');if(!context)throw new Error('Not ready');return {} as any;},async ordinaryTools(){events.push('tools');return tools;},
+    locksHeld:async(listenerExpected=true)=>{events.push(`locks:${listenerExpected?'listener':'before-listener'}`);return locks&&(inventory.listener.length>0||foreignRegistryLock)===listenerExpected;},
     now:()=>clock,async pause(){clock+=1000;await checkStop();},
   };
   const saved:SupervisorState={version:1,startMode:'cold',runId,phase:'running',revision:1,updatedAt:'',owned:{broker:ids.broker,host:ids.host,listener:ids.listener},legacyPauseAttempted:true,desktopCloseAttempted:false,desktopRestoreRequired:true,
     baseline:{legacy:ids.legacy,desktop:ids.desktop,legacyTaskEnabled:true,launchDefinitionSha256:'b'.repeat(64)}};
   if(recovery)Object.assign(inventory,{legacy:[],desktop:[],host:[],listener:[],broker:[ids.broker]});
   const port=new DesktopRuntimePort(input,dir,identity(process.pid),effects,recovery?saved:undefined,channelMode);ports.push(port);
-  return {port,effects,input,events,inventory,ids,saved,bindings,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},packageFails:()=>{packageFails=true;},badTools:()=>{tools=false;},badContext:()=>{context=false;},badLocks:()=>{locks=false;},badSecret:()=>{secret=false;}};
+  return {port,effects,input,events,inventory,ids,saved,bindings,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},packageFails:()=>{packageFails=true;},badTools:()=>{tools=false;},badContext:()=>{context=false;},badLocks:()=>{locks=false;},foreignRegistryLock:()=>{foreignRegistryLock=true;},badSecret:()=>{secret=false;}};
 }
 async function configurationHarness(){
   const h=harness(false,'new-only');h.inventory.legacy=[];
@@ -71,13 +72,13 @@ async function transportHarness(){
   return {...h,marker,publishMarker:publish};
 }
 
-async function startupBusyHarness(){
+async function startupBusyHarness(initialIdle=true){
   const h=harness(false,'new-only');h.inventory.legacy=[];h.input.host.desktopQuitPolicy='stop-with-desktop';
   h.effects.control.legacyRetirement=async()=>({version:1,observedAt:h.clock(),retired:true,taskPresent:true,taskEnabled:false,taskState:'disabled',definitionSha256:'b'.repeat(64)});
   const context={host:h.ids.host,desktop:h.ids.shared,backend:{...identity(8),parentPid:4},endpoint:'ws://127.0.0.1:9998/',backendEndpoint:'ws://127.0.0.1:9999/',
     leaseVerifiedAt:h.clock(),desktopVersion:h.input.host.desktopVersion,codexSha256:'c'.repeat(64),toolNames:['list_projects'],packageIdentityVerified:true,endpointOwnershipVerified:true};
   h.effects.context=async()=>({...context,leaseVerifiedAt:h.clock()});
-  await h.port.legacyRetirement();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.ready();await h.port.sharedIdle();
+  await h.port.legacyRetirement();await h.port.startBroker(runId);await h.port.startHost(runId);await h.port.ready();if(initialIdle)await h.port.sharedIdle();
   const successful=h.effects.shared;
   const busy=()=>({verified:false,source:'owned_shared_native' as const,findings:['shared_task_active'],blocker:{threadId:'desktop-task',status:'active' as const,pass:1,observedAt:h.clock(),waitingApproval:false,activeFlagCount:0}});
   return {...h,context,successful,busy};
@@ -91,6 +92,19 @@ it('waits for desktop activity at the final listener gate, preserves rejected re
   expect(JSON.parse(await readFile(join(dir,'shared-idle-2.json'),'utf8'))).toMatchObject({verified:true});
   expect(JSON.parse(await readFile(join(dir,'shared-idle-2.busy-1.json'),'utf8'))).toMatchObject({verified:false,findings:['shared_task_active']});
   expect(JSON.parse(await readFile(join(dir,'shared-admission-wait.json'),'utf8'))).toMatchObject({phase:'idle-verified',attempts:3});
+});
+it('waits on the first native activity observation before any listener or topic lock exists, then verifies both locks after launch',async()=>{
+  const h=await startupBusyHarness(false);let reads=0;
+  h.effects.shared=async owned=>++reads<3?h.busy():h.successful(owned);
+  await h.port.sharedIdle();
+  expect(h.inventory.listener).toHaveLength(0);expect(h.events).toContain('locks:before-listener');
+  expect(JSON.parse(await readFile(join(dir,'shared-admission-wait.json'),'utf8'))).toMatchObject({phase:'idle-verified',attempts:3});
+  await h.port.startListener(runId);expect(await h.port.health()).toBe(true);expect(h.events).toContain('locks:listener');
+});
+it('rejects a foreign topic lock before listener creation without publishing a listener intent',async()=>{
+  const h=await startupBusyHarness(false);h.foreignRegistryLock();h.effects.shared=async()=>h.busy();
+  await expect(h.port.sharedIdle()).rejects.toThrow('locks changed');expect(h.events).toContain('locks:before-listener');
+  expect(h.events).not.toContain('launch:listener');await expect(readFile(join(dir,'launch-listener.intent.json'))).rejects.toThrow();
 });
 it.each(['approval','unknown-finding','stale-blocker','context','listener-present','retirement','locks','stop','timeout'])('does not create a listener while startup activity has %s',async condition=>{
   const h=await startupBusyHarness();h.effects.shared=async()=>{
