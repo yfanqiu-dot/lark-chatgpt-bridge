@@ -8,6 +8,12 @@ let dir:string;const closers:Array<()=>Promise<void>>=[];
 beforeEach(async()=>{dir=await mkdtemp(join(tmpdir(),'listener-ready-'));});
 afterEach(async()=>{for(const close of closers.splice(0))await close();await rm(dir,{recursive:true,force:true});});
 const env=()=>({BRIDGE_SUPERVISOR_READY_FILE:join(dir,'ready.json'),BRIDGE_SUPERVISOR_RUN_ID:'12345678-1234-1234-1234-123456789abc'});
+it('publishes the explicit DM control scope and rejects a group-entry collision',async()=>{
+  const scope={mode:'registered-topics' as const,entryChatId:'oc_entry',directControlChatId:'oc_control',allowTopicCreation:true as const},values=env();
+  await expect(publishListenerReady([],values,()=> 'connected',5000,undefined,{...scope,directControlChatId:'oc_entry'})).rejects.toThrow('handshake');
+  const close=await publishListenerReady([],values,()=> 'connected',5000,undefined,scope);closers.push(close);
+  expect(JSON.parse(await readFile(values.BRIDGE_SUPERVISOR_READY_FILE,'utf8'))).toMatchObject({directControlChatId:'oc_control',entryChatId:'oc_entry'});
+});
 it('allows standalone submission and managed submission before a health failure',async()=>{
   await expect(assertListenerSubmissionOpen({})).resolves.toBeUndefined();await expect(assertListenerSubmissionOpen(env())).resolves.toBeUndefined();
 });

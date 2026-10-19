@@ -35,6 +35,18 @@ async function fixture() {
   return { c, registry, spec, host, stage: join(dir, 'stage') };
 }
 
+it('stages the separate DM ledger and blocks a pending DM even when all group ledgers are idle',async()=>{
+  const {c,spec,registry,stage}=await fixture();delete c.enabledChatIds;c.allowTopicCreation=true;spec.scope='registered-topics';
+  c.directControl={chatId:'oc_control',projectKey:'test',threadId:'control-thread',stateFile:join(dir,'control-ledger.json')};
+  const binding={appId:c.appId,chatId:'oc_control',ownerOpenId:c.ownerOpenId,projectId:'project',projectRoot:dir,threadId:'control-thread'};
+  for(const row of registry.topics){const file=join(c.stateDir,`${row.chatId}.json`),value=JSON.parse(await readFile(file,'utf8'));value.messages=[];await save(file,value);}
+  await save(c.directControl.stateFile,{version:1,binding,messages:[]});await save(spec.topicConfigFile,c);
+  const snapshot=await prepareDeployment(spec,stage);expect(snapshot.bindings).toContainEqual(binding);expect(snapshot.ledgers.find(l=>l.binding.chatId==='oc_control')?.file).toBe(c.directControl.stateFile);
+  await verifyDeployment(stage);
+  await save(c.directControl.stateFile,{version:1,binding,messages:[{messageId:'m-dm',prompt:'pending',replyInThread:false,state:'queued'}]});
+  await expect(prepareDeployment(spec,join(dir,'busy-stage'))).rejects.toThrow('busy or uncertain');
+});
+
 describe('P4 gray group scope', () => {
   it('rejects empty, duplicate, malformed scope and resource creation in gray mode', async () => {
     const { c } = await fixture();

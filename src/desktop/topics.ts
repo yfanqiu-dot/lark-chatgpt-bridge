@@ -4,11 +4,14 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { loopbackEndpoint } from './rpc';
 
 export interface TopicProject { key: string; projectId: string; projectRoot: string }
+export interface StaticTopicBinding { chatId: string; projectKey: string; threadId: string; stateFile: string }
 export interface TopicConfig {
   appId: string; appSecretEnv: string; ownerOpenId: string; entryChatId: string;
   endpoint: string; connectionFile: string; registryFile: string; stateDir: string;
   projects: TopicProject[]; requireMention: boolean; maxQueue: number; model?: string;
-  existing?: { chatId: string; projectKey: string; threadId: string; stateFile: string };
+  existing?: StaticTopicBinding;
+  /** Explicit owner-only P2P control channel, separate from group bindings. */
+  directControl?: StaticTopicBinding;
   /** Omitted means all bindings. Gray rollout never provisions new resources. */
   enabledChatIds?: string[];
   allowTopicCreation?: boolean;
@@ -34,11 +37,13 @@ export function parseTopicConfig(raw: unknown): TopicConfig {
     ...(typeof r.model === 'string' && r.model.trim() ? { model: r.model.trim() } : {}),
   };
   if (!/^cli_[a-zA-Z0-9]+$/.test(config.appId) || !/^oc_[a-zA-Z0-9]+$/.test(config.entryChatId) || !/^ou_[a-zA-Z0-9]+$/.test(config.ownerOpenId) || !/^[A-Z][A-Z0-9_]*$/.test(config.appSecretEnv)) throw new Error('Invalid Feishu ID or secret variable');
-  if (r.existing !== undefined) {
-    const e = r.existing as Record<string, unknown>;
+  for (const key of ['existing','directControl'] as const) if (r[key] !== undefined) {
+    const e = r[key] as Record<string, unknown>;
     if (!e || typeof e !== 'object' || typeof e.chatId !== 'string' || !/^oc_[a-zA-Z0-9]+$/.test(e.chatId) || typeof e.projectKey !== 'string' || !projects.some(p => p.key === e.projectKey) || typeof e.threadId !== 'string' || !e.threadId || typeof e.stateFile !== 'string' || !isAbsolute(e.stateFile)) throw new Error('Invalid existing desktop binding');
-    config.existing = { chatId: e.chatId, projectKey: e.projectKey, threadId: e.threadId, stateFile: resolve(e.stateFile) };
+    config[key] = { chatId: e.chatId, projectKey: e.projectKey, threadId: e.threadId, stateFile: resolve(e.stateFile) };
   }
+  const fixed = staticTopicBindings(config);
+  if (config.directControl?.chatId === config.entryChatId || ['chatId','threadId','stateFile'].some(key => new Set(fixed.map(b=>key==='stateFile'&&process.platform==='win32'?b.stateFile.toLowerCase():b[key as keyof StaticTopicBinding])).size !== fixed.length)) throw new Error('Conflicting control or existing bindings');
   if (r.allowTopicCreation !== undefined && typeof r.allowTopicCreation !== 'boolean') throw new Error('allowTopicCreation must be boolean');
   if (r.allowTopicCreation !== undefined) config.allowTopicCreation = r.allowTopicCreation;
   if (r.enabledChatIds !== undefined) {
@@ -53,15 +58,29 @@ export function topicChatEnabled(config: TopicConfig, chatId: string): boolean {
   return config.enabledChatIds === undefined || config.enabledChatIds.includes(chatId);
 }
 
+export function staticTopicBindings(config: TopicConfig): StaticTopicBinding[] {
+  return [config.existing,config.directControl].filter((b):b is StaticTopicBinding=>b!==undefined);
+}
+
+export function topicControlChat(config: TopicConfig, chatId: string): boolean {
+  return chatId === config.entryChatId || chatId === config.directControl?.chatId;
+}
+
+/** SDK and router both restrict DMs; no pairing or open-DM fallback. */
+export function topicChannelPolicy(config: TopicConfig) {
+  return {dmMode:config.directControl && topicChatEnabled(config,config.directControl.chatId)?'allowlist' as const:'disabled' as const,
+    dmAllowlist:config.directControl?[config.ownerOpenId]:[],requireMention:false,respondToMentionAll:false};
+}
+
 /** Fail before connecting Feishu or starting any controller. */
 export function validateTopicScope(config: TopicConfig, rows: TopicRecord[]): void {
   const bindings = rows.filter(r => r.stage === 'active');
-  if (config.existing && bindings.some(r => r.chatId === config.existing!.chatId || r.threadId === config.existing!.threadId)) throw new Error('Existing binding conflicts with topic registry');
+  if (staticTopicBindings(config).some(b => rows.some(r => r.chatId === b.chatId || r.threadId === b.threadId))) throw new Error('Existing binding conflicts with topic registry');
   for (const row of bindings.filter(r => topicChatEnabled(config, r.chatId!))) {
     const project = config.projects.find(p => p.key === row.projectKey);
     if (!project || project.projectId !== row.projectId || project.projectRoot !== resolve(row.projectRoot)) throw new Error('Selected topic binding does not match configured project');
   }
-  for (const id of config.enabledChatIds ?? []) if (id !== config.existing?.chatId && !bindings.some(r => r.chatId === id)) throw new Error(`Selected chat has no active binding: ${id}`);
+  for (const id of config.enabledChatIds ?? []) if (!staticTopicBindings(config).some(b=>b.chatId===id) && !bindings.some(r => r.chatId === id)) throw new Error(`Selected chat has no active binding: ${id}`);
 }
 
 export type TopicStage = 'planned' | 'thread_creating' | 'thread_initializing' | 'thread_ready' | 'chat_creating' | 'chat_ready' | 'active';

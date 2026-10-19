@@ -28,7 +28,9 @@ export interface RuntimeEffects {
   context(owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},refreshCatalog?:boolean):ReturnType<typeof readOwnedSharedContext>;
   configurationIdentity?(owned:{host:ProcessIdentity;broker:ProcessIdentity;listener?:ProcessIdentity},expected:SharedContext):Promise<void>;
   ordinaryTools(desktop:ProcessIdentity):Promise<boolean>;
-  locksHeld():Promise<boolean>;
+  /** Before listener creation, the host must own its lock and the topic lock
+   * must still be free. Once a listener is owned, both must be held. */
+  locksHeld(listenerExpected?:boolean):Promise<boolean>;
   now():number;
   pause():Promise<void>;
 }
@@ -179,7 +181,7 @@ export class DesktopRuntimePort implements SupervisorPort {
       if(!sameProcess(fresh.host,expected.host)||!sameProcess(fresh.desktop,expected.desktop)||!sameProcess(fresh.backend,expected.backend)
         ||fresh.endpoint!==expected.endpoint||fresh.backendEndpoint!==expected.backendEndpoint||fresh.desktopVersion!==expected.desktopVersion||fresh.codexSha256!==expected.codexSha256
         ||fresh.packageIdentityVerified!==true||fresh.endpointOwnershipVerified!==true||JSON.stringify([...fresh.toolNames].sort())!==JSON.stringify([...this.input.snapshot.spec.expectedToolNames].sort())
-        ||!Number.isFinite(fresh.leaseVerifiedAt)||fresh.leaseVerifiedAt>this.effects.now()+1000||this.effects.now()-fresh.leaseVerifiedAt>60000||!await this.effects.locksHeld())throw new Error('Startup admission context or locks changed');
+        ||!Number.isFinite(fresh.leaseVerifiedAt)||fresh.leaseVerifiedAt>this.effects.now()+1000||this.effects.now()-fresh.leaseVerifiedAt>60000||!await this.effects.locksHeld(Boolean(this.owned.listener)))throw new Error('Startup admission context or locks changed');
       if(this.effects.now()>=deadline)throw new SharedAdmissionBusyTimeout();
       await writeFileAtomic(join(this.directory,'shared-admission-wait.json'),JSON.stringify({version:1,observation,phase:'waiting-for-desktop-task',attempts,startedAt:started,observedAt:this.effects.now(),deadline}));
       await this.effects.pause();
@@ -231,7 +233,7 @@ export class DesktopRuntimePort implements SupervisorPort {
       heartbeatFresh:Number.isFinite(r.updatedAt) && r.updatedAt<=this.effects.now()+1000 && this.effects.now()-r.updatedAt<=10_000,
       readyTimeValid:Number.isFinite(r.readyAt) && r.readyAt<=this.effects.now()+1000 && !!this.owned.listener && r.readyAt>=Date.parse(this.owned.listener.createdAt)-1000,
       scopeMatches:this.input.snapshot.spec.scope==='registered-topics'
-        ? JSON.stringify(r.enabledChatIds)==='[]'&&r.scope==='registered-topics'&&r.entryChatId===this.input.topics.entryChatId&&r.allowTopicCreation===true
+        ? JSON.stringify(r.enabledChatIds)==='[]'&&r.scope==='registered-topics'&&r.entryChatId===this.input.topics.entryChatId&&r.allowTopicCreation===true&&r.directControlChatId===this.input.topics.directControl?.chatId
         : r.scope===undefined&&JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds)};
   }
   private async listenerReadiness(){return this.listenerChecks(await json(join(this.directory,'listener.ready.json')));}
@@ -496,7 +498,7 @@ export async function createWindowsRuntimePort(stage:string,directory:string,roo
       });
     },
     shared:owned=>inspectOwnedShared(stage,control,owned),context:(owned,refreshCatalog)=>readOwnedSharedContext(stage,control,owned,true,undefined,refreshCatalog),configurationIdentity:(owned,expected)=>readOwnedSharedIdentity(stage,control,owned,expected),
-    locksHeld:async()=>await lockfile.check(host.connectionFile,{realpath:false}) && await lockfile.check(topics.registryFile,{realpath:false}),
+    locksHeld:async(listenerExpected=true)=>await lockfile.check(host.connectionFile,{realpath:false}) && await lockfile.check(topics.registryFile,{realpath:false})===listenerExpected,
     async ordinaryTools(desktop){
       try{await control.testIdentity('desktop',desktop);const pipes=await desktopPipes(desktop.pid,host.desktopExe);let exact=0;
         for(const pipe of pipes){try{const names=await desktopToolCatalog(join(dirname(host.desktopExe),'resources/plugins/openai-bundled/plugins/codex-app-tools'),pipe.pipe);if(JSON.stringify([...names].sort())===JSON.stringify(snapshot.spec.expectedToolNames))exact++;}catch{}}

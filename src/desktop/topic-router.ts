@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import type { DesktopConfig } from './config';
 import type { InboundMessage } from './controller';
-import { TopicRegistry, parseCreateTopic, topicChatEnabled, validateTopicScope, type TopicConfig, type TopicRecord } from './topics';
+import { TopicRegistry, parseCreateTopic, topicChatEnabled, validateTopicScope, staticTopicBindings, topicControlChat, type TopicConfig, type TopicRecord } from './topics';
 import { TopicProvisioner } from './topic-provisioner';
 
 export interface TopicController {
@@ -36,12 +36,12 @@ export class TopicRouter {
   async start(): Promise<void> {
     await this.registry.load(true);
     validateTopicScope(this.config, this.registry.all());
-    if (this.config.existing && topicChatEnabled(this.config, this.config.existing.chatId)) {
-      const e = this.config.existing, project = this.config.projects.find(p => p.key === e.projectKey)!;
+    for (const e of staticTopicBindings(this.config).filter(b=>topicChatEnabled(this.config,b.chatId))) {
+      const project = this.config.projects.find(p => p.key === e.projectKey)!;
       const c = this.factory({ appId: this.config.appId, appSecretEnv: this.config.appSecretEnv, ownerOpenId: this.config.ownerOpenId,
         chatId: e.chatId, projectId: project.projectId, projectRoot: project.projectRoot, threadId: e.threadId,
         endpoint: this.config.endpoint, connectionFile: this.config.connectionFile, stateFile: e.stateFile,
-        model: this.config.model, requireMention: this.config.requireMention, maxQueue: this.config.maxQueue });
+        model: this.config.model, requireMention: e.chatId===this.config.directControl?.chatId?false:this.config.requireMention, maxQueue: this.config.maxQueue });
       await c.start(); this.controllers.set(e.chatId, c);
     }
     for (const row of this.registry.all().filter(r => r.stage === 'active' && topicChatEnabled(this.config, r.chatId!))) await this.attach(row);
@@ -50,9 +50,9 @@ export class TopicRouter {
     if (this.stopping || !topicChatEnabled(this.config, message.chatId)) return Promise.resolve();
     // Only entry-group provisioning shares a queue. Existing groups have their
     // own controller queues, so slow creation cannot block /stop elsewhere.
-    const task = message.chatId === this.config.entryChatId
+    const task = topicControlChat(this.config,message.chatId)
       ? this.intake.then(() => this.handle(message)) : this.handle(message);
-    if (message.chatId === this.config.entryChatId) this.intake = task.catch(() => {});
+    if (topicControlChat(this.config,message.chatId)) this.intake = task.catch(() => {});
     this.pending.add(task);
     void task.then(() => this.pending.delete(task), () => this.pending.delete(task));
     return task;
@@ -64,8 +64,17 @@ export class TopicRouter {
     if (this.onActive) void this.onActive(row).catch(e => console.error(`Topic archive ${row.chatId}:`, String(e)));
   }
   private async handle(message: InboundMessage): Promise<void> {
-    if (message.isBot || message.senderId !== this.config.ownerOpenId || (this.config.requireMention && !message.mentionedBot)) return;
-    if (message.chatId === this.config.entryChatId) {
+    const direct = message.chatId === this.config.directControl?.chatId;
+    if (message.isBot || message.senderId !== this.config.ownerOpenId || (direct ? message.chatType!=='p2p' : message.chatType==='p2p' || this.config.requireMention && !message.mentionedBot)) return;
+    if (direct) message={...message,replyInThread:false};
+    if (topicControlChat(this.config,message.chatId)) {
+      if (/^\/help\s*$/i.test(message.content.trim())) {
+        await this.replies.send(message.chatId, `直接发送文字可继续本对话。\n新建专项话题：/topic new <项目> <名称>\n查看话题：/topic list\n项目：${this.config.projects.map(p=>p.key).join('、')}\n/status 查看本对话状态；/result 取回本对话结果。`,message.messageId,message.replyInThread);return;
+      }
+      if (/^\/topic\s+list\s*$/i.test(message.content.trim())) {
+        const rows=this.registry.all().filter(r=>r.stage==='active'&&topicChatEnabled(this.config,r.chatId!));
+        await this.replies.send(message.chatId,rows.length?rows.map(r=>`- ${r.title}（${r.projectKey}）：[进入话题群](https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(r.chatId!)})`).join('\n'):'暂无已建立的话题。用 /topic new <项目> <名称> 新建。',message.messageId,message.replyInThread);return;
+      }
       let create: ReturnType<typeof parseCreateTopic>;
       try { create = parseCreateTopic(message.content); }
       catch (error) { await this.replies.send(message.chatId, String(error), message.messageId, message.replyInThread); return; }
@@ -80,7 +89,7 @@ export class TopicRouter {
           if (resume && !previous) throw new Error('找不到该创建请求');
           const row = await this.provisioner.create(resume ? resume[1]! : message.messageId, create?.projectKey ?? previous!.projectKey, create?.title ?? previous!.title);
           if (!this.controllers.has(row.chatId!)) await this.attach(row);
-          const summary = `话题「${row.title}」已建立。项目：${row.projectKey}\n群 ID：${row.chatId}\n桌面对话：${row.threadId}`;
+          const summary = `话题「${row.title}」已建立。项目：${row.projectKey}\n[进入话题群](https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(row.chatId!)})，在群里 @机器人继续专项任务。\n群 ID：${row.chatId}\n桌面对话：${row.threadId}`;
           if (!row.noticeAttempted) {
             await this.registry.notice(row.requestId); // Ambiguous send will not be replayed.
             try {
@@ -96,7 +105,7 @@ export class TopicRouter {
         return;
       }
     }
-    if (message.chatId !== this.config.entryChatId && /^\/topic\b/i.test(message.content.trim()) && this.controllers.has(message.chatId)) {
+    if (!topicControlChat(this.config,message.chatId) && /^\/topic\b/i.test(message.content.trim()) && this.controllers.has(message.chatId)) {
       await this.replies.send(message.chatId, this.config.allowTopicCreation === false ? '当前部署已关闭话题创建与接续，请保留原绑定。' : `请在入口群 ${this.config.entryChatId} 使用 /topic new <projectKey> <名称>。`, message.messageId, message.replyInThread);
       return;
     }

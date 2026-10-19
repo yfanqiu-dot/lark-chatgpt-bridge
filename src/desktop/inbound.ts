@@ -4,7 +4,7 @@ interface ChannelMessage {
   messageId: string; chatId: string; senderId: string; content: string;
   rawContentType: string; resources: readonly unknown[]; mentionedBot: boolean; senderIsBot?: boolean;
   mentions: ReadonlyArray<{key: string; name?: string; isBot?: boolean; openId?: string}>;
-  threadId?: string; chatMode?: string;
+  threadId?: string; chatMode?: string; chatType?: 'p2p'|'group';
 }
 
 /** Feishu sends ordinary formatted text as `post`; the channel already normalizes
@@ -19,5 +19,6 @@ export function desktopInbound(msg: ChannelMessage, botOpenId?: string): Inbound
   }
   return {messageId:msg.messageId,chatId:msg.chatId,senderId:msg.senderId,content,
     mentionedBot:msg.mentionedBot,isBot:Boolean(msg.senderIsBot || (botOpenId && msg.senderId===botOpenId)),
-    replyInThread:Boolean(msg.threadId || msg.chatMode==='topic')};
+    replyInThread:msg.chatType==='p2p'?false:Boolean(msg.threadId || msg.chatMode==='topic'),
+    ...(msg.chatType?{chatType:msg.chatType}:{})};
 }

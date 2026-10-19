@@ -8,6 +8,7 @@ import type { ColdExitProof, ProcessIdentity, SupervisorInventory, LegacyRetirem
 import { ColdExitObservationUnavailable } from './supervisor';
 import { windowsPowerShellEnvironment } from './windows-tools';
 import { performance } from 'node:perf_hooks';
+import {freshSystemBoot,type SystemBootProof} from './system-boot';
 
 const exec = promisify(execFile);
 const digest = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
@@ -40,7 +41,7 @@ export class WindowsSupervisorControl {
     return new WindowsSupervisorControl(stage, script, configFile, digest(data), evidence, allowMutations,snapshot.files.find(f=>f.path===resolve(script))!.sha256);
   }
   private async call(action: string, extra: string[] = [], input?:string, raw=false,boundedRead=false): Promise<any> {
-    if (!['Snapshot','ColdSnapshot','SharedSnapshot','TaskRetirement','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
+    if (!['BootIdentity','Snapshot','ColdSnapshot','SharedSnapshot','TaskRetirement','TaskPermissions','TaskRestoreNeeded','StopPermission','TestIdentity','ReadOwner','BackupTask'].includes(action) && !this.allowMutations) throw new Error('Production mutations require verified hot or cold admission and explicit runtime wiring');
     if(boundedRead){if(action!=='SharedSnapshot' || digest(await readFile(this.script))!==this.scriptSha256)throw new Error('Bounded native reader changed');}
     else await verifyDeployment(this.stage);
     if (digest(await readFile(this.configFile)) !== this.configSha256) throw new Error('Runtime control configuration changed');
@@ -103,6 +104,11 @@ export class WindowsSupervisorControl {
       }
     }
     throw new Error('Complete process inventory unavailable');
+  }
+  async systemBoot():Promise<SystemBootProof>{
+    const proof=await this.call('BootIdentity');
+    if(!freshSystemBoot(proof))throw new Error('System boot observation invalid');
+    return proof;
   }
   async legacyRetirement():Promise<LegacyRetirementProof>{
     const p=await this.call('TaskRetirement');

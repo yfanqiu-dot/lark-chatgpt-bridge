@@ -1,6 +1,6 @@
 # Windows 桌面版安装配置
 
-适用于 QIU Bridge v0.9.5。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
+适用于 QIU Bridge v0.10.0。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
 
 ## 1. 准备环境
 
@@ -12,7 +12,9 @@
 - 一条已存在的桌面项目对话，以及群 `chat_id`、本人在此应用下的 `open_id`。
 - 电脑开机联网，无其他消费者同时接收同一飞书应用消息。旧 CLI 后端应先停止并停用，保留配置和记录。
 
-下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v0.9.5`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
+下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v0.10.0`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
+
+下载同一 Release 的 `SHA256SUMS.txt`，解压前用 `Get-FileHash -Algorithm SHA256 .\qiu-bridge-v0.10.0-windows-x64.zip` 核对 ZIP 哈希与该文件一致。安装包中的 `release.json` 标明源码版本，`FILES.sha256` 记录文件清单；校验失败时重新下载核实，不修改校验值绕过检查。
 
 ## 2. 保存机器人凭据
 
@@ -101,3 +103,9 @@ node bin/lark-chatgpt-runtime-supervisor.mjs --service-install-startup D:\QIUBri
 只需 Startup 时可删除新生成的桌面快捷方式。`Win+R` → `shell:startup`，确认只有一个 `QIU New Bridge`，没有恢复软件制造的 `(1)` 副本。关闭 Codex 自己的登录启动，让 Bridge 负责启动顺序。不要为此关闭安全软件或绕过单位策略。
 
 日常操作、升级与异常恢复见[运维指南](docs/desktop-p4-deployment.md)。更多群和自动建话题单独验收。
+
+## 8. 启用单聊及日常使用
+
+首次配置默认只有一个群；要使用单聊主控和自动建话题，继续按[完整模式](docs/desktop-p4-deployment.md#完整功能部署-v090)及[单聊配置](docs/desktop-p4-deployment.md#单聊主控配置-v0100)准备绑定、账本和封存部署，并核对所需私聊消息、建群等权限。不要直接修改已经封存的程序或配置。
+
+安装后请读[完整使用手册](docs/user-guide.zh.md)：包含单聊建话题的完整示例、全部命令、审批与延迟处理、办公小技巧和删除资源的影响。登录自动启动发生在用户登录后；正常退出桌面会关闭渠道，不会强制重新拉起。

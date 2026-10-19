@@ -2,7 +2,7 @@ import type { DesktopConfig } from './config';
 import { DesktopBackend, UncertainExecution, type Approval } from './backend';
 import { DesktopLedger, type MessageRecord } from './ledger';
 
-export interface InboundMessage { messageId: string; chatId: string; senderId: string; content: string; mentionedBot: boolean; isBot?: boolean; replyInThread: boolean }
+export interface InboundMessage { messageId: string; chatId: string; senderId: string; content: string; mentionedBot: boolean; isBot?: boolean; replyInThread: boolean; chatType?: 'p2p'|'group' }
 export interface ReplyPort {
   send(chatId: string, text: string, replyTo: string, replyInThread: boolean): Promise<string>;
   approval(chatId: string, request: Approval, replyTo: string, replyInThread: boolean): Promise<void>;

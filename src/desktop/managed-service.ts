@@ -1,5 +1,5 @@
 import {createHash,randomUUID} from 'node:crypto';
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,stat} from 'node:fs/promises';
 import {dirname,isAbsolute,join,resolve} from 'node:path';
 import lockfile from 'proper-lockfile';
 import {verifyDeployment} from './deployment';
@@ -10,6 +10,7 @@ import {sameProcess,validRetirementProof} from './supervisor';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {windowsPowerShellEnvironment} from './windows-tools';
+import {freshSystemBoot,validSystemBoot,laterSystemBoot,sameSystemBoot,type SystemBootProof} from './system-boot';
 
 const sha=(data:Buffer|string)=>createHash('sha256').update(data).digest('hex');
 const json=async(path:string)=>JSON.parse(await readFile(path,'utf8'));
@@ -62,13 +63,47 @@ export async function managedServiceShortcuts(path:string,proof:string,checkOnly
   await writeFileAtomic(join(m.directory,checkOnly?'shortcuts.preflight.json':'shortcuts.installed.json'),JSON.stringify(r));
   return r;
 }
-/** A new entry may follow a fully restored health failure after fresh admission.
- * It never resumes a failed forward launch or replays a model input. */
+/** A new boot can retire an interrupted process generation, but cannot prove
+ * that a submitted business operation completed. Ledger/admission checks below
+ * still block uncertain work; old journals and model inputs are never replayed. */
+async function previousBootReentry(m:ManagedServiceManifest,previous:any,p:any,s:any,r:any,stateBytes:Buffer,resultBytes:Buffer|undefined,current:SystemBootProof){
+  if(previous.bootProofSha256===undefined)return undefined; // Historical runs need independent reconciliation.
+  const file=join(p.directory,'service-boot.json'),bytes=await readFile(file),b=JSON.parse(bytes.toString('utf8'));
+  if(!/^[a-f0-9]{64}$/.test(previous.bootProofSha256) || sha(bytes)!==previous.bootProofSha256
+    || b.version!==1 || b.serviceId!==m.serviceId || b.codeRevision!==m.codeRevision || b.planSha256!==previous.planSha256
+    || b.planFile!==previous.planFile || !validSystemBoot(b.boot) || !freshSystemBoot(current)
+    || b.boot.machineSha256!==current.machineSha256 || b.boot.observedAt>current.observedAt)throw new Error('Previous service boot evidence invalid');
+  if(sameSystemBoot(b.boot,current))return undefined;
+  if(!laterSystemBoot(b.boot,current))throw new Error('Previous service boot order unconfirmed');
+  const bootAt=Date.parse(current.bootedAt),beforeBoot=(v:any)=>typeof v==='string'&&Number.isFinite(Date.parse(v))&&Date.parse(v)<bootAt;
+  if(!Number.isSafeInteger(previous.requestedAt)||previous.requestedAt<b.boot.observedAt||previous.requestedAt>=bootAt
+    || !beforeBoot(p.createdAt) || p.channelMode!=='new-only' || p.mode!=='cold'
+    || s.version!==1 || !Number.isSafeInteger(s.revision) || s.revision<0 || !beforeBoot(s.updatedAt)
+    || !/^[a-f0-9-]{36}$/.test(s.runId) || s.startMode!=='cold' || s.channelMode!=='new-only' || s.serviceMode!==m.serviceMode
+    || !['preflight','waiting_desktop_exit','starting_broker','starting_host','starting_listener','running','stopping_listener','stopping_host','restoring_desktop','stopping_broker','restored','closed','blocked'].includes(s.phase)
+    || s.legacyPauseAttempted!==false || s.desktopCloseAttempted!==false || s.baseline || !s.owned
+    || Object.entries(s.owned).some(([role,id]:[string,any])=>!['broker','host','listener'].includes(role)||!sameProcess(id,id)||!beforeBoot(id.createdAt))
+    || !validRetirementProof(s.newBaseline?.retirement)
+    || s.newBaseline.desktop && (!sameProcess(s.newBaseline.desktop,s.newBaseline.desktop)||!beforeBoot(s.newBaseline.desktop.createdAt))
+    || resultBytes && (!r || r.version!==1 || r.planId!==p.planId || r.runId!==s.runId || r.phase!==s.phase || r.channelMode!=='new-only'
+      || r.serviceMode!==m.serviceMode || r.legacyRecoveryAllowed!==false || !beforeBoot(r.completedAt))
+    || (await stat(join(p.directory,'supervisor.json'))).mtimeMs>=bootAt
+    || resultBytes && (await stat(join(p.directory,'runtime.result.json'))).mtimeMs>=bootAt)throw new Error('Interrupted previous boot requires independent reconciliation');
+  return {version:1,reason:'previous_windows_boot',previousPlanFile:previous.planFile,previousPlanSha256:previous.planSha256,
+    previousRunId:s.runId,stateSha256:sha(stateBytes),resultSha256:resultBytes?sha(resultBytes):null,resultAbsent:!resultBytes,
+    previousErrorCode:s.errorCode??null,previousRollbackErrorCode:s.rollbackErrorCode??null,previousBootProofSha256:sha(bytes),
+    previousBoot:b.boot,currentBoot:current,retirement:s.newBaseline.retirement,ordinaryRestoreWasVerified:false};
+}
+/** A new entry always creates a fresh plan and admission; never resumes a failed
+ * forward launch or replays a model input. */
 export async function launchManagedService(path:string,proof:string){
   const m=await readManagedService(path,proof);
   const release=await lockfile.lock(join(m.directory,'service-launch'),{realpath:false,retries:0,stale:10_000});
   let releasePrevious:(()=>Promise<void>)|undefined;
   try{
+    const control=await WindowsSupervisorControl.prepare(m.sourceStage,join(m.root,'bin/desktop-runtime-control.ps1'),join(m.directory,`entry-check-${randomUUID()}`),false,false);
+    const boot=await control.systemBoot();
+    if(!freshSystemBoot(boot))throw new Error('Service boot observation unavailable');
     let previous:any,reentry:any;
     try{previous=await json(join(m.directory,'active-run.json'));}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
     if(previous){
@@ -78,24 +113,26 @@ export async function launchManagedService(path:string,proof:string){
       // Hold the previous journal's writer lock through pointer publication.
       // A stale availability observation alone cannot authorize a new run.
       releasePrevious=await lockfile.lock(join(p.directory,'supervisor.json'),{realpath:false,retries:0,stale:10_000});
-      const stateBytes=await readFile(join(p.directory,'supervisor.json')),resultBytes=await readFile(join(p.directory,'runtime.result.json'));
-      const s=JSON.parse(stateBytes.toString('utf8')),r=JSON.parse(resultBytes.toString('utf8'));
-      const restoredHealthFailure=s.phase==='restored' && ['runtime_health_failed','shared_admission_busy_timeout'].includes(s.errorCode) && r.errorCode===s.errorCode
+      const stateBytes=await readFile(join(p.directory,'supervisor.json'));
+      let resultBytes:Buffer|undefined;
+      try{resultBytes=await readFile(join(p.directory,'runtime.result.json'));}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+      const s=JSON.parse(stateBytes.toString('utf8')),r=resultBytes?JSON.parse(resultBytes.toString('utf8')):undefined;
+      reentry=await previousBootReentry(m,previous,p,s,r,stateBytes,resultBytes,boot);
+      const restoredHealthFailure=s.phase==='restored' && ['runtime_health_failed','shared_admission_busy_timeout'].includes(s.errorCode) && r?.errorCode===s.errorCode
         && s.channelMode==='new-only' && s.serviceMode==='stop-with-desktop' && s.startMode==='cold'
         && r.channelMode===s.channelMode && r.serviceMode===s.serviceMode && r.ordinaryRestoreVerified===true
         && s.ordinaryProof?.packageIdentityVerified===true && s.ordinaryProof.toolsExact===true
         && sameProcess(s.ordinaryProof.desktop,s.ordinaryProof.desktop)
         && validRetirementProof(s.newBaseline?.retirement);
-      if(!['restored','closed'].includes(s.phase) || r.phase!==s.phase || r.planId!==p.planId || !/^[a-f0-9-]{36}$/.test(s.runId) || r.runId!==s.runId
+      if(!reentry && (!r || !['restored','closed'].includes(s.phase) || r.phase!==s.phase || r.planId!==p.planId || !/^[a-f0-9-]{36}$/.test(s.runId) || r.runId!==s.runId
         || s.rollbackErrorCode || r.rollbackErrorCode || (s.errorCode || r.errorCode) && !restoredHealthFailure
-        || r.messageServicePaused!==true || r.legacyRecoveryAllowed!==false || s.phase==='closed' && (s.desktopQuitVerified!==true||r.desktopQuitVerified!==true)){
+        || r.messageServicePaused!==true || r.legacyRecoveryAllowed!==false || s.phase==='closed' && (s.desktopQuitVerified!==true||r.desktopQuitVerified!==true))){
         throw Object.assign(new Error('Previous service run requires independent reconciliation'),{code:'service_previous_run_unresolved'});
       }
-      if(restoredHealthFailure)reentry={version:1,previousPlanFile:previous.planFile,previousPlanSha256:previous.planSha256,
-        previousRunId:s.runId,stateSha256:sha(stateBytes),resultSha256:sha(resultBytes),previousErrorCode:s.errorCode,
+      if(!reentry && restoredHealthFailure)reentry={version:1,previousPlanFile:previous.planFile,previousPlanSha256:previous.planSha256,
+        previousRunId:s.runId,stateSha256:sha(stateBytes),resultSha256:sha(resultBytes!),previousErrorCode:s.errorCode,
         retirement:s.newBaseline.retirement,ordinaryRestoreWasVerified:true};
     }
-    const control=await WindowsSupervisorControl.prepare(m.sourceStage,join(m.root,'bin/desktop-runtime-control.ps1'),join(m.directory,`entry-check-${randomUUID()}`),false,false);
     const i=await control.inventory(),retirement=await control.legacyRetirement();
     if(i.legacy.length || i.desktop.length>1 || i.host.length || i.listener.length || i.broker.length || !validRetirementProof(retirement)
       || retirement.observedAt>Date.now()+1000 || Date.now()-retirement.observedAt>60_000)throw new Error('Service entry inventory or retirement unavailable');
@@ -104,9 +141,13 @@ export async function launchManagedService(path:string,proof:string){
     // broker/host launch. An existing ordinary UI is observed, never closed.
     const runs=join(m.directory,'runs');await mkdir(runs,{recursive:true,mode:0o700});
     const prepared=await prepareColdRuntime(m.sourceStage,join(runs,randomUUID()),m.root,undefined,'new-only',{mode:m.serviceMode});
+    const finalBoot=await control.systemBoot();
+    if(!freshSystemBoot(finalBoot)||!sameSystemBoot(boot,finalBoot))throw new Error('Service boot changed during admission');
+    const bootBytes=JSON.stringify({version:1,serviceId:m.serviceId,codeRevision:m.codeRevision,planFile:prepared.planFile,planSha256:prepared.planSha256,boot:finalBoot});
+    await writeFile(join(dirname(prepared.planFile),'service-boot.json'),bootBytes,{encoding:'utf8',flag:'wx',mode:0o600});
     if(reentry)await writeFile(join(dirname(prepared.planFile),'previous-run-reentry.json'),JSON.stringify({...reentry,observedAt:Date.now(),
       freshRetirement:retirement,noPriorChannelProcesses:true,previousEvidencePreserved:true,messageReplayAllowed:false}),{encoding:'utf8',flag:'wx',mode:0o600});
-    await writeFileAtomic(join(m.directory,'active-run.json'),JSON.stringify({version:1,serviceId:m.serviceId,planFile:prepared.planFile,planSha256:prepared.planSha256,requestedAt:Date.now()}));
+    await writeFileAtomic(join(m.directory,'active-run.json'),JSON.stringify({version:1,serviceId:m.serviceId,planFile:prepared.planFile,planSha256:prepared.planSha256,bootProofSha256:sha(bootBytes),requestedAt:Date.now()}));
     return await launchColdRuntime(prepared.planFile,prepared.planSha256);
   }finally{try{await releasePrevious?.();}finally{await release();}}
 }
