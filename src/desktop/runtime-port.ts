@@ -231,7 +231,7 @@ export class DesktopRuntimePort implements SupervisorPort {
       heartbeatFresh:Number.isFinite(r.updatedAt) && r.updatedAt<=this.effects.now()+1000 && this.effects.now()-r.updatedAt<=10_000,
       readyTimeValid:Number.isFinite(r.readyAt) && r.readyAt<=this.effects.now()+1000 && !!this.owned.listener && r.readyAt>=Date.parse(this.owned.listener.createdAt)-1000,
       scopeMatches:this.input.snapshot.spec.scope==='registered-topics'
-        ? JSON.stringify(r.enabledChatIds)==='[]'&&r.scope==='registered-topics'&&r.entryChatId===this.input.topics.entryChatId&&r.allowTopicCreation===true
+        ? JSON.stringify(r.enabledChatIds)==='[]'&&r.scope==='registered-topics'&&r.entryChatId===this.input.topics.entryChatId&&r.allowTopicCreation===true&&r.directControlChatId===this.input.topics.directControl?.chatId
         : r.scope===undefined&&JSON.stringify(r.enabledChatIds)===JSON.stringify(this.input.topics.enabledChatIds)};
   }
   private async listenerReadiness(){return this.listenerChecks(await json(join(this.directory,'listener.ready.json')));}

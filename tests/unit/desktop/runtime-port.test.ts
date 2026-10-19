@@ -114,7 +114,13 @@ it('does not reset the startup busy budget between idle observations',async()=>{
   await h.port.sharedIdle();h.advance(600_000);h.effects.shared=async()=>h.busy();
   await expect(h.port.sharedIdle()).rejects.toMatchObject({code:'shared_admission_busy_timeout'});expect(h.events).not.toContain('launch:listener');
 });
-it('verifies registered-topic listener policy and includes every binding in reconciliation checks',async()=>{
+  it.each([undefined,'oc_foreign'])('rejects a listener that loses or changes the declared direct control scope: %s',async actual=>{
+    const h=await configurationHarness();h.refresh();h.input.snapshot.spec.scope='registered-topics';delete h.input.topics.enabledChatIds;h.input.topics.allowTopicCreation=true;h.input.topics.directControl={chatId:'oc_control'};
+    const marker={version:1,runId,pid:6,readyAt:h.clock(),updatedAt:h.clock(),phase:'ready',connectionState:'connected',enabledChatIds:[],scope:'registered-topics',entryChatId:'oc_entry',allowTopicCreation:true,directControlChatId:'oc_control'};
+    await writeFile(join(dir,'listener.ready.json'),JSON.stringify(marker),'utf8');expect(await h.port.health()).toBe(true);
+    await writeFile(join(dir,'listener.ready.json'),JSON.stringify({...marker,directControlChatId:actual}),'utf8');expect(await h.port.health()).toBe(false);
+  });
+  it('verifies registered-topic listener policy and includes every binding in reconciliation checks',async()=>{
   const h=await configurationHarness();h.refresh();h.input.snapshot.spec.scope='registered-topics';delete h.input.topics.enabledChatIds;h.input.topics.allowTopicCreation=true;
   await expect(h.port.verifyBindings()).rejects.toThrow('reconciliation');
   h.input.ledgers[1].counts={completed:1};await expect(h.port.verifyBindings()).resolves.toBeUndefined();

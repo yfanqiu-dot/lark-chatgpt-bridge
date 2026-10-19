@@ -11,7 +11,7 @@ import { DesktopController } from './controller';
 import { DesktopLedger } from './ledger';
 import { approvalCard, resolvedCard } from './cards';
 import { desktopInbound } from './inbound';
-import { parseTopicConfig, TopicRegistry, topicChatEnabled, validateTopicScope } from './topics';
+import { parseTopicConfig, TopicRegistry, topicChatEnabled, validateTopicScope, topicChannelPolicy } from './topics';
 import { TopicProvisioner } from './topic-provisioner';
 import { CodexTopicResources, topicResources } from './topic-resources';
 import { TopicRouter,topicDesktopConfig } from './topic-router';
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   catch (e) { await release(); throw e; }
   const archive = new TopicArchive(config,registry);
   const channel = createLarkChannel({appId:config.appId,appSecret:secret,domain:'https://open.feishu.cn',source:'lark-chatgpt-topics',resolveChatMode:true,
-    policy:{dmMode:'disabled',requireMention:false,respondToMentionAll:false},safety:{chatQueue:{enabled:false}},outbound:desktopOutboundConfig,respectProxyEnv:true,httpTimeoutMs:30_000,
+    policy:topicChannelPolicy(config),safety:{chatQueue:{enabled:false}},outbound:desktopOutboundConfig,respectProxyEnv:true,httpTimeoutMs:30_000,
     keepalive:{enabled:true}});
   const transport=new ListenerTransport(()=>channel.getConnectionStatus());
   const cards = new ApprovalJournal(`${config.registryFile}.approvals.json`, {appId:config.appId,ownerOpenId:config.ownerOpenId,entryChatId:config.entryChatId}, {
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
     await channel.connect();await cards.start();await router.start();
     clearReady=await publishListenerReady(config.enabledChatIds??[],process.env,()=>transport.snapshot(),2500,()=>{
       console.error('Listener supervisor owner lease lost; shutting down.');process.exitCode=1;onSignal();
-    },config.enabledChatIds===undefined&&config.allowTopicCreation===true?{mode:'registered-topics',entryChatId:config.entryChatId,allowTopicCreation:true}:undefined);readyResolve();
+    },config.enabledChatIds===undefined&&config.allowTopicCreation===true?{mode:'registered-topics',entryChatId:config.entryChatId,allowTopicCreation:true,...(config.directControl?{directControlChatId:config.directControl.chatId}:{})}:undefined);readyResolve();
     process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);
     stopWatcher=setInterval(()=>{void readFile(`${config.registryFile}.stop`,'utf8').then(shutdown).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT'){console.error('Topic bridge shutdown failed:',String(e));process.exitCode=1;}});},1000);
     let syncing=false;

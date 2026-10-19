@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
-import { parseTopicConfig, TopicRegistry, topicChatEnabled, validateTopicScope, type TopicConfig } from './topics';
+import { parseTopicConfig, TopicRegistry, topicChatEnabled, validateTopicScope, staticTopicBindings, type TopicConfig } from './topics';
 import { topicDesktopConfig } from './topic-router';
 import { validateHostConfig, type HostConfig } from './host';
 import { readDesktopToolConfig } from './backend';
@@ -94,15 +94,15 @@ async function bindings(config: TopicConfig): Promise<Binding[]> {
     const c = topicDesktopConfig(config, row);
     return { appId: c.appId, chatId: c.chatId, ownerOpenId: c.ownerOpenId, projectId: c.projectId, projectRoot: c.projectRoot, threadId: c.threadId };
   });
-  if (config.existing) {
-    const e = config.existing, p = config.projects.find(p => p.key === e.projectKey)!;
+  for (const e of staticTopicBindings(config)) {
+    const p = config.projects.find(p => p.key === e.projectKey)!;
     result.push({ appId: config.appId, chatId: e.chatId, ownerOpenId: config.ownerOpenId, projectId: p.projectId, projectRoot: p.projectRoot, threadId: e.threadId });
   }
   return result.sort((a, b) => a.chatId.localeCompare(b.chatId));
 }
 
 async function ledger(config: TopicConfig, binding: Binding): Promise<LedgerSummary> {
-  const file = config.existing?.chatId === binding.chatId ? config.existing.stateFile : join(config.stateDir, `${binding.chatId}.json`);
+  const file = staticTopicBindings(config).find(b=>b.chatId===binding.chatId)?.stateFile ?? join(config.stateDir, `${binding.chatId}.json`);
   const bytes = await readFile(file), saved = JSON.parse(bytes.toString('utf8'));
   if (saved.version !== 1 || !Array.isArray(saved.messages) || !saved.binding || Object.entries(binding).some(([k, v]) => saved.binding[k] !== v)) throw new Error('Ledger identity/version mismatch');
   const counts: LedgerSummary['counts'] = {}, ids = new Set<string>();

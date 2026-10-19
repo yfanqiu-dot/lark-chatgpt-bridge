@@ -1,10 +1,12 @@
 # Office workflows and daily use
 
-For a configured QIU Bridge v0.9.5 installation whose messaging channel is ready. Verify one group before enabling more topics.
+For a configured QIU Bridge v0.10.0 installation whose messaging channel is ready. Verify one group before enabling more topics.
 
 [Overview](../README.md) · [中文案例](office-workflows.zh.md) · [Installation](../README.desktop.md) · [Operations](desktop-p4-deployment.md)
 
 ## Where it helps
+
+With DM control enabled, plan work in your bot DM or send `/topic new main Customer proposal`. Follow the returned group link and mention the bot there for the specialized task. Use `/topic list` in the DM to find existing topics. DMs need no mention, and each topic keeps its own conversation. Replace `main` with your configured project key. See [DM control](../README.topics.md#单聊主控).
 
 | Situation | How to use the bridge |
 |---|---|

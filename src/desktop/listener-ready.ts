@@ -15,11 +15,12 @@ export async function assertListenerSubmissionOpen(env=process.env):Promise<void
 }
 /** Optional supervisor handshake. Existing standalone listeners are unchanged.
  * This contains identity/scope only; never auth, prompts or message results. */
-export async function publishListenerReady(chatIds:readonly string[],env=process.env,connection:()=>string|TransportSnapshot=()=> 'connected',periodMs=2500,onOwnerLost?:()=>void,scope?:{mode:'registered-topics';entryChatId:string;allowTopicCreation:true}):Promise<()=>Promise<void>> {
+export async function publishListenerReady(chatIds:readonly string[],env=process.env,connection:()=>string|TransportSnapshot=()=> 'connected',periodMs=2500,onOwnerLost?:()=>void,scope?:{mode:'registered-topics';entryChatId:string;allowTopicCreation:true;directControlChatId?:string}):Promise<()=>Promise<void>> {
   const path=env.BRIDGE_SUPERVISOR_READY_FILE,runId=env.BRIDGE_SUPERVISOR_RUN_ID;
   const ownerPath=env.BRIDGE_SUPERVISOR_OWNER_LEASE_FILE;
   if(!path && !runId && !ownerPath)return async()=>{};
-  const validScope=scope?.mode==='registered-topics'&&/^oc_[a-zA-Z0-9]+$/.test(scope.entryChatId)&&scope.allowTopicCreation===true&&chatIds.length===0;
+  const validScope=scope?.mode==='registered-topics'&&/^oc_[a-zA-Z0-9]+$/.test(scope.entryChatId)&&scope.allowTopicCreation===true&&chatIds.length===0
+    &&(scope.directControlChatId===undefined||/^oc_[a-zA-Z0-9]+$/.test(scope.directControlChatId)&&scope.directControlChatId!==scope.entryChatId);
   if(!path || !isAbsolute(path) || !runId || !/^[a-f0-9-]{36}$/.test(runId) || (scope!==undefined?!validScope:chatIds.length!==1 || new Set(chatIds).size!==1))throw new Error('Invalid listener supervisor handshake');
   if(ownerPath&&(!isAbsolute(ownerPath)||dirname(ownerPath)!==dirname(path)||typeof onOwnerLost!=='function'))throw new Error('Invalid listener owner handshake');
   const owner=ownerPath?new ListenerOwnerLease(ownerPath,runId):undefined;
@@ -39,7 +40,7 @@ export async function publishListenerReady(chatIds:readonly string[],env=process
       transport.transitions=raw.transitions.slice(-32).filter(v=>Number.isSafeInteger(v.at)&&v.at>=readyAt&&known.includes(v.state)).map(v=>({at:v.at,state:v.state}));
     }
     const phase=raw?(raw.phase==='ready'&&state==='connected'?'ready':raw.phase==='reconnecting'?'reconnecting':'failed'):state==='connected'?'ready':'disconnected';
-    const marker={version:1,runId,pid:process.pid,readyAt,updatedAt:Date.now(),phase,connectionState:state,enabledChatIds:[...chatIds],...(scope?{scope:scope.mode,entryChatId:scope.entryChatId,allowTopicCreation:true}:{}),...(transport?{transport}:{})};
+    const marker={version:1,runId,pid:process.pid,readyAt,updatedAt:Date.now(),phase,connectionState:state,enabledChatIds:[...chatIds],...(scope?{scope:scope.mode,entryChatId:scope.entryChatId,allowTopicCreation:true,...(scope.directControlChatId?{directControlChatId:scope.directControlChatId}:{})}:{}),...(transport?{transport}:{})};
     if(transport)await writeFileAtomic(path.replace(/[^\\/]+$/,'listener.connection.json'),JSON.stringify(marker));
     await writeFileAtomic(path,JSON.stringify(marker));
   });return writes;};

@@ -1,10 +1,10 @@
 # QIU Bridge · Continue your desktop AI work from Feishu
 
-**Mention your bot in a Feishu group, receive the final text answer, and continue in the same real Codex project conversation when you return to your computer.**
+**Use an owner-only Feishu DM to plan work and launch topics, then mention the bot in each topic group to execute. Continue the same real Codex project conversations on your computer.**
 
 For an individual who already uses Codex: draft reports while away, organize meeting notes, and follow separate workstreams without repeatedly explaining the background. Work runs on your own Windows computer, which must stay on and connected.
 
-[中文介绍](README.zh.md) · [Download v0.9.5](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.5) · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md) · [Operations](docs/desktop-p4-deployment.md)
+[中文介绍](README.zh.md) · [Download v0.10.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md) · [Operations](docs/desktop-p4-deployment.md)
 
 ## Ways to use it
 
@@ -20,6 +20,8 @@ These examples need materials accessible on the bridge computer. Data analysis n
 
 ## Daily controls
 
+With the optional [DM control channel](README.topics.md#单聊主控) configured, send text without a mention. Use `/topic new main Customer proposal` to create a separate Codex conversation and private group, then follow the returned group link. `/topic list` finds existing topics and `/help` shows configured project keys. The DM, entry group and topic groups keep separate conversation histories.
+
 Mention the bot in a bound group and state the material, goal and constraints. Follow up there, then review source materials and finish delivery in the desktop app. The bridge primarily returns final text results and supported approval notifications.
 
 | Command | Purpose |
@@ -30,21 +32,21 @@ Mention the bot in a bound group and state the material, goal and constraints. F
 | `/result [messageId]` | Retrieve a saved answer without rerunning the task |
 | `/reconcile` | Check the original uncertain request |
 
-Topic creation is available only in its enabled entry group. Replace `main` with your configured project key. A topic is a Codex conversation and its group, not a Feishu reply thread. Check status before repeating a delayed request.
+Topic creation is available in its enabled entry group or explicit owner DM. Replace `main` with your configured project key. A topic is a Codex conversation and its group, not a Feishu reply thread. Check status before repeating a delayed request.
 
 ## Get started
 
 1. Prepare Windows x64, Node.js 22 LTS, a signed-in Codex desktop app and your own Feishu bot.
-2. [Download the bundle](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.9.5) and follow the [installation guide](README.desktop.md), currently in Chinese. Configure your project and real conversation, then verify one group. Initial setup requires some command-line experience.
+2. [Download the bundle](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) and follow the [installation guide](README.desktop.md), currently in Chinese. Configure your project and real conversation, then verify one group. Initial setup requires some command-line experience.
 3. Install the login entry. Enable and verify full mode through [operations](docs/desktop-p4-deployment.md) if you need more topics or projects.
 
 Start through `QIU New Bridge` and wait for readiness checks. Normally quitting the managed desktop also closes its messaging channel. This desktop version is distributed through GitHub Releases; installing the upstream `lark-channel-bridge` npm package does not install it.
 
 ## Release and boundaries
 
-**v0.9.5** fixes Windows PowerShell module-path compatibility at login, waits for normal desktop activity before fresh admission, permits reentry after fully restored supported failures, and adds redacted startup diagnostics with a failure notice. See [patch notes](docs/releases/v0.9.5.md).
+**v0.10.0** adds an explicit owner-only DM control channel for direct conversation, topic creation and topic discovery. It preserves login startup and existing task controls. See [release notes](docs/releases/v0.10.0.md).
 
-Desktop support covers Windows x64, one configured owner and text interaction in registered groups. Images, attachments, full desktop-message mirroring, multi-user hosting and guaranteed unattended operation are outside this release's scope. Codex tools and permissions still apply. A local Windows sandbox `setup refresh had errors` issue remains unresolved; approved execution was verified. Each installation and Codex update needs its own checks. See [compatibility and limits](docs/compatibility.md).
+Desktop support covers Windows x64, one configured owner and text interaction in registered groups and an explicitly bound DM. DMs remain disabled unless configured, and other users cannot access the control channel. Images, attachments, full desktop-message mirroring, multi-user hosting and guaranteed unattended operation are outside this release's scope. Codex tools and permissions still apply. A local Windows sandbox `setup refresh had errors` issue remains unresolved; approved execution was verified. Each installation and Codex update needs its own checks. See [compatibility and limits](docs/compatibility.md).
 
 Personal configuration, ledgers and credentials are excluded from source and release bundles. Requests and results still pass through Feishu and your configured Codex services; check that the tools, platforms and authorization are appropriate for the business data involved.
 
@@ -52,6 +54,6 @@ Personal configuration, ledgers and credentials are excluded from source and rel
 
 [Design and acceptance summary](docs/development.md) · [Independent CLI backend](docs/cli-backend.en.md) · [Security](SECURITY.md) · [Issues](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/issues)
 
-For a source build, check out `v0.9.5`, run `npx --yes pnpm@10.33.0 install --frozen-lockfile` and `npx --yes pnpm@10.33.0 build`. Development checks: `pnpm test`, `pnpm typecheck`, `pnpm build`.
+For a source build, check out `v0.10.0`, run `npx --yes pnpm@10.33.0 install --frozen-lockfile` and `npx --yes pnpm@10.33.0 build`. Development checks: `pnpm test`, `pnpm typecheck`, `pnpm build`.
 
 Based on [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge), under the [MIT license](LICENSE). Independent community integration, not an OpenAI or Feishu product. Remove credentials and private conversation content from issue reports.
