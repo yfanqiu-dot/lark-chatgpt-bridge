@@ -6,7 +6,7 @@ import {verifyDeployment} from './deployment';
 import {prepareColdRuntime,launchColdRuntime,verifyColdRuntimePlan} from './runtime-supervisor';
 import {writeFileAtomic} from '../platform/atomic-write';
 import {WindowsSupervisorControl} from './supervisor-windows';
-import {validRetirementProof} from './supervisor';
+import {sameProcess,validRetirementProof} from './supervisor';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {windowsPowerShellEnvironment} from './windows-tools';
@@ -62,32 +62,51 @@ export async function managedServiceShortcuts(path:string,proof:string,checkOnly
   await writeFileAtomic(join(m.directory,checkOnly?'shortcuts.preflight.json':'shortcuts.installed.json'),JSON.stringify(r));
   return r;
 }
-/** Fail closed on live, missing, failed or ambiguous prior runs. Startup is
- * never a retry/recovery loop and never submits a model input. */
+/** A new entry may follow a fully restored health failure after fresh admission.
+ * It never resumes a failed forward launch or replays a model input. */
 export async function launchManagedService(path:string,proof:string){
   const m=await readManagedService(path,proof);
   const release=await lockfile.lock(join(m.directory,'service-launch'),{realpath:false,retries:0,stale:10_000});
+  let releasePrevious:(()=>Promise<void>)|undefined;
   try{
-    let previous:any;
+    let previous:any,reentry:any;
     try{previous=await json(join(m.directory,'active-run.json'));}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
     if(previous){
       if(previous.version!==1 || previous.serviceId!==m.serviceId || !isAbsolute(previous.planFile) || dirname(dirname(previous.planFile))!==join(m.directory,'runs'))throw new Error('Service previous run pointer invalid');
       const p=await verifyColdRuntimePlan(previous.planFile,previous.planSha256,false);
       if(p.serviceMode!==m.serviceMode || p.codeRevision!==m.codeRevision || p.serviceAcceptanceWindow)throw new Error('Previous service policy changed');
-      const s=await json(join(p.directory,'supervisor.json')),r=await json(join(p.directory,'runtime.result.json'));
-      if(!['restored','closed'].includes(s.phase) || r.phase!==s.phase || r.planId!==p.planId || r.runId!==s.runId || s.errorCode || s.rollbackErrorCode || r.errorCode || r.rollbackErrorCode
-        || r.messageServicePaused!==true || r.legacyRecoveryAllowed!==false || s.phase==='closed' && (s.desktopQuitVerified!==true||r.desktopQuitVerified!==true))throw new Error('Previous service run requires independent reconciliation');
-      if(!await new (await import('./supervisor')).SupervisorJournal(join(p.directory,'supervisor.json')).waitUntilAvailable(0))throw new Error('Previous service journal still owned');
+      // Hold the previous journal's writer lock through pointer publication.
+      // A stale availability observation alone cannot authorize a new run.
+      releasePrevious=await lockfile.lock(join(p.directory,'supervisor.json'),{realpath:false,retries:0,stale:10_000});
+      const stateBytes=await readFile(join(p.directory,'supervisor.json')),resultBytes=await readFile(join(p.directory,'runtime.result.json'));
+      const s=JSON.parse(stateBytes.toString('utf8')),r=JSON.parse(resultBytes.toString('utf8'));
+      const restoredHealthFailure=s.phase==='restored' && s.errorCode==='runtime_health_failed' && r.errorCode===s.errorCode
+        && s.channelMode==='new-only' && s.serviceMode==='stop-with-desktop' && s.startMode==='cold'
+        && r.channelMode===s.channelMode && r.serviceMode===s.serviceMode && r.ordinaryRestoreVerified===true
+        && s.ordinaryProof?.packageIdentityVerified===true && s.ordinaryProof.toolsExact===true
+        && sameProcess(s.ordinaryProof.desktop,s.ordinaryProof.desktop)
+        && validRetirementProof(s.newBaseline?.retirement);
+      if(!['restored','closed'].includes(s.phase) || r.phase!==s.phase || r.planId!==p.planId || !/^[a-f0-9-]{36}$/.test(s.runId) || r.runId!==s.runId
+        || s.rollbackErrorCode || r.rollbackErrorCode || (s.errorCode || r.errorCode) && !restoredHealthFailure
+        || r.messageServicePaused!==true || r.legacyRecoveryAllowed!==false || s.phase==='closed' && (s.desktopQuitVerified!==true||r.desktopQuitVerified!==true)){
+        throw Object.assign(new Error('Previous service run requires independent reconciliation'),{code:'service_previous_run_unresolved'});
+      }
+      if(restoredHealthFailure)reentry={version:1,previousPlanFile:previous.planFile,previousPlanSha256:previous.planSha256,
+        previousRunId:s.runId,stateSha256:sha(stateBytes),resultSha256:sha(resultBytes),previousErrorCode:s.errorCode,
+        retirement:s.newBaseline.retirement,ordinaryRestoreWasVerified:true};
     }
     const control=await WindowsSupervisorControl.prepare(m.sourceStage,join(m.root,'bin/desktop-runtime-control.ps1'),join(m.directory,`entry-check-${randomUUID()}`),false,false);
     const i=await control.inventory(),retirement=await control.legacyRetirement();
     if(i.legacy.length || i.desktop.length>1 || i.host.length || i.listener.length || i.broker.length || !validRetirementProof(retirement)
       || retirement.observedAt>Date.now()+1000 || Date.now()-retirement.observedAt>60_000)throw new Error('Service entry inventory or retirement unavailable');
+    if(reentry && (retirement.taskPresent!==reentry.retirement.taskPresent || retirement.definitionSha256!==reentry.retirement.definitionSha256))throw new Error('Previous service retirement policy changed');
     // Full empty native inventory is still required by the worker twice before
     // broker/host launch. An existing ordinary UI is observed, never closed.
     const runs=join(m.directory,'runs');await mkdir(runs,{recursive:true,mode:0o700});
     const prepared=await prepareColdRuntime(m.sourceStage,join(runs,randomUUID()),m.root,undefined,'new-only',{mode:m.serviceMode});
+    if(reentry)await writeFile(join(dirname(prepared.planFile),'previous-run-reentry.json'),JSON.stringify({...reentry,observedAt:Date.now(),
+      freshRetirement:retirement,noPriorChannelProcesses:true,previousEvidencePreserved:true,messageReplayAllowed:false}),{encoding:'utf8',flag:'wx',mode:0o600});
     await writeFileAtomic(join(m.directory,'active-run.json'),JSON.stringify({version:1,serviceId:m.serviceId,planFile:prepared.planFile,planSha256:prepared.planSha256,requestedAt:Date.now()}));
     return await launchColdRuntime(prepared.planFile,prepared.planSha256);
-  }finally{await release();}
+  }finally{try{await releasePrevious?.();}finally{await release();}}
 }
