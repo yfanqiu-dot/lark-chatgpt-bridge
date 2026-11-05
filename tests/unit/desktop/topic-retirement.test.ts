@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TopicRegistry, parseTopicConfig, validateTopicScope, type TopicRecord } from '../../../src/desktop/topics';
@@ -9,7 +9,7 @@ import { TopicArchive } from '../../../src/desktop/topic-archive';
 import type { DesktopRpc } from '../../../src/desktop/rpc';
 
 let dir: string;
-beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'topic-retirement-')); });
+beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'topic-retirement-'))); });
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 async function fixture() {
   const config = parseTopicConfig({ appId:'cli_test', appSecretEnv:'LARK_APP_SECRET', ownerOpenId:'ou_owner', entryChatId:'oc_entry',

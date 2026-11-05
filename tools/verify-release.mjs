@@ -33,7 +33,9 @@ for(const name of ['overview','topics','installation']){
  if(png.subarray(0,8).toString('hex')!=='89504e470d0a1a0a')throw Error('Missing or invalid documentation image');
  await readFile(join(root,'docs/images',name+'.svg'));
 }
-for(const path of files.filter(path=>path.endsWith('.md'))){
+// Third-party npm packages can reference examples omitted from their own
+// distributions. Verify our offline guides, not dependency maintainers' docs.
+for(const path of files.filter(path=>path.endsWith('.md')&&!path.startsWith('node_modules/'))){
  const text=await readFile(join(root,path),'utf8');
  for(const match of text.matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)){
   const link=match[1];if(/^(?:https?:|#|mailto:)/.test(link))continue;
