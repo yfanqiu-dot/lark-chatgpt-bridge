@@ -8,11 +8,14 @@ if(process.platform!=='win32'||process.arch!=='x64')throw Error('The supported r
 const git=args=>execFileSync('git',['-c',`safe.directory=${root.replaceAll('\\','/')}`,...args],{cwd:root,encoding:'utf8'}).trim();
 const revision=git(['rev-parse','HEAD']);
 if(git(['status','--porcelain','--untracked-files=no']))throw Error('Commit the release source before packaging');
+// A Windows GUI entry prevents console delegation before PowerShell starts.
+// Compile it from the reviewed source before copying/sealing the bundle.
+execFileSync(process.execPath,[join(root,'tools/build-package-launcher.mjs')],{cwd:root,windowsHide:true,stdio:'pipe'});
 const output=resolve('release-artifacts'),build=join(output,`build-${revision.slice(0,12)}`),bundle=join(build,`qiu-bridge-v${pkg.version}-windows-x64`);
 await mkdir(output,{recursive:true});await mkdir(build);await mkdir(bundle);
 const files=['bin','dist','examples/desktop','tools/query-native.mjs','README.md','README.zh.md','README.desktop.md','README.topics.md','LICENSE','SECURITY.md',
   'docs/user-guide.en.md','docs/user-guide.zh.md','docs/office-workflows.en.md','docs/office-workflows.zh.md','docs/development.md',
-  'docs/desktop-p4-deployment.md','docs/compatibility.md','docs/cli-backend.en.md','docs/cli-backend.zh.md','docs/releases'];
+  'docs/desktop-p4-deployment.md','docs/compatibility.md','docs/topic-retirement.md','docs/images','docs/cli-backend.en.md','docs/cli-backend.zh.md','docs/releases'];
 for(const file of files){await mkdir(dirname(join(bundle,file)),{recursive:true});await cp(join(root,file),join(bundle,file),{recursive:true});}
 const runtimePkg={...pkg};delete runtimePkg.scripts;delete runtimePkg.devDependencies;delete runtimePkg.pnpm;delete runtimePkg.packageManager;
 await writeFile(join(bundle,'package.json'),JSON.stringify(runtimePkg,null,2)+'\n','utf8');

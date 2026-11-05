@@ -76,7 +76,7 @@ export class TopicArchive {
     await mkdir(join(base, 'topics'), {recursive:true});
     await writeFileAtomic(join(base, '.gitignore'), '*\n');
     await writeFileAtomic(join(base, 'topics', `${row.chatId}.md`), `${lines.join('\n')}\n`);
-    const rows = this.registry.all().filter(r => r.stage === 'active' && r.projectId === project.projectId);
+    const rows = (await this.registry.visible()).filter(r => r.projectId === project.projectId);
     const index = [`# ${project.key} · 飞书与 Codex 对话索引`, '', `同步时间：${new Date().toISOString()}`, '', '| 话题 | 飞书群 | Codex 对话 | 记录 |', '| --- | --- | --- | --- |',
       ...rows.map(r => `| ${r.title.replaceAll('|','\\|')} | ${r.chatId} | ${r.threadId} | [打开](topics/${r.chatId}.md) |`), ''];
     await writeFileAtomic(join(base, 'index.md'), index.join('\n'));

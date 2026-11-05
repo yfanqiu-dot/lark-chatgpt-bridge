@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference='Stop'
 $taskRoot=Split-Path -Parent $ConnectionFile
 $taskBroker=Join-Path $PSScriptRoot 'desktop-package-broker.ps1'
+$taskLauncher=Join-Path $PSScriptRoot 'desktop-package-launcher.exe'
 $taskStop=Join-Path $taskRoot 'package-broker.stop'
 $taskStatus=Join-Path $taskRoot 'package-broker.status.json'
 $taskReport=Join-Path $taskRoot 'package-broker-task.status.json'
@@ -36,13 +37,16 @@ try {
   $taskActivatedAt=[DateTime]::UtcNow
   $taskExpectedRun=$null
   $taskCapabilityArgument=if($ProtectedTokenFile){' -ProtectedTokenFile "'+$ProtectedTokenFile+'"'}else{' -TokenFile "'+$TokenFile+'"'}
-  $taskArgs='-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "'+$taskBroker+'" -ConnectionFile "'+$ConnectionFile+'"'+$taskCapabilityArgument+' -DeadlineSeconds '+$BrokerDeadlineSeconds
+  if(!(Test-Path -LiteralPath $taskLauncher -PathType Leaf)){throw 'Headless package launcher missing'}
+  # The package entry is a GUI executable. Its child uses CreateNoWindow;
+  # WindowStyle alone cannot prevent Windows Terminal console delegation.
+  $taskArgs='-ConnectionFile "'+$ConnectionFile+'"'+$taskCapabilityArgument+' -DeadlineSeconds '+$BrokerDeadlineSeconds
   if($OwnerLeaseFile){
     if(![IO.Path]::IsPathRooted($OwnerLeaseFile) -or $OwnerLeaseFile.Contains('"')){throw 'Invalid broker lease path'}
     $taskArgs+=' -OwnerLeaseFile "'+$OwnerLeaseFile+'"'
     $taskExpectedRun=(Get-Content -LiteralPath $OwnerLeaseFile -Encoding UTF8 | ConvertFrom-Json).runId
   }
-  Invoke-CommandInDesktopPackage -PackageFamilyName 'OpenAI.Codex_2p2nqsd0c76g0' -AppId App -Command "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Args $taskArgs -PreventBreakaway
+  Invoke-CommandInDesktopPackage -PackageFamilyName 'OpenAI.Codex_2p2nqsd0c76g0' -AppId App -Command $taskLauncher -Args $taskArgs -PreventBreakaway
   $taskDeadline=[DateTime]::UtcNow.AddSeconds($DeadlineSeconds)
   $taskBrokerPid=$null
   for($taskIndex=0;$taskIndex -lt 50;$taskIndex++){

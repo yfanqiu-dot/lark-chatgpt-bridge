@@ -1,6 +1,6 @@
 # Office workflows and daily use
 
-For a configured QIU Bridge v0.10.0 installation whose messaging channel is ready. Verify one group before enabling more topics.
+For a configured QIU Bridge v1.0.0 installation whose messaging channel is ready. Verify one group before enabling more topics.
 
 [Complete user guide](user-guide.en.md) · [Overview](../README.md) · [中文案例](office-workflows.zh.md) · [Installation](../README.desktop.md) · [Operations](desktop-p4-deployment.md)
 

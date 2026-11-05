@@ -1,6 +1,6 @@
 # QIU Bridge user guide
 
-For **v0.10.0, Windows desktop**. Continue real Codex project conversations from Feishu: plan in an owner DM, work in separate groups, then review and deliver from your computer.
+For **v1.0.0, Windows desktop**. Continue real Codex project conversations from Feishu: plan in an owner DM, work in separate groups, then review and deliver from your computer.
 
 [Overview](../README.md) · [中文完整手册](user-guide.zh.md) · [Installation, Chinese](../README.desktop.md) · [Office prompts](office-workflows.en.md) · [Operations, Chinese](desktop-p4-deployment.md)
 
@@ -10,7 +10,7 @@ Use your own Windows x64 computer, Node.js 22 LTS, a signed-in compatible Codex 
 
 The computer must remain awake, connected and logged into Windows. Business tools such as document access, calendars, tasks, GitHub and data analysis need separate configuration and authorization in Codex.
 
-After installing the login shortcut, Windows **user login** attempts startup automatically; you do not need to click `QIU New Bridge` each day. Checks may wait for desktop work to finish. Avoid opening ordinary Codex first or clicking repeatedly. If ordinary Codex is already open, save work and quit normally so startup can continue; the wait has a ten-minute limit. Normally quitting the managed desktop closes the channel. Use the same shortcut to start again when needed.
+**Manual startup is the default; login startup requires separate configuration.** If you choose to install its shortcut, Windows user login attempts startup automatically. Avoid repeated starts. If startup requests a normal Codex exit, save work and quit the entire app within its ten-minute waiting budget; leave it idle after automatic reopening. Normally quitting the managed desktop closes the channel. v1.0.0 adds no resident broker terminal window; necessary background processes remain.
 
 After installation, a reboot or an upgrade, check `/status` and send a fresh simple request to verify receipt. An open window alone does not prove readiness. See the installation guide for service status. Production does not rely on a short test window; finite health observations do not establish weeks of unattended reliability.
 
@@ -76,6 +76,8 @@ For Feishu office work: prepare customer questions from accessible files; paste 
 Text input and final text answers are supported. Phone images/files are not automatically model inputs. Local paths must exist on the bridge computer. Generated spreadsheets, charts and reports remain on the computer; ask for an absolute path or separately authorize an available upload tool. Full desktop activity is not mirrored to Feishu.
 
 ## Rename, archive and delete
+
+v1.0.0 adds evidence-backed discovery retirement. After a maintainer verifies and registers a dissolved group, `/topic list` and local reading indexes hide its link; resuming its old creation request reports retirement. Original bindings, ledgers and native conversations remain. This does not disable or delete the native binding. See [retirement maintenance](topic-retirement.md).
 
 This release supports creation, listing and incomplete-creation recovery. It has **no unified rename, archive, disable, unbind or delete commands**. `/topic rename`, `/topic archive` and `/topic delete` are not implemented.
 

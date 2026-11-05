@@ -72,7 +72,7 @@ export class TopicRouter {
         await this.replies.send(message.chatId, `直接发送文字可继续本对话。\n新建专项话题：/topic new <项目> <名称>\n查看话题：/topic list\n项目：${this.config.projects.map(p=>p.key).join('、')}\n/status 查看本对话状态；/result 取回本对话结果。`,message.messageId,message.replyInThread);return;
       }
       if (/^\/topic\s+list\s*$/i.test(message.content.trim())) {
-        const rows=this.registry.all().filter(r=>r.stage==='active'&&topicChatEnabled(this.config,r.chatId!));
+        const rows=(await this.registry.visible()).filter(r=>topicChatEnabled(this.config,r.chatId!));
         await this.replies.send(message.chatId,rows.length?rows.map(r=>`- ${r.title}（${r.projectKey}）：[进入话题群](https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(r.chatId!)})`).join('\n'):'暂无已建立的话题。用 /topic new <项目> <名称> 新建。',message.messageId,message.replyInThread);return;
       }
       let create: ReturnType<typeof parseCreateTopic>;

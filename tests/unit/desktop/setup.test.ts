@@ -12,7 +12,7 @@ beforeEach(async()=>{
   for(const p of [app,join(root,'bin'),join(root,'dist')])await mkdir(p,{recursive:true});
   input={appId:'cli_test',chatId:'oc_group',ownerOpenId:'ou_owner',projectId:'native-project',projectRoot:dir,threadId:'native-thread',
     codexBinary:join(dir,'codex.exe'),desktopExe:join(app,'ChatGPT.exe'),desktopVersion:version};
-  for(const p of [input.codexBinary!,input.desktopExe!,join(root,'bin/lark-channel-bridge.mjs'),join(root,'dist/desktop-runtime-supervisor.js')])await writeFile(p,'fixture','utf8');
+  for(const p of [input.codexBinary!,input.desktopExe!,join(root,'bin/lark-channel-bridge.mjs'),join(root,'bin/desktop-package-launcher.exe'),join(root,'dist/desktop-runtime-supervisor.js')])await writeFile(p,'fixture','utf8');
 });
 afterEach(async()=>{await rm(dir,{recursive:true,force:true});});
 it('prepares a fresh single-group installation accepted by the deployment verifier and ledger reader',async()=>{
@@ -21,7 +21,13 @@ it('prepares a fresh single-group installation accepted by the deployment verifi
   await prepareDeployment(spec,join(dir,'stage'));const deployed=await verifyDeployment(join(dir,'stage'));
   expect(deployed.topics.enabledChatIds).toEqual(['oc_group']);expect(deployed.topics.allowTopicCreation).toBe(false);
   expect(deployed.snapshot.spec.legacy.entryPoint).toBe(join(root,'bin/lark-channel-bridge.mjs'));
+  expect(deployed.snapshot.files.some(row=>row.path===join(root,'bin/desktop-package-launcher.exe'))).toBe(true);
   const ledger=new DesktopLedger(join(out,'existing-ledger.json'),deployed.ledgers[0]!.binding);await ledger.load();expect(ledger.all()).toEqual([]);
+});
+it.skipIf(process.platform!=='win32')('rejects a Windows package without the GUI launcher before creating installation state',async()=>{
+  const out=join(dir,'install');await rm(join(root,'bin/desktop-package-launcher.exe'));
+  await expect(prepareNewDesktopSetup(input,out,root,'a'.repeat(40),['list_projects'])).rejects.toThrow('headless package launcher');
+  await expect(stat(out)).rejects.toThrow();
 });
 it('preserves an existing installation byte for byte and never resets a pending message',async()=>{
   const out=join(dir,'install');await mkdir(out);const path=join(out,'existing-ledger.json');await writeFile(path,'pending-message-evidence','utf8');
