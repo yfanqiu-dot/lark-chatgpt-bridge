@@ -112,6 +112,25 @@ export class TopicRegistry {
     if (!readOnly) await this.save();
   }
   all(): TopicRecord[] { return structuredClone(this.rows); }
+  /** Retirement affects discovery only; original bindings and ledgers remain authoritative. */
+  async visible(): Promise<TopicRecord[]> {
+    let saved: any;
+    try { saved = JSON.parse(await readFile(`${this.path}.retired.json`, 'utf8')); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return this.all().filter(row => row.stage === 'active'); throw error; }
+    if (saved?.version !== 1 || !Array.isArray(saved.topics)) throw new Error('Invalid topic retirement journal');
+    const retired = new Set<string>();
+    for (const entry of saved.topics) {
+      const row = this.rows.find(row => row.requestId === entry?.requestId);
+      if (!row || row.stage !== 'active' || !row.chatId || !row.threadId || entry.chatId !== row.chatId || entry.threadId !== row.threadId
+        || retired.has(row.requestId) || typeof entry.retiredAt !== 'string' || !Number.isFinite(Date.parse(entry.retiredAt))
+        || typeof entry.reason !== 'string' || !entry.reason.trim() || typeof entry.evidenceFile !== 'string' || !isAbsolute(entry.evidenceFile)) throw new Error('Invalid topic retirement binding or evidence');
+      retired.add(row.requestId);
+    }
+    return this.all().filter(row => row.stage === 'active' && !retired.has(row.requestId));
+  }
+  async assertVisible(row: TopicRecord): Promise<void> {
+    if (!(await this.visible()).some(visible => visible.requestId === row.requestId)) throw new Error('该话题已退役，旧群入口不再可用；请显式新建业务话题。');
+  }
   byRequest(id: string): TopicRecord | undefined { return this.all().find(r => r.requestId === id); }
   byChat(id: string): TopicRecord | undefined { return this.all().find(r => r.chatId === id && r.stage === 'active'); }
   async add(row: TopicRecord): Promise<TopicRecord> {

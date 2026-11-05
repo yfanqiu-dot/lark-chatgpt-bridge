@@ -1,61 +1,111 @@
-# QIU Bridge · Continue your desktop AI work from Feishu
+# QIU Bridge v1.0
 
-**Use an owner-only Feishu DM to plan work and launch topics, then mention the bot in each topic group to execute. Continue the same real Codex project conversations on your computer.**
+**Start work in Feishu. Execute on your Windows computer. Continue reviewing in the same real Codex project conversation.**
 
-For an individual who already uses Codex: draft reports while away, organize meeting notes, and follow separate workstreams without repeatedly explaining the background. Work runs on your own Windows computer, which must stay on and connected.
+![Feishu, QIU Bridge and real Codex conversations; an illustrative workflow](docs/images/overview.png)
 
-[中文介绍](README.zh.md) · [Download v0.10.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) · **[Complete user guide and tips](docs/user-guide.en.md)** · [Installation](README.desktop.md) · [Office examples](docs/office-workflows.en.md)
+[中文介绍](README.zh.md) · [Download v1.0.0](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v1.0.0) · [Installation](README.desktop.md) · [Full user guide](docs/user-guide.en.md) · [Office examples](docs/office-workflows.en.md)
 
-## Ways to use it
+For an individual who already uses Codex on Windows: plan work from an owner-only Feishu DM, follow each workstream in its own group, append instructions, handle supported approvals and retrieve results. Your computer does the work and must remain on, online and signed in.
 
-| Situation | Sample request |
+## What it helps with
+
+| Situation | Workflow |
 |---|---|
-| Weekly report | “Draft completed work, risks and next steps from this week's project notes. Mark missing information.” |
-| Meeting actions | “Turn the notes pasted below into tasks, owners and due dates. Mark anything unstated as unconfirmed.” |
-| Customer briefing | “Use the project files to summarize confirmed needs, missing information and five questions for the meeting.” |
-| Data summary | “If you can read sales.csv, total sales by region, check missing values and explain the calculation. Preserve the source file.” |
-| Separate workstreams | With full mode enabled, send `/topic new main Weekly report` in DM control or the entry group to create a conversation and its private Feishu group. |
+| You are away, but the materials are on your computer | Reference accessible project files and ask the local Codex conversation to process them |
+| Reports, proposals and data work get mixed together | Create one topic group and native conversation per workstream |
+| You keep explaining the background again | Continue the same conversation in Feishu and on the desktop |
+| Progress or delivery is unclear | Check `/status`, retrieve a saved `/result`, or reconcile the original request |
+| Dissolved test groups clutter discovery | A maintainer registers evidence-backed retirement to hide their links while preserving history |
 
-These examples need materials accessible on the bridge computer. Data analysis needs a suitable tool. Feishu documents, calendars, tasks and Base operations require separately configured Codex tools and authorization; the bridge does not grant those capabilities. See [complete prompts and workflows](docs/office-workflows.en.md).
+The bridge connects messages and conversations. Feishu documents, calendars, tasks, Base, GitHub and other business operations require separately configured Codex tools and authorization.
 
-## Daily controls
+## One control channel, several workstreams
 
-With the optional [DM control channel](README.topics.md#单聊主控) configured, send text without a mention. Use `/topic new main Customer proposal` to create a separate Codex conversation and private group, then follow the returned group link. `/topic list` finds existing topics and `/help` shows configured project keys. The DM, entry group and topic groups keep separate conversation histories.
+![Owner DM and topic groups connected to their own Codex conversations](docs/images/topics.png)
 
-Mention the bot in a bound group and state the material, goal and constraints. Follow up there, then review source materials and finish delivery in the desktop app. The bridge primarily returns final text results and supported approval notifications.
+- **Optional owner DM:** send text without a mention; create or find topics.
+- **Entry group:** mention the bot to work or manage topics.
+- **Topic group:** follow the same matter and control its own task.
+- **Codex desktop:** return to your project, inspect materials and finish delivery.
+
+The DM is not a global controller. Control each task from its own group. Conversations in one project may access the same files; separate conversations do not imply file isolation.
+
+## Install and verify one group first
+
+![Prerequisites, bindings, verified startup and daily work](docs/images/installation.png)
+
+Requirements: **Windows x64, Node.js 22 LTS, a compatible signed-in Codex desktop and your own Feishu bot.** Initial setup requires command-line experience.
+
+1. Download the [Windows ZIP and SHA256SUMS.txt](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v1.0.0), verify the hash and extract to a permanent directory.
+2. Follow [installation](README.desktop.md) to store credentials and verify the tool catalog, project and existing native conversation.
+3. Prepare a sealed deployment and manual service entry; verify one group's message round trip.
+4. Optionally enable [full mode and owner DM](docs/desktop-p4-deployment.md).
+
+The ZIP contains built code, the GUI launcher and production dependencies. It excludes Node.js, Codex, a bot and personal configuration. The upstream npm package does not install this desktop distribution.
+
+**Manual startup is the default.** Login startup requires separate configuration. If cold startup waits for Codex to exit, save your work and normally quit the entire app. After it reopens, leave it idle for verification. Check state, connection and a fresh heartbeat; a popup is not proof of readiness. Normally quitting the managed desktop closes its messaging channel.
+
+## Try a weekly report
+
+In the configured bot DM, send `/help` to find project keys. Replace the example `main` with your own key:
+
+```text
+/topic new main Weekly report
+```
+
+Open the returned group link, mention the bot and send:
+
+```text
+Draft a weekly report from this project's work records.
+Include completed work, risks and next steps, with source files.
+Mark missing information. Return a draft; do not send it elsewhere or change source records.
+```
+
+Follow up in that group; use `/topic list` in the DM to find it again. Check status before repeating a slow creation request. Identical titles do not deduplicate new messages.
 
 | Command | Purpose |
 |---|---|
-| `/status` | Inspect running, queued, uncertain and approval states |
-| `/steer Additional instructions` | Append instructions to an eligible active turn |
-| `/stop` | Stop the current conversation's active task; queued requests remain and external commands may continue |
-| `/result [messageId]` | Retrieve a saved answer without rerunning the task |
-| `/reconcile` | Check the original uncertain request |
+| `/help` | Control-channel help and configured project keys |
+| `/topic list` | Discover topics, excluding registered retirements |
+| `/topic new <project> <title>` | Create a native conversation and private group |
+| `/status` | Inspect this conversation's execution, queue and approvals |
+| `/steer Instructions` | Append requirements to an eligible active task |
+| `/stop` | Request interruption of this conversation's task; queued requests remain |
+| `/result [originalMessageId]` | Retrieve a saved answer without running it again |
+| `/reconcile` | Check the original uncertain request without resubmitting it |
 
-Topic creation is available in its enabled entry group or explicit owner DM. Replace `main` with your configured project key. A topic is a Codex conversation and its group, not a Feishu reply thread. Check status before repeating a delayed request.
+Group commands also require a mention. See the [full guide](docs/user-guide.en.md) for approvals, `/topic resume`, files, queues and recovery.
 
-## Get started
+## What's new in v1.0.0
 
-1. Prepare Windows x64, Node.js 22 LTS, a signed-in Codex desktop app and your own Feishu bot.
-2. [Download the bundle](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases/tag/v0.10.0) and follow the [installation guide](README.desktop.md), currently in Chinese. Configure your project and real conversation, then verify one group. Initial setup requires some command-line experience.
-3. Install the login entry. Enable and verify full mode through [operations](docs/desktop-p4-deployment.md) if you need more topics or projects.
+- A GUI-subsystem package launcher starts the broker without allocating a console, preserving package identity and ownership checks.
+- Native IPv4/IPv6 TCP ownership checks remove the slow lookup behind `shared_observation_stale`, retaining the five-second proof window.
+- Evidence-backed topic retirement hides old discovery and index links while preserving bindings and ledgers. Old requests do not recreate retired groups.
+- Illustrated introduction, installation and use guides ship with the offline-readable ZIP.
 
-Once the login entry is installed, Windows user login attempts startup automatically; no daily shortcut click is needed. For manual re-entry, use `QIU New Bridge` and wait for readiness checks. Normally quitting the managed desktop also closes its messaging channel. This desktop version is distributed through GitHub Releases; installing the upstream `lark-channel-bridge` npm package does not install it.
+[Release notes](docs/releases/v1.0.0.md) · [Validation scope](docs/releases/v1.0.0-validation.md)
 
-See the [user guide](docs/user-guide.en.md) for all commands, approvals, queues, interruptions, files and troubleshooting. Unified topic rename/archive/disable/unbind/delete commands are not implemented. Deleting a bound conversation may block later startup for the entire Bridge; read [topic management](docs/user-guide.en.md#rename-archive-and-delete) first.
+## Supported scope
 
-## Release and boundaries
+Windows x64, one configured owner, registered groups and an explicitly configured DM, with text input and final text results. Attachments are not automatically model input; local files are not automatically uploaded. Multi-user hosting, full desktop mirroring and guaranteed unattended operation are outside this release.
 
-**v0.10.0** adds an explicit owner-only DM control channel for direct conversation, topic creation and topic discovery. It preserves login startup and existing task controls. See [release notes](docs/releases/v0.10.0.md).
+Retirement hides discovery entries; it does not delete history or disable native bindings. Unified `/topic delete`, `/topic rename` and `/topic archive` commands do not exist. Do not delete bound conversations or erase ledgers to recover service. Each installation, project and Codex update needs verification. See [compatibility and limits](docs/compatibility.md).
 
-Desktop support covers Windows x64, one configured owner and text interaction in registered groups and an explicitly bound DM. DMs remain disabled unless configured, and other users cannot access the control channel. Images, attachments, full desktop-message mirroring, multi-user hosting and guaranteed unattended operation are outside this release's scope. Codex tools and permissions still apply. A local Windows sandbox `setup refresh had errors` issue remains unresolved; approved execution was verified. Each installation and Codex update needs its own checks. See [compatibility and limits](docs/compatibility.md).
+Private configuration, credentials, ledgers and raw runtime evidence are excluded from source and release packages. Requests and results still pass through Feishu and configured Codex services.
 
-Personal configuration, ledgers and credentials are excluded from source and release bundles. Requests and results still pass through Feishu and your configured Codex services; check that the tools, platforms and authorization are appropriate for the business data involved.
+## Build and attribution
 
-## Development and attribution
+```powershell
+git clone https://github.com/yfanqiu-dot/lark-chatgpt-bridge.git
+cd lark-chatgpt-bridge
+git checkout v1.0.0
+npx --yes pnpm@10.33.0 install --frozen-lockfile
+npx --yes pnpm@10.33.0 build
+```
 
-[Design and acceptance summary](docs/development.md) · [Independent CLI backend](docs/cli-backend.en.md) · [Security](SECURITY.md) · [Issues](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/issues)
+Checks: `pnpm test`, `pnpm typecheck`, `pnpm build`. Windows source builds compile the GUI launcher with the system .NET Framework C# compiler; downloaded bundles include it already.
 
-For a source build, check out `v0.10.0`, run `npx --yes pnpm@10.33.0 install --frozen-lockfile` and `npx --yes pnpm@10.33.0 build`. Development checks: `pnpm test`, `pnpm typecheck`, `pnpm build`.
+[Development](docs/development.md) · [Security](SECURITY.md) · [Issues](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/issues) · [Independent CLI backend](docs/cli-backend.en.md)
 
-Based on [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge), under the [MIT license](LICENSE). Independent community integration, not an OpenAI or Feishu product. Remove credentials and private conversation content from issue reports.
+Based on [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge), under the [MIT license](LICENSE). An independent community integration, not an OpenAI or Feishu product.

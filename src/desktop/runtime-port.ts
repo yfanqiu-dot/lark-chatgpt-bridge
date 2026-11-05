@@ -447,7 +447,7 @@ export async function createWindowsRuntimePort(stage:string,directory:string,roo
   if(owner.pid!==process.pid || owner.executable.toLowerCase()!==process.execPath.toLowerCase())throw new Error('Runtime worker identity mismatch');
   const {host,topics,snapshot}=input;
   const uac=taskUac?new TaskUacController(stage,directory,root,owner,taskUac.planId,taskUac.deadline,control,undefined,taskUac.forwardDeadline):undefined;
-  for(const relative of ['bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker-task.ps1','bin/desktop-package-broker.ps1','dist/desktop-runtime-supervisor.js','bin/lark-chatgpt-runtime-supervisor.mjs']){
+  for(const relative of ['bin/lark-chatgpt-host.mjs','bin/lark-chatgpt-topics.mjs','bin/desktop-package-broker-task.ps1','bin/desktop-package-broker.ps1','bin/desktop-package-launcher.exe','dist/desktop-runtime-supervisor.js','bin/lark-chatgpt-runtime-supervisor.mjs']){
     if(!snapshot.files.some(f=>f.path===resolve(root,relative)))throw new Error('Runtime program missing from pinned files');
   }
   const children=new Map<string,ChildProcess>();

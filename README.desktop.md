@@ -1,20 +1,25 @@
 # Windows 桌面版安装配置
 
-适用于 QIU Bridge v0.10.0。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
+适用于 QIU Bridge v1.0.0。首次配置面向具备命令行经验的用户，需要确认本机版本、飞书权限和原生对话归属。不要复制他人的配置、凭据或账本。
+
+![四步安装与上手示意](docs/images/installation.png)
+
+默认手动启动，不自动写入登录启动项。v1.0.0 的运行包包含已编译的无窗口启动器；安装后不会额外驻留 Bridge 终端窗口，任务管理器中的必要后台进程仍保留。
 
 ## 1. 准备环境
 
 安装过程会重新打开受管 Codex。自动打开后还需要完成后台检查，先保持桌面空闲，不要立即在 Codex 或飞书发任务；检查通过才开始使用。详见[启动与退出](docs/desktop-p4-deployment.md#启动与退出)。
 
 - Windows x64、Windows PowerShell 5.1、Node.js 22 LTS。
+- Windows 系统 .NET Framework 4.x 运行环境；Windows 源码构建还使用系统 C# 编译器，下载 ZIP 无需自行编译。
 - 已安装并登录的 Codex 桌面，包含 `codex-app-tools` 插件及 `Invoke-CommandInDesktopPackage` 能力。已验收版本见[兼容表](docs/compatibility.md)。
 - 自己的飞书应用机器人，启用长连接事件订阅，订阅 `im.message.receive_v1`、交互卡片回调 `card.action.trigger`，具备读取群内 @ 消息、以机器人发送消息和卡片的权限。将机器人加入测试群，并完成应用权限发布。首版现场验证仅覆盖飞书国内租户。
 - 一条已存在的桌面项目对话，以及群 `chat_id`、本人在此应用下的 `open_id`。
 - 电脑开机联网，无其他消费者同时接收同一飞书应用消息。旧 CLI 后端应先停止并停用，保留配置和记录。
 
-下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v0.10.0`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
+下载 [Windows 运行包](https://github.com/yfanqiu-dot/lark-chatgpt-bridge/releases)，解压到固定目录，如 `D:\QIUBridge\v1.0.0`。以下命令在此目录执行。包内包含构建产物和生产依赖，不包含 Node.js、Codex、机器人或个人数据。也可按[首页](README.zh.md)从源码构建。
 
-下载同一 Release 的 `SHA256SUMS.txt`，解压前用 `Get-FileHash -Algorithm SHA256 .\qiu-bridge-v0.10.0-windows-x64.zip` 核对 ZIP 哈希与该文件一致。安装包中的 `release.json` 标明源码版本，`FILES.sha256` 记录文件清单；校验失败时重新下载核实，不修改校验值绕过检查。
+下载同一 Release 的 `SHA256SUMS.txt`，解压前用 `Get-FileHash -Algorithm SHA256 .\qiu-bridge-v1.0.0-windows-x64.zip` 核对 ZIP 哈希与该文件一致。安装包中的 `release.json` 标明源码版本，`FILES.sha256` 记录文件清单；校验失败时重新下载核实，不修改校验值绕过检查。
 
 ## 2. 保存机器人凭据
 
@@ -91,9 +96,11 @@ node bin/lark-chatgpt-runtime-supervisor.mjs --status $run.planFile $run.planSha
 
 监督状态进入 `running` 后，在群里 @ 机器人发一条全新简单请求，核对唯一回执、项目和对话归属，并在桌面接续。再验证正常退出保持关闭和同入口重入。别人的验收不能替代自己的安装验证。
 
-## 7. 登录入口
+同时确认该运行的 `listener.ready.json` 与监督 `runId`、监听器 PID 匹配，状态为 `ready / connected` 且心跳持续更新；没有健康失败或终态记录。不要仅凭窗口已打开、快捷方式已执行或弹窗判断接通。无窗口启动器不等于服务已连接，真实收发仍需单独验证。
 
-首次验收通过后再设置登录启动。工具默认同时创建 Startup 和桌面快捷方式：
+## 7. 登录入口（可选）
+
+不需要自动启动时，继续使用第六步的手动命令即可。只有明确需要登录自启，并完成首次验收后，才运行以下可选命令。它会同时创建 Startup 和桌面快捷方式：
 
 ```powershell
 node bin/lark-chatgpt-runtime-supervisor.mjs --service-shortcuts-check D:\QIUBridge\service\service.json MANIFEST_SHA256

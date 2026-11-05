@@ -30,7 +30,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test
-        run: pnpm test
+        run: pnpm test --maxWorkers=2 --minWorkers=1
 
       - name: Typecheck
         run: pnpm typecheck

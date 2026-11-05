@@ -107,6 +107,48 @@ public sealed class BridgePinnedProcessScan : IDisposable {
     stop.Set();worker.Join();lock(gate){foreach(var list in pins.Values)foreach(var pin in list)pin.Dispose();pins.Clear();}stop.Dispose();
   }
 }
+public sealed class BridgeTcpListener {
+  public string LocalAddress { get; set; }
+  public int LocalPort { get; set; }
+  public uint OwningProcess { get; set; }
+}
+public static class BridgeTcpListeners {
+  // IP Helper's owner-PID listener tables include wildcard and IPv6 rows.
+  // Read both families on every call; never substitute a cached port owner.
+  [DllImport("iphlpapi.dll",ExactSpelling=true)] static extern uint GetExtendedTcpTable(IntPtr table,ref uint size,[MarshalAs(UnmanagedType.Bool)]bool order,uint family,uint tableClass,uint reserved);
+  static void Read(uint family,System.Collections.Generic.List<BridgeTcpListener> result){
+    uint size=0;var code=GetExtendedTcpTable(IntPtr.Zero,ref size,false,family,3,0);
+    if(code!=0 && code!=122)throw new Win32Exception((int)code);
+    for(int attempt=0;attempt<3;attempt++){
+      if(size<4 || size>16*1024*1024)throw new InvalidOperationException("Invalid TCP owner table size");
+      int capacity=checked((int)size);var buffer=Marshal.AllocHGlobal(capacity);
+      try{
+        code=GetExtendedTcpTable(buffer,ref size,false,family,3,0);
+        if(code==122)continue;
+        if(code!=0)throw new Win32Exception((int)code);
+        if(size<4 || size>capacity)throw new InvalidOperationException("Incomplete TCP owner table");
+        int count=Marshal.ReadInt32(buffer),stride=family==2?24:56;
+        if(count<0 || count>((int)size-4)/stride)throw new InvalidOperationException("Invalid TCP owner table count");
+        for(int index=0;index<count;index++){
+          var row=IntPtr.Add(buffer,checked(4+index*stride));
+          int state=Marshal.ReadInt32(row,family==2?0:48);
+          if(state!=2)throw new InvalidOperationException("TCP listener table contains a non-listening row");
+          var bytes=new byte[family==2?4:16];Marshal.Copy(IntPtr.Add(row,family==2?4:0),bytes,0,bytes.Length);
+          var address=family==2?new System.Net.IPAddress(bytes):new System.Net.IPAddress(bytes,(uint)System.Net.IPAddress.NetworkToHostOrder(Marshal.ReadInt32(row,16)));
+          int offset=family==2?8:20;
+          int port=(Marshal.ReadByte(row,offset)<<8)|Marshal.ReadByte(row,offset+1);
+          if(port==0)throw new InvalidOperationException("TCP listener has no local port");
+          result.Add(new BridgeTcpListener{LocalAddress=address.ToString(),LocalPort=port,OwningProcess=unchecked((uint)Marshal.ReadInt32(row,family==2?20:52))});
+        }
+        return;
+      }finally{Marshal.FreeHGlobal(buffer);}
+    }
+    throw new InvalidOperationException("TCP owner table changed repeatedly");
+  }
+  public static BridgeTcpListener[] Read(){
+    var rows=new System.Collections.Generic.List<BridgeTcpListener>();Read(2,rows);Read(23,rows);return rows.ToArray();
+  }
+}
 '@}
   if($null -ne $process){return [BridgePinnedProcessExit]::Open([int]$process.ProcessId,$process.CreationDate)}
 }
@@ -421,7 +463,7 @@ if($Action -in @('Snapshot','ColdSnapshot','SharedSnapshot')){
     $taskColdResult=@{verifiedAt=$taskObservedAt;complete=$true;desktopRelated=@(Get-ColdRelated $taskProcesses);inventory=$taskResult}
     if($Action -eq 'SharedSnapshot'){
       $taskOwners=@()
-      $taskListening=@(Get-NetTCPConnection -State Listen -ErrorAction Stop)
+      $taskListening=@([BridgeTcpListeners]::Read())
       foreach($taskEndpoint in @($taskConfig.endpoint,$taskConfig.backendEndpoint)){
         $taskUri=[Uri]$taskEndpoint
         if($taskUri.Scheme -ne 'ws' -or $taskUri.Host -notin @('127.0.0.1','[::1]','::1') -or $taskUri.Port -le 0 -or $taskUri.UserInfo -or $taskUri.Query -or $taskUri.Fragment -or $taskUri.AbsolutePath -ne '/'){throw 'Invalid shared endpoint'}

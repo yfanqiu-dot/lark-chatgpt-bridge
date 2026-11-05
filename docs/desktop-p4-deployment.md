@@ -1,6 +1,6 @@
 # QIU Bridge 日常使用与运维
 
-适用于 v0.10.0 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
+适用于 v1.0.0 的 Windows `new-only` / `stop-with-desktop` 部署。首次安装见[安装指南](../README.desktop.md)。这里描述正式会话模式，不沿用开发验收的短窗口或旧操作时间。
 
 ## 完整功能部署 v0.9.0
 
@@ -48,7 +48,11 @@
 
 ## 启动与退出
 
-通过 Windows Startup 中唯一的 `QIU New Bridge` 启动。登录时由 Bridge 负责打开受管 Codex；请关闭 Codex 自己的登录启动，避免顺序冲突。不要同时使用旧 CLI 消费者。
+默认使用手动服务入口。只有明确配置了登录自启，才通过 Windows Startup 中唯一的 `QIU New Bridge` 自动启动；此时应关闭 Codex 自己的登录启动，避免顺序冲突。不要同时使用旧 CLI 消费者。
+
+v1.0.0 使用已封存的 GUI 子系统启动器启动原 PowerShell broker，通过 `CreateNoWindow` 避免额外终端窗口；保留包身份和进程归属验证。后台 PowerShell 或不可见控制台辅助进程出现在任务管理器中是允许的，不用手动结束它们。源码构建须生成 `bin/desktop-package-launcher.exe`，该文件与其他运行程序一同封存，不能从安装目录删除。
+
+无窗口启动不改变接通判据：按当前服务 `active-run.json` 跟踪本次 `planFile / runId`，检查 `running`、匹配的 `ready / connected`、新鲜心跳及独立核验。不能依赖弹窗或旧运行的成功结果。旧话题的发现入口清理见[退役维护说明](topic-retirement.md)。
 
 当前普通 Codex 仍在时，Bridge 会等你正常退出，最长十分钟；不会强关正在使用的窗口。保存工作、确认任务与审批已结束后退出，等待它自动打开。正常关闭受管桌面后，消息渠道也保持关闭；下次从同一入口启动，不必重配群或对话。
 

@@ -44,7 +44,7 @@ export class TopicProvisioner {
     const existing = this.registry.byRequest(requestId);
     if (existing && (existing.projectKey !== projectKey || existing.title !== title)) throw new Error('同一消息的创建参数已改变');
     if (existing && (existing.projectId !== project.projectId || resolve(existing.projectRoot) !== resolve(project.projectRoot))) throw new Error('已保存的话题项目绑定与配置不符');
-    if (existing?.stage === 'active') return existing;
+    if (existing?.stage === 'active') { await this.registry.assertVisible(existing); return existing; }
     await this.resources.verifyProject(project);
     let row = existing;
     if (!row) {

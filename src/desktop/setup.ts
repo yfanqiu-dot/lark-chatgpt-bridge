@@ -21,9 +21,10 @@ export async function prepareNewDesktopSetup(input: Record<string, unknown>, dir
     existing:{chatId:i.chatId,projectKey:'main',threadId:i.threadId,stateFile:join(dir,'existing-ledger.json')}, enabledChatIds:[i.chatId], allowTopicCreation:false});
   const artifactFiles:string[] = [];
   for (const folder of ['bin','dist']) for (const item of await readdir(join(root,folder),{withFileTypes:true})) {
-    if (item.isFile() && /\.(?:mjs|ps1|js)$/.test(item.name)) artifactFiles.push(join(root,folder,item.name));
+    if (item.isFile() && /\.(?:mjs|ps1|js|exe)$/.test(item.name)) artifactFiles.push(join(root,folder,item.name));
   }
   if (!artifactFiles.includes(join(root,'dist','desktop-runtime-supervisor.js'))) throw new Error('Build or extract the complete release before setup');
+  if (process.platform === 'win32' && !artifactFiles.includes(join(root,'bin','desktop-package-launcher.exe'))) throw new Error('Build or extract the headless package launcher before setup');
   // All validation precedes the exclusive directory creation. Existing state,
   // including a partially prepared installation, is never overwritten.
   await mkdir(dir,{mode:0o700});
